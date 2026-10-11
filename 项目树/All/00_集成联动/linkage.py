@@ -67,8 +67,12 @@ class Project(object):
         cmd = [self.python, self.script, "--op", op,
                "--args", json.dumps(args or {}, ensure_ascii=False)]
         try:
-            p = subprocess.run(cmd, capture_output=True, timeout=self.timeout,
-                               env=env, cwd=self.dir)
+            run_kwargs = {"capture_output": True, "timeout": self.timeout,
+                          "env": env, "cwd": self.dir}
+            if sys.platform == "win32":
+                # 禁止在 02/03 GUI 调用时弹出黑色命令行窗口
+                run_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            p = subprocess.run(cmd, **run_kwargs)
         except subprocess.TimeoutExpired:
             raise LinkageError("[%s] 调用 %s 超时（%ds）" % (self.key, op, self.timeout))
         except OSError as e:
