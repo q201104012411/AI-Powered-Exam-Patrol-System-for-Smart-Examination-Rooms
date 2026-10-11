@@ -130,6 +130,46 @@ def _flatten_for_cli(messages):
     return "\n\n".join(parts)
 
 
+def _api_generate(model, messages, timeout, think=False):
+    """
+    调一次 /api/chat。返回 (ok, reply, err)。
+    think=False：关闭 Qwen3 等模型的思考模式——本地小模型一想就是几分钟，
+    界面上表现为"AI 巡视分析中…"却迟迟没输出（真实反馈的问题）。
+    """
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "think": think,                     # 不支持的旧版本会在调用方 400 重试时去掉
+        "options": {"num_predict": 384},    # 限制回复长度：考场助手不需要长篇大论
+    }
+    req = urllib.request.Request(
+        API_CHAT_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", "replace")
+    try:
+        data = json.loads(raw)
+        return True, ((data.get("message") or {}).get("content") or ""), ""
+    except json.JSONDecodeError:
+        # 老版本 ollama 忽略 stream:false，返回的是逐行 JSON（NDJSON）：
+        # 把所有行的 message.content 拼起来就是完整回复
+        parts = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+                parts.append((d.get("message") or {}).get("content") or "")
+            except Exception:
+                pass
+        if parts:
+            return True, "".join(parts), ""
+        return False, "", "无法解析 ollama 的返回"
+
+
 def ollama_chat(model, messages, timeout=CHAT_TIMEOUT):
     """
     调 ollama 完成一轮对话。返回 (ok, reply, err, transport)。
@@ -140,32 +180,30 @@ def ollama_chat(model, messages, timeout=CHAT_TIMEOUT):
     # 路径一：HTTP API（多轮原生支持，速度更快）
     if _api_available():
         try:
-            payload = json.dumps({
-                "model": model,
-                "messages": messages,
-                "stream": False,
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                API_CHAT_URL, data=payload,
-                headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8", "replace"))
-            reply = (data.get("message") or {}).get("content") or ""
-            if reply.strip():
-                return True, reply, "", "api"
-            return False, "", "ollama 返回了空回复（模型可能未下载完成）", "api"
+            ok, reply, err = _api_generate(model, messages, timeout)
         except urllib.error.HTTPError as e:
-            # 404 = 模型不存在：提示先 pull，不再回退 CLI 重复报错
-            if e.code == 404:
+            if e.code == 400:
+                # 旧版 ollama 不认识 think 字段：去掉后重试一次
+                try:
+                    ok, reply, err = _api_generate_no_think(model, messages, timeout)
+                except Exception as e2:
+                    return False, "", "ollama API 调用失败：%s" % e2, "api"
+            elif e.code == 404:
                 return False, "", ("模型 %s 未安装。请先在命令控制台执行：\n"
                                    "ollama pull %s\n（或直接用本功能对话，ollama 会自动下载）"
                                    % (model, model)), "api"
-            return False, "", "ollama API 错误：HTTP %s" % e.code, "api"
+            else:
+                return False, "", "ollama API 错误：HTTP %s" % e.code, "api"
         except Exception as e:
             return False, "", "ollama API 调用失败：%s" % e, "api"
+        if ok and reply.strip():
+            return True, reply, "", "api"
+        return False, "", (err or "ollama 返回了空回复（模型可能未下载完成）"), "api"
 
     # 路径二：`ollama run <模型> <提示词>`（shell=False，与 cmd_console 白名单同路径）
-    res = cmd_console.run_ollama(["ollama", "run", model, _flatten_for_cli(messages)],
+    # 结尾附 /no_think：Qwen3 的关闭思考指令，其它模型会把它当普通文本，无害
+    prompt = _flatten_for_cli(messages) + "\n\n/no_think"
+    res = cmd_console.run_ollama(["ollama", "run", model, prompt],
                                  timeout=timeout)
     if res["ok"] and (res["stdout"] or "").strip():
         return True, res["stdout"], "", "cli"
@@ -175,6 +213,31 @@ def ollama_chat(model, messages, timeout=CHAT_TIMEOUT):
     elif not err:
         err = "ollama 不可用或未安装模型 %s" % model
     return False, "", err, "cli"
+
+
+def _api_generate_no_think(model, messages, timeout):
+    """不带 think 字段的重试（兼容旧版 ollama）"""
+    payload = {"model": model, "messages": messages, "stream": False,
+               "options": {"num_predict": 384}}
+    req = urllib.request.Request(
+        API_CHAT_URL, data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", "replace")
+    try:
+        data = json.loads(raw)
+        return True, ((data.get("message") or {}).get("content") or ""), ""
+    except json.JSONDecodeError:
+        parts = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parts.append((json.loads(line).get("message") or {}).get("content") or "")
+            except Exception:
+                pass
+        return (True, "".join(parts), "") if parts else (False, "", "无法解析 ollama 的返回")
 
 
 def _audit_chat(kind, model, text, ok, detail, duration_ms, operator, tier, source,

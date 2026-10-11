@@ -1435,6 +1435,16 @@ class FaceVerifyGUI:
         if mode == "ai":
             self._ai_chat_send(code, tier)
             return
+        # 中文自然语言 → 识别为"和 AI 说话"，而不是系统命令。
+        # 真实反馈：在 cmd 模式输入「你好」得到"不是内部或外部命令"，体验断裂；
+        # 用户的心智模型是"打字 = 问 AI，命令 = 执行"。系统命令几乎不含 CJK 字符，
+        # 含则判为对话，同时自动把类型切到「🤖 AI 对话」让后续输入一路聊下去。
+        if (tier == accounts.CMD_TIER_FULL
+                and any("一" <= ch <= "鿿" for ch in code)):
+            self.console_mode.set(CONSOLE_MODE_LABELS["ai"])
+            self._console_mode_changed()
+            self._ai_chat_send(code, tier)
+            return
 
         self.console_run_btn.config(state="disabled")
         self.console_meta.config(text="执行中…")
@@ -1545,6 +1555,10 @@ class FaceVerifyGUI:
         self.console_run_btn.config(state="disabled")
         self.console_meta.config(text="AI 思考中…（%s）" % model)
         self._ai_append_out("🧑 你：%s" % text)
+        try:                                # 发出去就清空输入框，像正常聊天软件一样
+            self.console_input.delete("1.0", "end")
+        except tk.TclError:
+            pass
         chat = self.ai_chat
 
         def work():
@@ -1693,6 +1707,7 @@ class FaceVerifyGUI:
         operator = (self.user or {}).get("username", "")
         self._ai_busy = True
         self.console_meta.config(text="🔎 AI 巡视分析中…")
+        self._append("🔎 AI 巡视：检测到界面状态变化，正在分析…")
 
         def work():
             try:
