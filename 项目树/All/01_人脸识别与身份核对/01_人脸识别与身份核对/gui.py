@@ -1601,11 +1601,29 @@ class FaceVerifyGUI:
             out.config(state="normal")
             if out.get("1.0", "end").strip() in ("（尚未执行）", "（执行中，请稍候…）"):
                 out.delete("1.0", "end")
-            out.insert("end", text.rstrip() + "\n", tag or ())
+            # 不要传空 tuple 作 tag：部分 tkinter 版本/主题会把它当成无名标签处理异常
+            if tag:
+                out.insert("end", text.rstrip() + "\n", tag)
+            else:
+                out.insert("end", text.rstrip() + "\n")
             out.insert("end", "─" * 38 + "\n", "ai_dim")
             out.see("end")
             out.config(state="disabled")
-        except tk.TclError:
+        except Exception as e:
+            # 兜底：控制台写失败不能吞掉 AI 结果，至少记到操作日志
+            try:
+                self.action_log.log("AI 输出写入失败", "%s | %s" % (e, text[:200]))
+            except Exception:
+                pass
+
+    def _append_to_main_output(self, text):
+        """把 AI 回复也写到主「核验结果」区，确保控制台收起时用户也能看到"""
+        try:
+            box = getattr(self, "output", None)
+            if self._widget_alive(box):
+                box.insert("end", text + "\n")
+                box.see("end")
+        except Exception:
             pass
 
     def _open_ai_chat(self):
@@ -1695,8 +1713,9 @@ class FaceVerifyGUI:
                     return
                 self._ai_busy = False
                 tag = "🤖 AI" if ok else "⚠ AI 调用失败"
-                self._ai_append_out("%s：%s" % (tag, reply),
-                                    tag=("ai_bot" if ok else "ai_err"))
+                line = "%s：%s" % (tag, reply)
+                self._ai_append_out(line, tag=("ai_bot" if ok else "ai_err"))
+                self._append_to_main_output(line)           # 同步到主结果区，确保看得见
                 self.console_meta.config(
                     text=("✅ 已回复" if ok else "❌ 失败") + " ｜ 模型 " + model)
                 self.console_run_btn.config(state="normal")
@@ -1896,15 +1915,14 @@ class FaceVerifyGUI:
                     return
                 self._ai_busy = False
                 if ok:
-                    self._ai_append_out("🔎 AI 巡视（自动分析当前操作）：\n%s" % text,
-                                        tag="ai_watch")
+                    line = "🔎 AI 巡视（自动分析当前操作）：\n%s" % text
+                    self._ai_append_out(line, tag="ai_watch")
                 else:
-                    self._ai_append_out("⚠ AI 巡视失败：%s" % text, tag="ai_err")
-                # 同步写到主结果输出框：巡视是"不盯着控制台也能看到"的提醒，
-                # 只写控制台输出框的话，面板收着时用户根本看不到分析结果
-                tag = "🔎 AI 巡视" if ok else "⚠ AI 巡视失败"
-                for line in ("%s：%s" % (tag, text)).splitlines():
-                    self._append(line)
+                    line = "⚠ AI 巡视失败：%s" % text
+                    self._ai_append_out(line, tag="ai_err")
+                # 同步写到主结果输出框：巡视是"不盯着控制台也能看到"的提醒
+                for l in line.splitlines():
+                    self._append_to_main_output(l)
                 self.console_meta.config(text="")
             try:
                 self.root.after(0, apply)
