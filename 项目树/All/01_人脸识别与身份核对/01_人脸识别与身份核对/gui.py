@@ -1830,12 +1830,14 @@ class FaceVerifyGUI:
         except tk.TclError:
             pass
         chat = self.ai_chat
+        interface = self._ai_interface()
 
         def work():
             try:
                 ok, reply, transport = chat.ask(
                     text, snapshot=snapshot, operator=operator,
-                    tier=tier, source="gui", timeout=to, free_mode=free_mode)
+                    tier=tier, source="gui", timeout=to, free_mode=free_mode,
+                    interface=interface)
             except Exception as e:
                 ok, reply, transport = False, "AI 调用异常：%s" % e, ""
 
@@ -1911,6 +1913,48 @@ class FaceVerifyGUI:
         except (tk.TclError, RuntimeError):
             pass
 
+    # ---------------- AI 提示词跟随当前操作阶段 ----------------
+    AI_INTERFACE_LABELS = {
+        "live": "实时视频核验",
+        "captured": "已采集待核验",
+        "result_pass": "核验通过·证件核对",
+        "result_fail": "核验异常处置",
+        "result_gray": "灰区·人工复验",
+        "audit": "记录与审计",
+        "settings": "终端设置",
+    }
+
+    def _ai_interface(self):
+        """
+        核验端没有页签，界面用"当前操作阶段"判定：
+        采集 -> 待核验 -> 通过/异常/灰区 -> 设置。
+        这样同一个 AI 在不同阶段拿到的提示词不同，回答才贴现场。
+        """
+        v = getattr(self, "_last_verdict", None)
+        if isinstance(v, dict) and v:
+            if v.get("gray_zone"):
+                return "result_gray"
+            if (v.get("result") or "") == "PASS":
+                return "result_pass"
+            return "result_fail"
+        try:
+            if getattr(self, "live_desc", "未采集") not in ("", "未采集", None):
+                return "captured"
+        except Exception:
+            pass
+        try:
+            vs = self.video_stream
+            if vs is not None and vs.running:
+                return "live"
+        except Exception:
+            pass
+        try:
+            if self.console_mode.get() == CONSOLE_MODE_LABELS["cmd"]:
+                return "audit"
+        except Exception:
+            pass
+        return "settings"
+
     def _ai_snapshot(self):
         """
         界面状态快照 —— "AI 可以调取当前我在干什么"的数据来源。
@@ -1923,6 +1967,11 @@ class FaceVerifyGUI:
         except Exception:
             role_text = u.get("role") or "未登录"
         lines.append("操作员：%s（%s）" % (u.get("username", "-"), role_text))
+        try:
+            key = self._ai_interface()
+            lines.append("当前界面：%s" % self.AI_INTERFACE_LABELS.get(key, key))
+        except Exception:
+            pass
 
         def _get(var, default="-"):
             try:
@@ -2062,6 +2111,7 @@ class FaceVerifyGUI:
         import ai_assistant
         model = (self.ai_model_var.get() or "").strip() or ai_assistant.DEFAULT_MODEL
         operator = (self.user or {}).get("username", "")
+        interface = self._ai_interface()
         if self._ai_busy:
             return                                  # 聊天或上一轮巡视还没完，先让路
         self._ai_busy = True
@@ -2074,7 +2124,8 @@ class FaceVerifyGUI:
             try:
                 ok, text, _t = ai_assistant.analyze_activity(
                     snapshot, model=model, operator=operator, tier=tier,
-                    source="gui", timeout=ai_assistant.WATCH_TIMEOUT)
+                    source="gui", timeout=ai_assistant.WATCH_TIMEOUT,
+                    interface=interface)
             except Exception as e:
                 ok, text = False, "AI 巡视异常：%s" % e
 
@@ -2466,6 +2517,7 @@ class FaceVerifyGUI:
             self.root.after(0, self._show_error, str(e))
 
     def _show_result(self, rec):
+        self._last_verdict = rec          # 供 AI 提示词判定当前阶段
         self.verify_btn.config(state="normal")
         self._append("-" * 64)
         self._append("结果：%s（%s）" % (rec["result"], rec.get("reason_code", "")))

@@ -65,6 +65,59 @@ WATCH_PROMPT = (
     "③ 下一步建议。"
 )
 
+# ---------------- 按界面/阶段区分的提示词 ----------------
+# 核验端在不同操作阶段需要完全不同的回答口径：采集时讲拍摄规范，
+# 核验异常时讲复验流程，通过后讲证件核对。不区分界面就只能泛泛而谈。
+INTERFACE_PROMPTS = {
+    "live": (
+        "【当前界面】实时视频核验（正在采集现场图像）。\n"
+        "重点回答：摄像头取景与光照要求、人脸占比与姿态（正视、避免逆光/侧脸）、"
+        "活体与现场性（防翻拍，来源必须是现场实时采集）、"
+        "为什么必须让考生本人出现在镜头内、抓拍前的核对动作。\n"
+        "不要讲核验结果解读（还没出结果）。"
+    ),
+    "captured": (
+        "【当前界面】已采集现场图像、等待核验。\n"
+        "重点回答：这张图能不能用于核验（清晰度/亮度/姿态/是否遮挡）、"
+        "要不要重拍、单独同意是否已登记、设备编号与考场是否对应、"
+        "以及点「开始核验」前该确认的事项。"
+    ),
+    "result_fail": (
+        "【当前界面】核验异常处置（结果非 PASS）。\n"
+        "重点回答：各异常原因码的含义与处置（FACE_MISMATCH 人脸不符 / NO_INVIGILATOR 查无此人 / "
+        "LIVENESS_FAIL 活体不通过 / QUALITY_FAIL 画质不合格 / 灰区模糊匹配 / 撞脸风险 / ID_MISMATCH 证件不符 / "
+        "ID_REQUIRED 大考模式缺证件明文）；\n"
+        "标准动作：核对身份证与准考证原件 → 双人见证人工复验 → 在界面留痕；\n"
+        "强调任何情况下不得由算法单独放行，不得把异常当通过处理。"
+    ),
+    "result_pass": (
+        "【当前界面】核验已通过，进入证件/身份要素核对。\n"
+        "重点回答：要核对哪些证件要素（姓名、证件号尾号、准考证号、座位号）、"
+        "大考模式与常规模式的区别（身份证是否参与校验）、"
+        "发现证件不符该怎么改判并留痕、以及通过后仍需人工验证件的原因。"
+    ),
+    "result_gray": (
+        "【当前界面】核验结果处于灰区或需要人工复验。\n"
+        "重点回答：灰区（相似度落在模糊匹配区间）的含义、"
+        "为什么不能直接判通过也不能直接判失败、双人见证复验的具体步骤与留痕要求。"
+    ),
+    "audit": (
+        "【当前界面】核验记录与审计。\n"
+        "重点回答：哈希链审计的校验方式、记录包含哪些字段、"
+        "如何追溯某次核验的结论与操作人、以及为什么审计记录不可篡改。"
+    ),
+    "settings": (
+        "【当前界面】终端设置与账户权限。\n"
+        "重点回答：各角色权限范围、口令与账户管理、"
+        "命令控制台与 AI 对话的授权开关、数据目录与隐藏命令行窗口等设置项。"
+    ),
+}
+
+
+def build_interface_prompt(interface):
+    """返回指定界面的提示词片段；未知界面返回空串（保持原有行为）。"""
+    return INTERFACE_PROMPTS.get((interface or "").strip(), "")
+
 _REASON_CODES_KB = (
     "核验结果与处置建议：\n"
     "PASS（通过）：提醒核对证件实物（如尚未核对）。\n"
@@ -119,9 +172,9 @@ _TROUBLE_KEYS = ["打不开", "慢", "卡", "错误", "不可用", "失败", "�
 _COMPLIANCE_KEYS = ["合规", "同意", "见证人", "严格模式", "大考模式", "审计", "隐私", "双人"]
 
 
-def _build_system_prompt(user_message="", snapshot="", include_all=False):
+def _build_system_prompt(user_message="", snapshot="", include_all=False, interface=None):
     """
-    动态系统提示：根据用户问题和快照，只加载最相关的知识库。
+    动态系统提示：根据用户问题、界面与快照，只加载最相关的知识库。
     这样大多数问题的输入 token 比背整本书短很多，本地 4B 模型响应更快。
     """
     combined = ((user_message or "") + " " + (snapshot or "")).lower()
@@ -138,7 +191,11 @@ def _build_system_prompt(user_message="", snapshot="", include_all=False):
     # 不背整本知识库——这样既省 token 又省时间，还能正常回答基础问题。
     if not sections:
         sections = [_OPERATIONS_KB, _COMPLIANCE_KB]
-    return _BASE_PROMPT + "\n\n" + "\n\n".join(sections)
+    head = _BASE_PROMPT
+    scene = build_interface_prompt(interface)
+    if scene:
+        head = head + "\n\n" + scene
+    return head + "\n\n" + "\n\n".join(sections)
 
 
 # ---------------- ollama HTTP 客户端 ----------------
@@ -328,7 +385,7 @@ class AIChat:
         self.history = []
 
     def ask(self, text, snapshot="", operator="", tier="full", source="gui",
-            timeout=CHAT_TIMEOUT, free_mode=False):
+            timeout=CHAT_TIMEOUT, free_mode=False, interface=None):
         text = (text or "").strip()
         if not text:
             return False, "请输入内容", ""
@@ -342,7 +399,7 @@ class AIChat:
             if snapshot:
                 user_content = ("【当前界面状态快照】\n%s\n\n【我的消息】\n%s"
                                 % (snapshot, text))
-            system_prompt = _build_system_prompt(text, snapshot)
+            system_prompt = _build_system_prompt(text, snapshot, interface=interface)
             messages = ([{"role": "system", "content": system_prompt}]
                         + self.history
                         + [{"role": "user", "content": user_content}])
@@ -364,11 +421,13 @@ class AIChat:
 
 
 def analyze_activity(snapshot, model=None, operator="", tier="full", source="gui",
-                     timeout=WATCH_TIMEOUT):
+                     timeout=WATCH_TIMEOUT, interface=None):
     model = (model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
-    # 巡视用独立短提示词，不背整本知识库，响应更快
+    # 巡视用独立短提示词，不背整本知识库，响应更快；提示词跟随当前界面
+    scene = build_interface_prompt(interface)
+    watch_system = WATCH_SYSTEM_PROMPT + (("\n" + scene) if scene else "")
     messages = [
-        {"role": "system", "content": WATCH_SYSTEM_PROMPT},
+        {"role": "system", "content": watch_system},
         {"role": "user", "content": WATCH_PROMPT + "\n\n" + (snapshot or "（无快照）")},
     ]
     started = time.time()

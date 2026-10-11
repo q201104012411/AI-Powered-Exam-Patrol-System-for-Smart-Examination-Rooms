@@ -180,6 +180,7 @@ class TerminalApp(object):
 
         nb = ttk.Notebook(self.root)
         nb.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+        self.nb = nb
         self.tab_alerts = ttk.Frame(nb, padding=8)
         self.tab_review = ttk.Frame(nb, padding=8)
         self.tab_verify = ttk.Frame(nb, padding=8)
@@ -220,9 +221,8 @@ class TerminalApp(object):
         ttk.Button(bar, text="✓ 确认选中", command=self._ack).pack(side="left", padx=4)
         ttk.Button(bar, text="📣 一键上报", command=self._report).pack(side="left", padx=4)
         ttk.Button(bar, text="📋 复制编号", command=self._copy_alert_id).pack(side="left", padx=4)
-        if self.session.can("dispatch"):
-            ttk.Button(bar, text="🧪 生成演示告警",
-                       command=self._demo).pack(side="left", padx=(16, 4))
+        # 说明：「生成演示告警」是演练用入口，已收敛到「运行状态与管控 → 权限控制台」，
+        #       仅所有者可见可点（见 _build_ops_tab）。
         ttk.Button(bar, text="☁ 立即补传", command=self._flush).pack(side="right")
         self.alerts_hint = ttk.Label(bar, text="", foreground="#c07000")
         self.alerts_hint.pack(side="right", padx=10)
@@ -374,17 +374,26 @@ class TerminalApp(object):
         # ---- 顶部工具条 ----
         bar = ttk.Frame(f)
         bar.pack(fill="x", pady=(6, 6))
-        ttk.Button(bar, text="📹 管理摄像头",
-                   command=self._monitor_manage).pack(side="left")
+        # 管理摄像头（增删改推流地址与监控区域）：仅所有者可调整
+        if self.session.role == config.ROLE_OWNER:
+            ttk.Button(bar, text="📹 管理摄像头",
+                       command=self._monitor_manage).pack(side="left")
+        else:
+            ttk.Button(bar, text="📹 管理摄像头（仅所有者）",
+                       state="disabled").pack(side="left")
         ttk.Button(bar, text="▶ 全部播放",
                    command=self._monitor_play_all).pack(side="left", padx=6)
         ttk.Button(bar, text="⏹ 全部停止",
                    command=self._monitor_stop_all).pack(side="left")
         self.mon_ai = tk.BooleanVar(value=True)     # 考场监考默认开启 AI 辅助识别
         if HAS_PD:
-            ttk.Checkbutton(
-                bar, text="AI 辅助识别（仅考场监考生效：绿=正常 橙=异常 红=越界）",
-                variable=self.mon_ai).pack(side="left", padx=12)
+            if self.session.role == config.ROLE_OWNER:
+                ttk.Checkbutton(
+                    bar, text="AI 辅助识别（仅考场监考生效：绿=正常 橙=异常 红=越界）",
+                    variable=self.mon_ai).pack(side="left", padx=12)
+            else:
+                ttk.Label(bar, text="AI 辅助识别：开启（仅所有者可调整）",
+                          foreground="#1f56b8").pack(side="left", padx=12)
         self.monitor_status = ttk.Label(bar, text="就绪", foreground="#666")
         self.monitor_status.pack(side="right")
 
@@ -441,7 +450,9 @@ class TerminalApp(object):
             room = cam.get("room", "未命名考场")
             device = cam.get("device", "未命名设备")
             url = cam.get("url", "")
-            frame = ttk.LabelFrame(grid, text=" %s · %s " % (room, device),
+            is_exam = cam.get("area", self.AREA_EXAM) == self.AREA_EXAM
+            prefix = "🎓" if is_exam else "🚪"
+            frame = ttk.LabelFrame(grid, text=" %s %s · %s " % (prefix, room, device),
                                    padding=4)
             frame.grid(row=i // cols, column=i % cols, sticky="nsew", padx=4, pady=4)
             grid.rowconfigure(i // cols, weight=1)
@@ -450,7 +461,8 @@ class TerminalApp(object):
             lbl = tk.Label(frame, bg="#000", relief="sunken")
             lbl.pack(fill="both", expand=True)
             cam["_label"] = lbl
-            status = ttk.Label(frame, text="未播放", foreground="#666")
+            status = ttk.Label(frame, text=("未播放" if is_exam else "未播放（该区域无 AI）"),
+                               foreground="#666")
             status.pack(anchor="w")
             cam["_status"] = status
             bbar = ttk.Frame(frame)
@@ -643,7 +655,10 @@ class TerminalApp(object):
         self.monitor_status.config(text="已停止全部摄像头")
 
     def _monitor_manage(self):
-        """管理摄像头配置：考场编号、设备名称、监控区域、推流URL"""
+        """管理摄像头配置（仅所有者）：考场编号、设备名称、监控区域、推流URL"""
+        if self.session.role != config.ROLE_OWNER:
+            messagebox.showerror("权限不足", "摄像头配置（新增/编辑/删除）仅所有者可调整。")
+            return
         win = tk.Toplevel(self.root)
         win.title("管理摄像头")
         win.geometry("780x420")
@@ -827,6 +842,9 @@ class TerminalApp(object):
             ttk.Checkbutton(pbar, text="☐ 隐藏命令行窗口（下次启动生效）",
                             variable=self.hide_cmd,
                             command=self._toggle_hide_cmd).pack(side="left", padx=12)
+            # 生产演示告警：仅所有者可见可点（演练用，不冒充真实接入）
+            ttk.Button(pbar, text="🧪 生成演示告警",
+                       command=self._demo).pack(side="left", padx=12)
         self.console_btn = ttk.Button(pbar, text="🖥 打开命令控制台",
                                       command=self._open_console)
         self.console_hint = ttk.Label(pbar, text="", foreground="#666")
@@ -1131,7 +1149,8 @@ class TerminalApp(object):
                             text, operator=self.session.username,
                             tier=("full" if tier == console.CONSOLE_TIER_FULL else "ai"),
                             source="terminal_gui", timeout=timeout,
-                            free_mode=bool(ai_free_var.get()))
+                            free_mode=bool(ai_free_var.get()),
+                            interface=self._current_interface())
                     except Exception as e:
                         ok, reply, transport = False, "AI 调用异常：%s" % e, ""
 
@@ -1221,6 +1240,49 @@ class TerminalApp(object):
         threading.Thread(target=work, daemon=True).start()
 
     # ---------- 常驻 AI 对话面板（Notebook 下方，跨标签可见） ----------
+    INTERFACE_LABELS = {
+        "alerts": "告警处置",
+        "review": "复核留痕",
+        "verify": "手持核验",
+        "monitor": "监控查看",
+        "ops": "运行状态与管控",
+    }
+
+    def _current_interface(self):
+        """当前页签对应的界面标识：AI 提示词跟着界面走"""
+        try:
+            cur = self.nb.select()
+            w = self.root.nametowidget(cur) if cur else None
+        except Exception:
+            return "alerts"
+        for widget, key in ((getattr(self, "tab_alerts", None), "alerts"),
+                            (getattr(self, "tab_review", None), "review"),
+                            (getattr(self, "tab_verify", None), "verify"),
+                            (getattr(self, "tab_monitor", None), "monitor"),
+                            (getattr(self, "tab_ops", None), "ops")):
+            if widget is not None and widget is w:
+                return key
+        return "alerts"
+
+    def _refresh_ai_mode_label(self):
+        lbl = getattr(self, "ai_mode_label", None)
+        if lbl is None or not lbl.winfo_exists():
+            return
+        if getattr(self, "ai_free_var", None) is not None and self.ai_free_var.get():
+            text = "自由对话"
+        else:
+            key = self._current_interface()
+            text = "智能终端助手 · %s" % self.INTERFACE_LABELS.get(key, key)
+        lbl.config(text="模式：%s" % text)
+
+    def _on_tab_changed(self, _event=None):
+        """切换页签：刷新 AI 模式标签，并让下次自动分析重新触发"""
+        self._ai_last_snapshot = ""
+        try:
+            self._refresh_ai_mode_label()
+        except Exception:
+            pass
+
     def _build_ai_panel(self, parent):
         import ai_assistant
 
@@ -1251,6 +1313,12 @@ class TerminalApp(object):
         self.ai_mode_label = ttk.Label(top, text="模式：%s" % mode_text,
                                        foreground="#1f56b8")
         self.ai_mode_label.pack(side="left", padx=(12, 0))
+        # 提示词跟随页签：切换界面时刷新模式标签
+        try:
+            self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        except Exception:
+            pass
+        self._refresh_ai_mode_label()
 
         self.ai_watch_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(top, text="AI 自动分析（无对话时自动分析状态）",
@@ -1332,7 +1400,8 @@ class TerminalApp(object):
                 ok, reply, transport = ai_assistant.analyze_activity(
                     snapshot, model=model, operator=self.session.username,
                     tier=("full" if self.session.role == config.ROLE_OWNER else "ai"),
-                    source="terminal_watch", timeout=60)
+                    source="terminal_watch", timeout=60,
+                    interface=self._current_interface())
             except Exception as e:
                 ok, reply = False, "AI 自动分析异常：%s" % e
 
@@ -1355,6 +1424,11 @@ class TerminalApp(object):
         lines = ["时间：%s" % time.strftime("%Y-%m-%d %H:%M:%S")]
         lines.append("操作员：%s（%s）" % (self.session.username,
                                           config.ROLE_TEXT.get(self.session.role, self.session.role)))
+        try:
+            key = self._current_interface()
+            lines.append("当前界面：%s" % self.INTERFACE_LABELS.get(key, key))
+        except Exception:
+            pass
         try:
             st = self.outbox.status()
             lines.append("平台在线：%s　待补传：%d" % ("是" if st.get("online") else "否",
@@ -1386,6 +1460,41 @@ class TerminalApp(object):
                     lines.append("  %s %s" % (r.get("action"), r.get("operator") or "-"))
         except Exception:
             pass
+        # ---- 按界面补充"AI 真正需要知道的现场数据" ----
+        key = ""
+        try:
+            key = self._current_interface()
+        except Exception:
+            pass
+        if key == "alerts":
+            try:
+                sel = self.tree.selection()
+                if sel:
+                    vals = self.tree.item(sel[0])["values"]
+                    lines.append("当前选中的告警：编号=%s 级别=%s 告警码=%s 考场=%s 状态=%s"
+                                 % tuple(list(vals)[:5]))
+            except Exception:
+                pass
+        elif key == "monitor":
+            try:
+                cams = getattr(self, "monitors", []) or []
+                exam = sum(1 for c in cams
+                           if c.get("area", self.AREA_EXAM) == self.AREA_EXAM)
+                other = len(cams) - exam
+                playing = sum(1 for v in getattr(self, "_cam_running", {}).values() if v)
+                ai_on = bool(getattr(self, "mon_ai", None) and self.mon_ai.get())
+                lines.append("摄像头：考场监考 %d 路，非考场监控 %d 路，正在播放 %d 路"
+                             % (exam, other, playing))
+                lines.append("AI 框选识别：%s（仅考场监考生效）" % ("开启" if ai_on else "关闭"))
+            except Exception:
+                pass
+        elif key == "ops":
+            try:
+                off = self.clock.offset_sec() if hasattr(self.clock, "offset_sec") else None
+                if off is not None:
+                    lines.append("考场时钟偏差：%.1f 秒" % off)
+            except Exception:
+                pass
         return "\n".join(lines)
 
     def _ai_clear(self):
@@ -1454,13 +1563,15 @@ class TerminalApp(object):
         self.ai_input.delete("1.0", "end")
 
         free_mode = bool(self.ai_free_var.get())
+        interface = self._current_interface()
 
         def work():
             try:
                 ok, reply, transport = self.ai_chat.ask(
                     text, operator=self.session.username,
                     tier=("full" if self.session.role == config.ROLE_OWNER else "ai"),
-                    source="terminal_panel", timeout=120, free_mode=free_mode)
+                    source="terminal_panel", timeout=120, free_mode=free_mode,
+                    interface=interface)
             except Exception as e:
                 ok, reply, transport = False, "AI 调用异常：%s" % e, ""
 
@@ -1479,7 +1590,7 @@ class TerminalApp(object):
     def _ai_toggle_free_mode(self):
         on = not self.ai_free_var.get()
         self.ai_free_var.set(on)
-        self.ai_mode_label.config(text="模式：%s" % ("自由对话" if on else "智能终端助手"))
+        self._refresh_ai_mode_label()
         self._ai_append_out("🤖 %s" % ("已进入自由对话模式，提示词限制已关闭。"
                                        if on else "已退出自由对话模式，恢复智能终端助手提示词。"),
                             tag="ai_bot")
@@ -1790,6 +1901,10 @@ class TerminalApp(object):
             messagebox.showerror("复制失败", str(e))
 
     def _demo(self):
+        # 生产演示告警：仅所有者可用（入口只出现在权限控制台，这里再做一层拦截）
+        if self.session.role != config.ROLE_OWNER:
+            messagebox.showerror("权限不足", "生成演示告警仅所有者可用。")
+            return
         created, dup = self.hub.ingest_many(self.hub.simulate(6))
         self.status.config(text="已生成演示告警 %d 条（去重 %d）— 来源标注为 demo，非真实接入"
                                 % (len(created), dup))

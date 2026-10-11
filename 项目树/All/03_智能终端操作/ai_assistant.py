@@ -40,6 +40,73 @@ _SYSTEM_PROMPT = (
 
 _FREE_PROMPT = "你是一个本地 AI 助手，请用中文自然、友好地回答用户。"
 
+# ---------------- 按界面区分的提示词 ----------------
+# 同一个 AI 面板在不同页签下承担不同职责，提示词必须跟着界面走，
+# 否则模型只能用通用口吻兜圈子（用户反馈"感觉傻傻的"）。
+INTERFACE_PROMPTS = {
+    "alerts": (
+        "【当前界面】告警处置。\n"
+        "你现在的职责是帮操作员**快速处置告警**：\n"
+        "· 解释告警码含义（MULTI_FACE 多人同框 / NO_INVIGILATOR 监考缺位 / PHONE_DETECTED 手机等作弊器材 / "
+        "REPEATED_TOUCH_LINE 多次触碰警戒线 / BIG_TURN 大幅度偏转 / GAZE_SHIFT 眼神游移 / TURN_HEAD 频繁转头 / "
+        "LOOK_DOWN 长时间低头 / SLEEPY 闭眼趴睡 / HEAD_TURN 转脸偏头 / STAND_UP 起立 / LEAN_FORWARD 前倾趴桌）；\n"
+        "· 给出处置顺序建议（红色预警必须先确认再复核，橙色可批量处理）；\n"
+        "· 提示 SLA 超时、去重规则（同考场+座位+告警码 60 秒内只保留一条）；\n"
+        "· 回答务必落到「下一步点哪个按钮」（确认选中 / 一键上报 / 复制编号 / 立即补传）。\n"
+        "不要讲复核留痕的细节（那是另一个页签的事）。"
+    ),
+    "review": (
+        "【当前界面】复核留痕。\n"
+        "你现在的职责是帮操作员**完成复核闭环并留痕**：\n"
+        "· 解释复核结论取值（confirmed 属实 / false_positive 误报 / need_onsite 需现场核实）各自后果；\n"
+        "· 强调红色预警必须双人见证、复核理由要写清依据；\n"
+        "· 提示误报会回写以修正设备可信度，不要为了省事把真警标成误报；\n"
+        "· 涉及审计链时说明复核记录写入哈希链、不可篡改。\n"
+        "回答落在「怎么填复核结论与理由」上。"
+    ),
+    "verify": (
+        "【当前界面】手持核验。\n"
+        "你现在的职责是帮操作员**完成人脸/身份核验**：\n"
+        "· 解释核验结论（PASS 通过 / FACE_MISMATCH 人脸不符 / NO_INVIGILATOR 无此人 / 活体失败）；\n"
+        "· 说明核验失败的标准处置：先核对证件原件，再走人工复验并留痕；\n"
+        "· 提醒活体与现场性要求、同意状态、见证人；\n"
+        "· 只谈核验动作本身，不要扩散到告警派单。"
+    ),
+    "monitor": (
+        "【当前界面】监控查看。\n"
+        "你现在的职责是帮操作员**看懂实时监控与 AI 框选识别**：\n"
+        "· 解释三色框（绿=行为正常 / 橙=异常行为 / 红=越界或触碰警戒线）与青色人脸小框；\n"
+        "· 解释逐人编号（#1 #2 …）与行为标签（起立、大幅度偏转、眼神游移、东张西望、长时间低头、闭眼趴睡、前倾趴桌）；\n"
+        "· 区分「考场监考」有 AI、「非考场监控」无 AI；\n"
+        "· 说明持续异常（约 0.7 秒 / 20 帧）才会生成告警，避免误报刷屏；\n"
+        "· 摄像头配置（推流地址/区域）仅所有者可改。\n"
+        "不要回答告警派单流程，聚焦「画面里发生了什么」。"
+    ),
+    "ops": (
+        "【当前界面】运行状态与管控。\n"
+        "你现在的职责是帮所有者/管理员**运维这套终端**：\n"
+        "· 解释断网补传（outbox 队列、重连后自动补传）、考场标准时钟与校时；\n"
+        "· 解释终端账户权限矩阵（所有者 / 管理员 / 巡考员 / 监考员 / 核验员各自能做什么）；\n"
+        "· 解释权限控制台各开关（命令控制台总开关、授权管理员 ollama、允许非所有者 AI 对话、隐藏命令行窗口）；\n"
+        "· 生成演示告警仅所有者可用，且来源标注为 demo，不冒充真实接入；\n"
+        "· 涉及不可逆操作（清空本地数据）必须提醒先备份并确认。"
+    ),
+}
+
+
+def build_system_prompt(interface=None, free_mode=False):
+    """
+    组装系统提示词：自由对话模式用宽松提示；否则 = 通用基座 + 当前界面职责。
+    interface 取值见 INTERFACE_PROMPTS；未知或不传则退回通用基座。
+    """
+    if free_mode:
+        return _FREE_PROMPT
+    base = _SYSTEM_PROMPT
+    part = INTERFACE_PROMPTS.get((interface or "").strip())
+    if part:
+        return base + "\n\n" + part
+    return base
+
 
 def _api_available():
     now = time.time()
@@ -174,11 +241,11 @@ class AIChat(object):
         self.history = []
 
     def ask(self, text, operator="", tier="full", source="terminal",
-            timeout=CHAT_TIMEOUT, free_mode=False):
+            timeout=CHAT_TIMEOUT, free_mode=False, interface=None):
         text = (text or "").strip()
         if not text:
             return False, "请输入内容", ""
-        system_prompt = _FREE_PROMPT if free_mode else _SYSTEM_PROMPT
+        system_prompt = build_system_prompt(interface, free_mode=free_mode)
         messages = ([{"role": "system", "content": system_prompt}]
                     + self.history
                     + [{"role": "user", "content": text}])
@@ -204,12 +271,15 @@ class AIChat(object):
 
 
 def analyze_activity(snapshot, model=None, operator="", tier="full",
-                     source="terminal", timeout=CHAT_TIMEOUT):
+                     source="terminal", timeout=CHAT_TIMEOUT, interface=None):
+    """不对话时的自动分析：提示词同样跟随当前界面，避免答非所问。"""
     model = (model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    scene = INTERFACE_PROMPTS.get((interface or "").strip(), "")
     messages = [
         {"role": "system",
-         "content": "你是智能终端巡视员。根据状态快照判断：1)操作员在做什么；2)有无异常；3)下一步建议。"
-                    "2-4 句话，不复述快照。"},
+         "content": ("你是智能终端巡视员。" + (scene + "\n" if scene else "")
+                     + "根据状态快照判断：1)操作员在做什么；2)有无异常；3)下一步建议。"
+                       "2-4 句话，不复述快照。")},
         {"role": "user", "content": (snapshot or "（无快照）")},
     ]
     started = time.time()

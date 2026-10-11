@@ -18,6 +18,7 @@
 """
 import json
 import os
+import re
 import threading
 import time
 import tkinter as tk
@@ -48,6 +49,24 @@ import workorder as wo_mod
 
 FONT = ("Microsoft YaHei", 10)
 MONO = ("Consolas", 10)
+FONT_SMALL = ("Microsoft YaHei", 9)
+# 统一视觉常量：标题字体 / 内边距 / 灰阶 / 摄像头状态色
+FONT_TITLE = ("Microsoft YaHei", 14, "bold")
+PAD_TAB = 12            # 各页签内边距
+PAD_BAR = 6             # 工具栏与内容的纵向间距
+PAD_BTN = 6             # 按钮之间的横向间距
+GRAY_MUTED = "#888"     # 日志/占位/次要文字统一灰
+GRAY_HINT = "#666"      # 状态栏灰
+# 摄像头状态 -> 颜色（未播放灰 / 缓冲中蓝 / 播放中绿 / 失败红）
+CAM_COLORS = {
+    "idle": "#888",        # 未播放 / 已停止
+    "buffering": "#1f56b8",  # 缓冲中
+    "playing": "#0a7d28",    # 播放中
+    "error": "#c00",         # 打开失败 / 渲染失败
+}
+CAM_AI_COLOR = "#c07000"     # AI 识别到越界时的橙色
+# 面板 AI 行文本：AI 识别中：N 人[，越界 M]（全局汇总从这里反解）
+CAM_AI_RE = re.compile(r"(\d+) 人(?:，越界 (\d+))?")
 
 # pythonw 隐藏窗口启动时 stdout/stderr 为 None，兜住避免任何 print 崩掉界面
 config.ensure_stdio("gui_console.log")
@@ -96,7 +115,8 @@ class App(object):
     def __init__(self, root):
         self.root = root
         self.root.title("摄像头核查与视频质量诊断")
-        self.root.geometry("1180x780")
+        self.root.geometry("1280x820")
+        self.root.minsize(1024, 700)
         self.store = storage.Store()
         self.accounts = web_accounts.Accounts(self.store)
         self.user = None                     # web_accounts.Session
@@ -135,7 +155,7 @@ class App(object):
         e_p.grid(row=1, column=1, pady=8, padx=(0, 6))
 
         self.login_msg = ttk.Label(box, text="", foreground="#d9534f",
-                                   font=("Microsoft YaHei", 10))
+                                   font=FONT)
         self.login_msg.pack(pady=(12, 2))
 
         bar = ttk.Frame(box)
@@ -144,9 +164,9 @@ class App(object):
         ttk.Button(bar, text="退  出", width=12, command=self.root.destroy).pack(side="left", padx=8)
 
         ttk.Label(box, text="账户与网页版（http://127.0.0.1:5010/）是同一份",
-                  foreground="#999", font=("Microsoft YaHei", 9)).pack(pady=(16, 0))
+                  foreground=GRAY_MUTED, font=FONT_SMALL).pack(pady=(16, 0))
         ttk.Label(box, text="默认账户：owner（所有者）、teacher1（管理员）　口令由系统管理员掌握，不在界面显示",
-                  foreground="#999", font=("Microsoft YaHei", 9)).pack()
+                  foreground=GRAY_MUTED, font=FONT_SMALL).pack()
         self.root.bind("<Return>", lambda _e: self._do_login())
         e_u.focus_set()
 
@@ -205,53 +225,53 @@ class App(object):
         self.root.unbind("<Return>")
         self.root.title("摄像头核查与视频质量诊断　｜　%s（%s）"
                         % (self.user.username, self.user.role_text))
-        self.root.geometry("1180x780")
+        self.root.geometry("1280x820")
 
-        top = ttk.Frame(self.root, padding=(10, 8))
+        top = ttk.Frame(self.root, padding=(12, 10))
         top.pack(fill="x")
         ttk.Label(top, text="摄像头核查与视频质量诊断",
-                  font=("Microsoft YaHei", 14, "bold")).pack(side="left")
+                  font=FONT_TITLE).pack(side="left")
         ttk.Label(top, text="当前账号：%s　角色：%s"
                   % (self.user.username, self.user.role_text),
                   foreground="#1f56b8").pack(side="left", padx=(14, 0))
 
         ttk.Button(top, text="退出", command=self._logout).pack(side="right")
         ttk.Button(top, text="🔄 切换账号", command=self._switch_account
-                   ).pack(side="right", padx=4)
+                   ).pack(side="right", padx=PAD_BTN)
         ttk.Button(top, text="🔑 修改口令", command=self._change_own_pwd
-                   ).pack(side="right", padx=4)
+                   ).pack(side="right", padx=PAD_BTN)
         if self.can("account_manage"):
             ttk.Button(top, text="👥 终端账户", command=self._account_manager
-                       ).pack(side="right", padx=4)
+                       ).pack(side="right", padx=PAD_BTN)
         else:
             b = ttk.Button(top, text="👥 终端账户（仅所有者）", state="disabled")
-            b.pack(side="right", padx=4)
+            b.pack(side="right", padx=PAD_BTN)
         if self.can("audit_view"):
             ttk.Button(top, text="🔐 审计链", command=self._show_audit
-                       ).pack(side="right", padx=4)
+                       ).pack(side="right", padx=PAD_BTN)
         else:
             ttk.Button(top, text="🔐 审计链（仅所有者）", state="disabled"
-                       ).pack(side="right", padx=4)
+                       ).pack(side="right", padx=PAD_BTN)
 
         # 隐藏命令行窗口（仅所有者可切换；管理员勾选框直接禁用）
         self.hide_cmd = tk.BooleanVar(value=web_accounts.hidden_cmd_on())
         cb = ttk.Checkbutton(top, text="隐藏命令行窗口（下次启动生效）",
                              variable=self.hide_cmd, command=self._toggle_hide_cmd)
-        cb.pack(side="right", padx=(4, 12))
+        cb.pack(side="right", padx=(PAD_BTN, 12))
         if not self.can("hide_cmd_toggle"):
             cb.config(state="disabled")
 
         nb = ttk.Notebook(self.root)
-        nb.pack(fill="both", expand=True, padx=10, pady=(0, 6))
-        self.t_dev = ttk.Frame(nb, padding=8)
-        self.t_chk = ttk.Frame(nb, padding=8)
-        self.t_wo = ttk.Frame(nb, padding=8)
-        self.t_rep = ttk.Frame(nb, padding=8)
+        nb.pack(fill="both", expand=True, padx=PAD_TAB, pady=(0, PAD_BAR))
+        self.t_dev = ttk.Frame(nb, padding=PAD_TAB)
+        self.t_chk = ttk.Frame(nb, padding=PAD_TAB)
+        self.t_wo = ttk.Frame(nb, padding=PAD_TAB)
+        self.t_rep = ttk.Frame(nb, padding=PAD_TAB)
         # 实时监控：仅所有者和管理员可见
         self.can_monitor = self.user.role in (web_accounts.ROLE_OWNER,
                                               web_accounts.ROLE_ADMIN)
         if self.can_monitor:
-            self.t_mon = ttk.Frame(nb, padding=8)
+            self.t_mon = ttk.Frame(nb, padding=PAD_TAB)
         nb.add(self.t_dev, text="  设备台账  ")
         nb.add(self.t_chk, text="  巡检核查  ")
         nb.add(self.t_wo, text="  整改工单  ")
@@ -266,27 +286,28 @@ class App(object):
             self._mon_tab()
         self.status = ttk.Label(self.root, text="就绪　｜　%s（%s）"
                                 % (self.user.username, self.user.role_text),
-                                foreground="#666")
-        self.status.pack(fill="x", padx=12, pady=(0, 6))
+                                foreground=GRAY_HINT)
+        self.status.pack(fill="x", padx=PAD_TAB, pady=(0, PAD_BAR))
         self.refresh_all()
 
     # ---------------- 设备台账 ----------------
     def _dev_tab(self):
         f = self.t_dev
         bar = ttk.Frame(f)
-        bar.pack(fill="x", pady=(0, 6))
+        bar.pack(fill="x", pady=(0, PAD_BAR))
         ttk.Button(bar, text="＋ 新增机位",
                    command=self._guard("device_add", self._add_device)).pack(side="left")
         ttk.Button(bar, text="📷 采集基准图",
                    command=self._guard("baseline_capture", self._capture)
-                   ).pack(side="left", padx=4)
-        ttk.Button(bar, text="🔄 刷新", command=self.refresh_devices).pack(side="left", padx=4)
+                   ).pack(side="left", padx=PAD_BTN)
+        ttk.Button(bar, text="🔄 刷新", command=self.refresh_devices
+                   ).pack(side="left", padx=PAD_BTN)
         if self.can("device_delete"):
             ttk.Button(bar, text="🗑 删除机位", command=self._delete_device
-                       ).pack(side="left", padx=4)
+                       ).pack(side="left", padx=PAD_BTN)
         else:
             ttk.Button(bar, text="🗑 删除机位（仅所有者）", state="disabled"
-                       ).pack(side="left", padx=4)
+                       ).pack(side="left", padx=PAD_BTN)
         cols = ("code", "room", "site", "position", "res", "fov", "url", "base", "hb")
         self.dtree = ttk.Treeview(f, columns=cols, show="headings", height=18)
         for c, t, w in (("code", "设备编码", 130), ("room", "考场", 70), ("site", "考点", 100),
@@ -417,7 +438,7 @@ class App(object):
     def _chk_tab(self):
         f = self.t_chk
         bar = ttk.Frame(f)
-        bar.pack(fill="x", pady=(0, 6))
+        bar.pack(fill="x", pady=(0, PAD_BAR))
         ttk.Button(bar, text="▶ 跑一轮日常巡检",
                    command=self._guard("patrol_run",
                                        lambda: self._run(config.POLICY_DAILY))
@@ -425,12 +446,13 @@ class App(object):
         ttk.Button(bar, text="考前专项核查",
                    command=self._guard("patrol_run",
                                        lambda: self._run(config.POLICY_PREEXAM))
-                   ).pack(side="left", padx=4)
+                   ).pack(side="left", padx=PAD_BTN)
         ttk.Button(bar, text="考前一小时自检",
                    command=self._guard("patrol_run",
                                        lambda: self._run(config.POLICY_BEFORE))
-                   ).pack(side="left", padx=4)
-        ttk.Button(bar, text="🔄 刷新", command=self.refresh_checks).pack(side="left", padx=4)
+                   ).pack(side="left", padx=PAD_BTN)
+        ttk.Button(bar, text="🔄 刷新", command=self.refresh_checks
+                   ).pack(side="left", padx=PAD_BTN)
         self.chk_hint = ttk.Label(bar, text="", foreground="#c07000")
         self.chk_hint.pack(side="right")
         cols = ("ts", "code", "room", "online", "defects", "policy")
@@ -445,7 +467,7 @@ class App(object):
         self.ctree.tag_configure("warn", background="#fff6e0", foreground="#8a5a00")
         self.ctree.bind("<<TreeviewSelect>>", lambda _e: self._show_check())
         self.detail = tk.Text(f, height=6, wrap="word", font=MONO)
-        self.detail.pack(fill="x", pady=(6, 0))
+        self.detail.pack(fill="x", pady=(PAD_BAR, 0))
 
     def _run(self, policy):
         if not self._need("patrol_run"):
@@ -509,14 +531,15 @@ class App(object):
     def _wo_tab(self):
         f = self.t_wo
         bar = ttk.Frame(f)
-        bar.pack(fill="x", pady=(0, 6))
+        bar.pack(fill="x", pady=(0, PAD_BAR))
         for text, act in (("派单", "dispatch"), ("提交整改", "rectify"),
                           ("复核通过", "review_ok"), ("复核打回", "review_no")):
             ttk.Button(bar, text=text,
                        command=self._guard("workorder_operate",
                                            lambda a=act: self._wo_act(a))
-                       ).pack(side="left", padx=4)
-        ttk.Button(bar, text="🔄 刷新", command=self.refresh_orders).pack(side="left", padx=4)
+                       ).pack(side="left", padx=PAD_BTN)
+        ttk.Button(bar, text="🔄 刷新", command=self.refresh_orders
+                   ).pack(side="left", padx=PAD_BTN)
         self.wo_hint = ttk.Label(bar, text="", foreground="#c07000")
         self.wo_hint.pack(side="right")
         cols = ("id", "dev", "room", "codes", "sev", "status", "assigned", "created")
@@ -581,10 +604,11 @@ class App(object):
     def _rep_tab(self):
         f = self.t_rep
         bar = ttk.Frame(f)
-        bar.pack(fill="x", pady=(0, 6))
+        bar.pack(fill="x", pady=(0, PAD_BAR))
         ttk.Button(bar, text="生成并导出报告",
                    command=self._guard("report_export", self._export)).pack(side="left")
-        ttk.Button(bar, text="🔄 刷新指标", command=self.refresh_report).pack(side="left", padx=4)
+        ttk.Button(bar, text="🔄 刷新指标", command=self.refresh_report
+                   ).pack(side="left", padx=PAD_BTN)
         self.rep = tk.Text(f, wrap="word", font=MONO)
         self.rep.pack(fill="both", expand=True)
 
@@ -724,11 +748,14 @@ class App(object):
 
         bar = ttk.Frame(win)
         bar.pack(fill="x", padx=10, pady=(0, 10))
-        ttk.Button(bar, text="＋ 新建账户", command=new_account).pack(side="left", padx=4)
-        ttk.Button(bar, text="🔑 重置口令", command=reset_pwd).pack(side="left", padx=4)
-        ttk.Button(bar, text="🗑 删除账户", command=del_account).pack(side="left", padx=4)
-        ttk.Button(bar, text="🔄 刷新", command=reload).pack(side="left", padx=4)
-        ttk.Button(bar, text="关闭", command=win.destroy).pack(side="right", padx=4)
+        ttk.Button(bar, text="＋ 新建账户", command=new_account
+                   ).pack(side="left", padx=PAD_BTN)
+        ttk.Button(bar, text="🔑 重置口令", command=reset_pwd
+                   ).pack(side="left", padx=PAD_BTN)
+        ttk.Button(bar, text="🗑 删除账户", command=del_account
+                   ).pack(side="left", padx=PAD_BTN)
+        ttk.Button(bar, text="🔄 刷新", command=reload).pack(side="left", padx=PAD_BTN)
+        ttk.Button(bar, text="关闭", command=win.destroy).pack(side="right", padx=PAD_BTN)
         reload()
 
     # ---------------- 审计链（仅所有者） ----------------
@@ -787,7 +814,7 @@ class App(object):
                   font=FONT).pack(anchor="w")
         if not HAS_CV2 or not HAS_PIL:
             ttk.Label(f, text="⚠ 缺少视频播放依赖：需要 opencv-python 与 Pillow",
-                      foreground="#c00").pack(anchor="w", pady=10)
+                      foreground=CAM_COLORS["error"]).pack(anchor="w", pady=10)
             return
 
         self._cam_threads = {}
@@ -796,29 +823,90 @@ class App(object):
         self._cam_photos = {}
         self._cam_latest = {}       # code -> 最新帧（用于放大窗口）
 
+        # ---- 工具栏：左=操作按钮组，中=AI 开关，右=状态标签 ----
         bar = ttk.Frame(f)
-        bar.pack(fill="x", pady=(6, 6))
-        ttk.Button(bar, text="🔄 刷新设备", command=self.refresh_mon).pack(side="left")
-        ttk.Button(bar, text="▶ 全部播放", command=self._mon_play_all).pack(side="left", padx=6)
-        ttk.Button(bar, text="⏹ 全部停止", command=self._mon_stop_all).pack(side="left")
+        bar.pack(fill="x", pady=(PAD_BAR, 0))
+        left = ttk.Frame(bar)
+        left.pack(side="left")
+        ttk.Button(left, text="🔄 刷新设备", command=self.refresh_mon).pack(side="left")
+        ttk.Button(left, text="▶ 全部播放", command=self._mon_play_all
+                   ).pack(side="left", padx=PAD_BTN)
+        ttk.Button(left, text="⏹ 全部停止", command=self._mon_stop_all).pack(side="left")
+
+        mid = ttk.Frame(bar)
+        mid.pack(side="left", padx=(18, 12))
         self.mon_ai = tk.BooleanVar(value=True)     # 考场监控默认开启 AI 辅助识别
         self.mon_ai_chk = ttk.Checkbutton(
-            bar, text="AI 辅助识别（逐人：绿=正常 橙=异常 红=越界，考场监控默认开启）",
+            mid, text="AI 辅助识别（逐人：绿=正常 橙=异常 红=越界，考场监控默认开启）",
             variable=self.mon_ai)
-        self.mon_ai_chk.pack(side="left", padx=12)
-        self.mon_status = ttk.Label(bar, text="就绪", foreground="#666")
+        self.mon_ai_chk.pack(side="left")
+
+        self.mon_status = ttk.Label(bar, text="就绪", foreground=GRAY_HINT)
         self.mon_status.pack(side="right")
+
+        # ---- 图例：颜色含义一目了然 ----
+        ttk.Label(f, text="图例：绿框=行为正常　橙框=异常行为　红框=越界/贴线　"
+                          "青色小框=人脸",
+                  font=FONT_SMALL, foreground="#555").pack(anchor="w", pady=(4, PAD_BAR))
 
         self._person_detector = None
         self._ai_error_file = config.DATA_ROOT / "ai_detect_error.txt"
         self._behavior_tracker = _BehaviorTracker()
 
-        self.mon_grid = ttk.Frame(f)
-        self.mon_grid.pack(fill="both", expand=True)
-        self._mon_panels = {}       # code -> {label, status, btn}
+        # ---- 可滚动摄像头网格（Canvas + 竖滚动条 + 鼠标滚轮） ----
+        self.mon_canvas, self.mon_grid = self._make_scroll_area(f)
+        self._mon_panels = {}       # code -> {label, status, ai, btn, ...}
         self.refresh_mon()
         # 页面打开后自动播放全部摄像头（延迟一点让 UI 先完成布局）
         self.root.after(300, self._mon_play_all)
+
+    def _make_scroll_area(self, parent):
+        """可滚动容器：Canvas + 竖向滚动条 + 滚轮绑定，返回 (canvas, 内容 Frame)"""
+        canvas = tk.Canvas(parent, highlightthickness=0, bg="#f4f4f4",
+                           yscrollincrement=30)
+        canvas.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        sb.pack(side="right", fill="y")
+        canvas.configure(yscrollcommand=sb.set)
+        grid = ttk.Frame(canvas)
+        window = canvas.create_window((0, 0), window=grid, anchor="nw")
+        grid.bind("<Configure>",
+                  lambda _e, c=canvas: c.configure(scrollregion=c.bbox("all")))
+        # 内容宽度跟随 Canvas，保证两列摄像头随窗口一起变宽
+        canvas.bind("<Configure>",
+                    lambda e, c=canvas, w=window: c.itemconfigure(w, width=e.width))
+        self._bind_mousewheel(canvas, recurse=False)
+        return canvas, grid
+
+    def _on_mousewheel(self, event):
+        """滚轮：滚动实时监控页的摄像头网格"""
+        canvas = getattr(self, "mon_canvas", None)
+        if canvas is None or not canvas.winfo_exists():
+            return "break"
+        # Windows 滚轮事件 delta 是 120 的倍数
+        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        return "break"
+
+    def _bind_mousewheel(self, widget, recurse=True):
+        """给可滚动控件（默认含其全部子控件）绑定鼠标滚轮"""
+        try:
+            # 不用 add="+"：重复绑定会叠加处理器，导致滚轮一次滚多行
+            widget.bind("<MouseWheel>", self._on_mousewheel)
+        except tk.TclError:
+            return
+        if recurse:
+            for child in widget.winfo_children():
+                self._bind_mousewheel(child)
+
+    def _mon_bind_wheel(self):
+        """网格重建后重新绑定滚轮（Canvas 与网格内容各绑一次，避免重复滚动）"""
+        canvas = getattr(self, "mon_canvas", None)
+        if canvas is None:
+            return
+        self._bind_mousewheel(canvas, recurse=False)
+        grid = getattr(self, "mon_grid", None)
+        if grid is not None:
+            self._bind_mousewheel(grid)
 
     def refresh_mon(self):
         """根据设备台账重建摄像头网格"""
@@ -833,30 +921,52 @@ class App(object):
         if not devs:
             ttk.Label(self.mon_grid,
                       text="暂无带取流地址的设备，请在「设备台账」页添加机位和 URL。",
-                      foreground="#888").pack(pady=30)
+                      foreground=GRAY_MUTED).pack(pady=30)
+            self._mon_bind_wheel()
+            self.mon_status.config(text="暂无摄像头", foreground=GRAY_HINT)
             return
         cols = 2
         for i, dev in enumerate(devs):
             room = dev.room_id or "未分配考场"
             name = dev.name or dev.code or "未命名"
             code = dev.code
-            frame = ttk.LabelFrame(self.mon_grid, text=" %s · %s " % (room, name), padding=4)
+            frame = ttk.LabelFrame(self.mon_grid, text=" %s · %s " % (room, name),
+                                   padding=4)
             frame.grid(row=i // cols, column=i % cols, sticky="nsew", padx=4, pady=4)
             self.mon_grid.rowconfigure(i // cols, weight=1)
             self.mon_grid.columnconfigure(i % cols, weight=1)
-            lbl = tk.Label(frame, bg="#000", relief="sunken", cursor="hand2")
+            # 黑底画面区：先给一个初始高度，播放时按真实尺寸贴图
+            lbl = tk.Label(frame, bg="#000", relief="sunken", cursor="hand2",
+                           height=9)
             lbl.pack(fill="both", expand=True)
             lbl.bind("<Button-1>", lambda _e, c=code: self._cam_enlarge(c))
-            status = ttk.Label(frame, text="未播放", foreground="#666")
-            status.pack(anchor="w")
+            # 状态行：播放状态（灰/蓝/绿/红）+ AI 检测人数（每路独立，不重复）
+            srow = ttk.Frame(frame)
+            srow.pack(fill="x", pady=(2, 0))
+            status = ttk.Label(srow, text="未播放", foreground=CAM_COLORS["idle"],
+                               font=FONT_SMALL)
+            status.pack(side="left")
+            ai = ttk.Label(srow, text="", foreground=GRAY_MUTED, font=FONT_SMALL)
+            ai.pack(side="right")
             bbar = ttk.Frame(frame)
             bbar.pack(fill="x", pady=(2, 0))
             btn = ttk.Button(bbar, text="▶ 播放",
                              command=lambda c=code: self._cam_play(c))
             btn.pack(side="left")
-            ttk.Button(bbar, text="⏹ 停止",
-                       command=lambda c=code: self._cam_stop(c)).pack(side="left", padx=4)
-            self._mon_panels[code] = {"label": lbl, "status": status, "btn": btn}
+            stop = ttk.Button(bbar, text="⏹ 停止",
+                              command=lambda c=code: self._cam_stop(c))
+            stop.pack(side="left", padx=PAD_BTN)
+            big = ttk.Button(bbar, text="🔍 放大",
+                             command=lambda c=code: self._cam_enlarge(c))
+            big.pack(side="left")
+            self._mon_panels[code] = {"label": lbl, "status": status, "ai": ai,
+                                      "btn": btn, "stop": stop, "big": big,
+                                      "frame": frame}
+            # 点标题/面板空白处同样可以放大（子控件的点击会冒泡到 LabelFrame）
+            for w in (frame, lbl, srow, status, ai):
+                w.bind("<Button-1>", lambda _e, c=code: self._cam_enlarge(c))
+        self._mon_bind_wheel()
+        self._mon_ai_summary()
 
     @staticmethod
     def _mon_try_open(url):
@@ -893,12 +1003,12 @@ class App(object):
         self._cam_stop(code)
         cap, backend, info = self._mon_try_open(url)
         if cap is None:
-            self._cam_set_status(code, "打开失败：%s" % info, "#c00")
+            self._cam_set_status(code, "打开失败：%s" % info, CAM_COLORS["error"])
             self._cam_set_placeholder(code, "图像不存在\n%s" % info)
             return
         self._cam_caps[code] = cap
         self._cam_running[code] = True
-        self._cam_set_status(code, "[%s后端] 缓冲中…" % backend, "#1f56b8")
+        self._cam_set_status(code, "[%s后端] 缓冲中…" % backend, CAM_COLORS["buffering"])
         self._cam_btn_text(code, "播放中…")
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         t = threading.Thread(target=lambda: self._cam_loop(code, url), daemon=True)
@@ -940,15 +1050,18 @@ class App(object):
                         err = str(e)
                         self.mon_ai.set(False)
                         self.mon_ai_chk.config(state="disabled")
-                        self.mon_status.config(text="AI检测不可用：%s" % err, foreground="#c00")
+                        self.mon_status.config(text="AI检测不可用：%s" % err,
+                                               foreground=CAM_COLORS["error"])
                         try:
                             self._ai_error_file.write_text(err, encoding="utf-8")
                         except Exception:
                             pass
                 if self._person_detector is not None:
                     frame, viol, persons = self._person_detector.draw(frame)
-                    status_text = "AI识别中：%d 人，越界 %d" % (len(persons), viol)
-                    self.mon_status.config(text=status_text)
+                    # 逐路显示识别人数（每路独立，避免与全局状态重复）
+                    self._cam_set_ai(code, len(persons), viol)
+                    # 全局状态只给汇总，避免"最新一路"覆盖成误导信息
+                    self._mon_ai_summary()
                     # 逐人多次异常行为上报 03 智能终端
                     alerts = self._behavior_tracker.update(code, persons)
                     if alerts:
@@ -977,9 +1090,59 @@ class App(object):
             img.thumbnail((w, h), Image.Resampling.LANCZOS)
             self._cam_photos[code] = ImageTk.PhotoImage(image=img)
             lbl.config(image=self._cam_photos[code])
-            self._cam_set_status(code, "播放中", "#0a7d28")
+            self._cam_set_status(code, "播放中", CAM_COLORS["playing"])
         except Exception as e:
-            self._cam_set_status(code, "渲染失败：%s" % e, "#c00")
+            self._cam_set_status(code, "渲染失败：%s" % e, CAM_COLORS["error"])
+
+    def _cam_set_ai(self, code, n_person, n_cross):
+        """逐路显示 AI 识别人数：正常绿、有越界橙红，未开 AI 时留空"""
+        panel = self._mon_panels.get(code)
+        if panel is None:
+            return
+        ai = panel.get("ai")
+        if ai is None or not ai.winfo_exists():
+            return
+        if n_cross:
+            text, color = "AI 识别中：%d 人，越界 %d" % (n_person, n_cross), CAM_AI_COLOR
+        else:
+            text, color = "AI 识别中：%d 人" % n_person, CAM_COLORS["playing"]
+        try:
+            ai.config(text=text, foreground=color)
+        except tk.TclError:
+            pass
+
+    def _mon_ai_summary(self):
+        """全局状态标签：汇总已开启 AI 的机位人数与越界数"""
+        total_p, total_c, n = 0, 0, 0
+        for panel in self._mon_panels.values():
+            ai = panel.get("ai")
+            try:
+                text = ai.cget("text") if ai is not None else ""
+            except tk.TclError:
+                continue
+            m = CAM_AI_RE.search(text or "")
+            if m is None:
+                continue
+            n += 1
+            total_p += int(m.group(1))
+            if m.group(2):
+                total_c += int(m.group(2))
+        if n:
+            self.mon_status.config(text="AI 识别中：%d 路，共 %d 人，越界 %d"
+                                        % (n, total_p, total_c),
+                                   foreground=GRAY_HINT)
+        elif any(self._cam_running.values()):
+            self.mon_status.config(text="AI 待命（画面播放中，尚未产出识别结果）",
+                                   foreground=GRAY_HINT)
+        else:
+            self.mon_status.config(text="就绪（摄像头未播放）", foreground=GRAY_HINT)
+        return n
+
+    def _mon_set_status(self, text):
+        """设全局状态：正在播放时优先显示 AI 汇总，避免被提示语覆盖"""
+        if any(self._cam_running.values()) and self._mon_ai_summary():
+            return
+        self.mon_status.config(text=text, foreground=GRAY_HINT)
 
     def _cam_stop(self, code):
         self._cam_running[code] = False
@@ -998,7 +1161,11 @@ class App(object):
             if panel is not None and panel.get("label") and panel["label"].winfo_exists():
                 panel["label"].config(image="")
             self._cam_btn_text(code, "▶ 播放")
-            self._cam_set_status(code, "已停止", "#666")
+            self._cam_set_status(code, "未播放（已停止）", CAM_COLORS["idle"])
+            ai = panel.get("ai") if panel else None
+            if ai is not None and ai.winfo_exists():
+                ai.config(text="", foreground=GRAY_MUTED)
+            self._mon_ai_summary()
         except tk.TclError:
             pass
 
@@ -1038,7 +1205,7 @@ class App(object):
         win.transient(self.root)
         lbl = tk.Label(win, bg="#000", relief="sunken")
         lbl.pack(fill="both", expand=True, padx=6, pady=6)
-        status = ttk.Label(win, text="就绪", foreground="#666")
+        status = ttk.Label(win, text="就绪", foreground=GRAY_HINT)
         status.pack(anchor="w", padx=6)
         ttk.Button(win, text="关闭", command=win.destroy).pack(anchor="e", padx=6, pady=4)
         self._cam_enlarge_tick(code, lbl, status, win)
@@ -1057,11 +1224,11 @@ class App(object):
                 photo = ImageTk.PhotoImage(image=img)
                 lbl.photo_ref = photo
                 lbl.config(image=photo)
-                status.config(text="播放中", foreground="#0a7d28")
+                status.config(text="播放中", foreground=CAM_COLORS["playing"])
             except Exception as e:
-                status.config(text="渲染失败：%s" % e, foreground="#c00")
+                status.config(text="渲染失败：%s" % e, foreground=CAM_COLORS["error"])
         else:
-            status.config(text="等待视频帧…", foreground="#666")
+            status.config(text="等待视频帧…", foreground=GRAY_MUTED)
         self.root.after(100, lambda: self._cam_enlarge_tick(code, lbl, status, win))
 
     def _dev_by_code(self, code):
@@ -1084,13 +1251,13 @@ class App(object):
         for d in self.store.list_devices(enabled_only=False):
             if d.code:
                 self._cam_play(d.code)
-        self.mon_status.config(text="已启动全部摄像头")
+        self._mon_set_status("已启动全部摄像头")
 
     def _mon_stop_all(self):
         codes = list(self._cam_running.keys())
         for code in codes:
             self._cam_stop(code)
-        self.mon_status.config(text="已停止全部摄像头")
+        self._mon_set_status("已停止全部摄像头")
 
 
 def _choose_role(parent):
