@@ -111,7 +111,7 @@ class TestLogin(AccountsBase):
 
 # ==================== 权限矩阵 ====================
 class TestPermissionMatrix(AccountsBase):
-    OWNER_ONLY = ("device_delete", "account_manage", "audit_view", "hide_cmd_toggle")
+    OWNER_ONLY = ("device_delete", "account_manage", "audit_view")
     BOTH = ("view", "device_add", "baseline_capture", "inspect_upload", "patrol_run",
             "workorder_operate", "report_export", "change_own_pwd")
 
@@ -200,8 +200,8 @@ class TestPrivilegeEscalation(AccountsBase):
     def test_admin_cannot_view_audit(self):
         self.assertFalse(web_accounts.can("audit_view", web_accounts.ROLE_ADMIN))
 
-    def test_admin_cannot_toggle_hidden_cmd(self):
-        self.assertFalse(web_accounts.can("hide_cmd_toggle", web_accounts.ROLE_ADMIN))
+    def test_admin_can_toggle_hidden_cmd(self):
+        self.assertTrue(web_accounts.can("hide_cmd_toggle", web_accounts.ROLE_ADMIN))
 
 
 # ==================== 账户增删改 ====================
@@ -324,9 +324,9 @@ class TestHiddenCmd(AccountsBase):
     def test_toggle_off_when_no_flag_is_not_an_error(self):
         self.assertTrue(web_accounts.set_hidden_cmd(False, self.store, "owner")[0])
 
-    def test_admin_cannot_toggle(self):
+    def test_admin_can_toggle(self):
         admin = self.session("teacher1", "teacher1")
-        self.assertFalse(admin.can("hide_cmd_toggle"))
+        self.assertTrue(admin.can("hide_cmd_toggle"))
         self.assertFalse(web_accounts.hidden_cmd_on())
 
 

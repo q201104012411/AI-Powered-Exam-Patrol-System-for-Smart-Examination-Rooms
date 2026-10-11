@@ -758,6 +758,7 @@ class App(object):
         self._cam_caps = {}
         self._cam_running = {}
         self._cam_photos = {}
+        self._cam_latest = {}       # code -> 最新帧（用于放大窗口）
 
         bar = ttk.Frame(f)
         bar.pack(fill="x", pady=(6, 6))
@@ -765,17 +766,22 @@ class App(object):
         ttk.Button(bar, text="▶ 全部播放", command=self._mon_play_all).pack(side="left", padx=6)
         ttk.Button(bar, text="⏹ 全部停止", command=self._mon_stop_all).pack(side="left")
         self.mon_ai = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bar, text="AI 越界检测（人形框：绿=正常 红=越界）",
-                        variable=self.mon_ai).pack(side="left", padx=12)
+        self.mon_ai_chk = ttk.Checkbutton(
+            bar, text="AI 越界检测（人形框：绿=正常 红=越界）",
+            variable=self.mon_ai)
+        self.mon_ai_chk.pack(side="left", padx=12)
         self.mon_status = ttk.Label(bar, text="就绪", foreground="#666")
         self.mon_status.pack(side="right")
 
         self._person_detector = None
+        self._ai_error_file = config.DATA_ROOT / "ai_detect_error.txt"
 
         self.mon_grid = ttk.Frame(f)
         self.mon_grid.pack(fill="both", expand=True)
         self._mon_panels = {}       # code -> {label, status, btn}
         self.refresh_mon()
+        # 页面打开后自动播放全部摄像头（延迟一点让 UI 先完成布局）
+        self.root.after(300, self._mon_play_all)
 
     def refresh_mon(self):
         """根据设备台账重建摄像头网格"""
@@ -801,8 +807,9 @@ class App(object):
             frame.grid(row=i // cols, column=i % cols, sticky="nsew", padx=4, pady=4)
             self.mon_grid.rowconfigure(i // cols, weight=1)
             self.mon_grid.columnconfigure(i % cols, weight=1)
-            lbl = tk.Label(frame, bg="#000", relief="sunken")
+            lbl = tk.Label(frame, bg="#000", relief="sunken", cursor="hand2")
             lbl.pack(fill="both", expand=True)
+            lbl.bind("<Button-1>", lambda _e, c=code: self._cam_enlarge(c))
             status = ttk.Label(frame, text="未播放", foreground="#666")
             status.pack(anchor="w")
             bbar = ttk.Frame(frame)
@@ -850,6 +857,7 @@ class App(object):
         cap, backend, info = self._mon_try_open(url)
         if cap is None:
             self._cam_set_status(code, "打开失败：%s" % info, "#c00")
+            self._cam_set_placeholder(code, "图像不存在\n%s" % info)
             return
         self._cam_caps[code] = cap
         self._cam_running[code] = True
@@ -885,12 +893,24 @@ class App(object):
         if lbl is None or not lbl.winfo_exists():
             return
         try:
+            self._cam_latest[code] = frame.copy()
             # AI 越界检测：勾选了才跑，避免不必要的 CPU 占用
             if getattr(self, "mon_ai", None) and self.mon_ai.get():
                 if self._person_detector is None:
-                    self._person_detector = pd_mod.PersonDetector()
-                frame, viol = self._person_detector.draw(frame)
-                self.mon_status.config(text="AI检测中，越界：%d" % viol)
+                    try:
+                        self._person_detector = pd_mod.PersonDetector()
+                    except Exception as e:
+                        err = str(e)
+                        self.mon_ai.set(False)
+                        self.mon_ai_chk.config(state="disabled")
+                        self.mon_status.config(text="AI检测不可用：%s" % err, foreground="#c00")
+                        try:
+                            self._ai_error_file.write_text(err, encoding="utf-8")
+                        except Exception:
+                            pass
+                if self._person_detector is not None:
+                    frame, viol = self._person_detector.draw(frame)
+                    self.mon_status.config(text="AI检测中，越界：%d" % viol)
             h = lbl.winfo_height()
             w = lbl.winfo_width()
             if h < 50:
@@ -926,6 +946,68 @@ class App(object):
             self._cam_set_status(code, "已停止", "#666")
         except tk.TclError:
             pass
+
+    def _cam_set_placeholder(self, code, text):
+        """无图像或打开失败时显示黑底白字占位图"""
+        panel = self._mon_panels.get(code)
+        if panel is None:
+            return
+        lbl = panel.get("label")
+        if lbl is None or not lbl.winfo_exists():
+            return
+        try:
+            h = max(lbl.winfo_height(), 120)
+            w = max(lbl.winfo_width(), 160)
+            img = Image.new("RGB", (w, h), "black")
+            from PIL import ImageDraw, ImageFont
+            draw = ImageDraw.Draw(img)
+            # 简单多行文字（字体回退到默认）
+            try:
+                font = ImageFont.truetype("msyh.ttc", 16)
+            except Exception:
+                font = ImageFont.load_default()
+            for i, line in enumerate(text.split("\n")):
+                draw.text((10, 10 + i * 22), line, fill=(255, 255, 255), font=font)
+            self._cam_photos[code] = ImageTk.PhotoImage(image=img)
+            lbl.config(image=self._cam_photos[code])
+        except Exception:
+            pass
+
+    def _cam_enlarge(self, code):
+        """点击摄像头画面：弹出放大窗口，继续显示该路最新帧"""
+        dev = self._dev_by_code(code)
+        title = "摄像头放大 - %s" % (dev.name or dev.code if dev else code)
+        win = tk.Toplevel(self.root)
+        win.title(title)
+        win.geometry("960x720")
+        win.transient(self.root)
+        lbl = tk.Label(win, bg="#000", relief="sunken")
+        lbl.pack(fill="both", expand=True, padx=6, pady=6)
+        status = ttk.Label(win, text="就绪", foreground="#666")
+        status.pack(anchor="w", padx=6)
+        ttk.Button(win, text="关闭", command=win.destroy).pack(anchor="e", padx=6, pady=4)
+        self._cam_enlarge_tick(code, lbl, status, win)
+
+    def _cam_enlarge_tick(self, code, lbl, status, win):
+        if not win.winfo_exists():
+            return
+        frame = self._cam_latest.get(code)
+        if frame is not None:
+            try:
+                h = max(lbl.winfo_height(), 480)
+                w = max(lbl.winfo_width(), 640)
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(rgb)
+                img.thumbnail((w, h), Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(image=img)
+                lbl.photo_ref = photo
+                lbl.config(image=photo)
+                status.config(text="播放中", foreground="#0a7d28")
+            except Exception as e:
+                status.config(text="渲染失败：%s" % e, foreground="#c00")
+        else:
+            status.config(text="等待视频帧…", foreground="#666")
+        self.root.after(100, lambda: self._cam_enlarge_tick(code, lbl, status, win))
 
     def _dev_by_code(self, code):
         for d in self.store.list_devices(enabled_only=False):

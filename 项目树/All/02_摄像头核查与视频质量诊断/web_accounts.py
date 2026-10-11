@@ -57,7 +57,7 @@ CAN = {
     "device_delete":      {ROLE_OWNER: True,  ROLE_ADMIN: False},
     "account_manage":     {ROLE_OWNER: True,  ROLE_ADMIN: False},
     "audit_view":         {ROLE_OWNER: True,  ROLE_ADMIN: False},
-    "hide_cmd_toggle":    {ROLE_OWNER: True,  ROLE_ADMIN: False},
+    "hide_cmd_toggle":    {ROLE_OWNER: True,  ROLE_ADMIN: True},
 }
 
 ACTION_TEXT = {

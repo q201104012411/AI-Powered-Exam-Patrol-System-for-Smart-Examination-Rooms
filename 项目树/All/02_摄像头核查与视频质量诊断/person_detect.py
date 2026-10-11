@@ -15,6 +15,13 @@ import cv2
 
 class PersonDetector(object):
     def __init__(self):
+        if not hasattr(cv2, "HOGDescriptor"):
+            raise RuntimeError(
+                "当前 OpenCV 未包含 HOGDescriptor，无法运行 AI 越界检测。\n"
+                "可能原因：安装的是 opencv-python-headless 或被裁剪过的 cv2。\n"
+                "可尝试：pip install --upgrade opencv-python")
+        if not hasattr(cv2, "HOGDescriptor_getDefaultPeopleDetector"):
+            raise RuntimeError("当前 OpenCV 缺少 HOG 默认行人检测器。")
         self.hog = cv2.HOGDescriptor()
         self.hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
 
