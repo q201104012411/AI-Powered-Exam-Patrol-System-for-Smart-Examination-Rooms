@@ -56,6 +56,38 @@ config.ensure_stdio("gui_console.log")
 HIDE_CMD_FLAG = str(config.HIDE_CMD_FLAG)
 
 
+class _BehaviorTracker(object):
+    """实时监控 AI 行为连续帧计数：达到阈值且冷却完成后才向 03 发告警"""
+    THRESHOLD = 30          # 连续 30 帧（约 1 秒）视为一次有效异常
+    COOLDOWN_SEC = 30       # 同类型行为 30 秒内只报一次
+
+    def __init__(self):
+        # key: (code, behavior) -> {"count": int, "last_alert": float}
+        self._state = {}
+
+    def update(self, code, behaviors):
+        now = time.time()
+        seen = set()
+        triggered = []
+        for b in behaviors:
+            key = (code, b)
+            seen.add(key)
+            s = self._state.get(key)
+            if s is None:
+                s = {"count": 0, "last_alert": 0}
+                self._state[key] = s
+            s["count"] += 1
+            if s["count"] >= self.THRESHOLD \
+                    and (now - s["last_alert"]) > self.COOLDOWN_SEC:
+                s["last_alert"] = now
+                triggered.append(b)
+        # 当前帧没出现的异常行为，计数清零
+        for key, s in list(self._state.items()):
+            if key[0] == code and key not in seen:
+                s["count"] = 0
+        return triggered
+
+
 class App(object):
     def __init__(self, root):
         self.root = root
@@ -745,40 +777,6 @@ class App(object):
             self.refresh_mon()
 
     # ---------------- 实时监控（多摄像头，owner/admin 可见） ----------------
-    # -- 以下类用于 02 实时监控 AI 行为连续帧计数与上报 --
-
-
-class _BehaviorTracker(object):
-    """连续异常行为计数器：达到阈值且冷却完成后才向 03 发告警"""
-    THRESHOLD = 30          # 连续 30 帧（约 1 秒）视为一次有效异常
-    COOLDOWN_SEC = 30       # 同类型行为 30 秒内只报一次
-
-    def __init__(self):
-        # key: (code, behavior) -> {"count": int, "last_alert": float}
-        self._state = {}
-
-    def update(self, code, behaviors):
-        now = time.time()
-        seen = set()
-        triggered = []
-        for b in behaviors:
-            key = (code, b)
-            seen.add(key)
-            s = self._state.get(key)
-            if s is None:
-                s = {"count": 0, "last_alert": 0}
-                self._state[key] = s
-            s["count"] += 1
-            if s["count"] >= self.THRESHOLD \
-                    and (now - s["last_alert"]) > self.COOLDOWN_SEC:
-                s["last_alert"] = now
-                triggered.append(b)
-        # 当前帧没出现的异常行为，计数清零
-        for key, s in list(self._state.items()):
-            if key[0] == code and key not in seen:
-                s["count"] = 0
-        return triggered
-
     def _mon_tab(self):
         f = self.t_mon
         ttk.Label(f, text="实时监控（基于设备台账取流地址，多摄像头同时播放）",

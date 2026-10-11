@@ -22,6 +22,19 @@ if not defined PY (
     exit /b 1
 )
 
+REM ---- 启动前快速自检：关键源码编译检查，损坏则中止启动（完整自检用「启动前自检.bat」） ----
+if not exist "%H%data\logs" mkdir "%H%data\logs" >nul 2>nul
+"%PY%" -m py_compile gui.py person_detect.py linkage_bridge.py web_accounts.py storage.py models.py patrol.py integration_api.py ui_selfcheck.py 2>"%H%data\logs\compile_check.log"
+if errorlevel 1 (
+    echo ============================================
+    echo  [自检失败] 源代码编译检查未通过，已中止启动
+    echo  详情见：data\logs\compile_check.log
+    echo ============================================
+    type "%H%data\logs\compile_check.log"
+    pause
+    exit /b 1
+)
+
 REM ---- 隐藏命令行窗口：所有者勾选后在 data\hide_cmd.on 写标记，这里据此改用 pythonw.exe ----
 REM 数据目录可能被 EXAM_CAMERA_HOME 或 camera_home.txt 改到别处，三处都认。
 set "FLAG="
