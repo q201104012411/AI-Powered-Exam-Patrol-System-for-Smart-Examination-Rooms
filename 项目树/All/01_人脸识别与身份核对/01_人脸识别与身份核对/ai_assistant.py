@@ -238,7 +238,7 @@ def _api_generate(model, messages, timeout, num_predict=384, think=False):
         "model": model,
         "messages": messages,
         "stream": False,
-        "options": {"num_predict": num_predict, "num_ctx": NUM_CTX},
+        "options": {"num_predict": num_predict},  # 不强制 num_ctx：让 ollama 用模型默认窗口，避免截断
     }
     if think and is_qwen:
         payload["think"] = False
@@ -276,6 +276,18 @@ def ollama_chat(model, messages, timeout=CHAT_TIMEOUT, num_predict=384):
             return False, "", "ollama API 调用失败：%s" % e, "api"
         if ok and reply.strip():
             return True, reply, "", "api"
+        # 第一次得到空回复：可能是提示词太长/上下文截断导致模型无话可讲，
+        # 用极简系统提示重试一次，优先保证用户能看到输出。
+        try:
+            ok2, reply2, _ = _api_generate(
+                model,
+                [{"role": "system", "content": "你是一个本地 AI 助手，请直接回答用户。"},
+                 {"role": "user", "content": (messages[-1].get("content") or "")}],
+                timeout, num_predict=num_predict)
+            if ok2 and reply2.strip():
+                return True, reply2, "", "api"
+        except Exception:
+            pass
         return False, "", (err or "ollama 返回了空回复（模型可能未下载完成）"), "api"
 
     prompt = _flatten_for_cli(messages)

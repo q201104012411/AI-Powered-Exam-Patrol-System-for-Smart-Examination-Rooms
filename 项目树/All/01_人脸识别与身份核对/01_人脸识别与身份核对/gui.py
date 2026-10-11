@@ -1214,6 +1214,7 @@ class FaceVerifyGUI:
         import cmd_console
 
         is_full = (tier == accounts.CMD_TIER_FULL)
+        import ai_assistant
         win = tk.Toplevel(self.root)
         win.title(("命令控制台（所有者 · 完整权限）" if is_full
                    else "AI 辅助判断（管理员 · 仅 ollama）")
@@ -1244,6 +1245,8 @@ class FaceVerifyGUI:
             ttk.Radiobutton(top, text="系统命令", value="cmd",
                             variable=mode_var).pack(side="left")
             ttk.Radiobutton(top, text="Python 代码", value="python",
+                            variable=mode_var).pack(side="left", padx=(6, 0))
+            ttk.Radiobutton(top, text="AI 对话", value="ai",
                             variable=mode_var).pack(side="left", padx=(6, 16))
         else:
             # 管理员锁定为 ollama：界面不给选择，执行时服务端还会强制一次
@@ -1252,12 +1255,23 @@ class FaceVerifyGUI:
                                  variable=mode_var)
             rb.pack(side="left", padx=(6, 16))
             rb.config(state="disabled")
+
+        # AI 模式下才需要模型选择（命令/python/ollama 模式可折叠，但为简化布局始终显示）
+        ttk.Label(top, text="模型：").pack(side="left")
+        ai_model_var = tk.StringVar(value=ai_assistant.DEFAULT_MODEL)
+        ai_model_box = ttk.Combobox(top, textvariable=ai_model_var, width=30,
+                                    values=(ai_assistant.DEFAULT_MODEL,))
+        ai_model_box.pack(side="left")
+        ttk.Button(top, text="🔄", width=3,
+                   command=lambda: self._ai_refresh_models_popup(ai_model_box)).pack(side="left", padx=(2, 12))
+
         ttk.Label(top, text="超时(秒)：").pack(side="left")
         timeout_var = tk.StringVar(value=str(cmd_console.DEFAULT_TIMEOUT))
         ttk.Spinbox(top, from_=1, to=cmd_console.MAX_TIMEOUT, width=6,
                     textvariable=timeout_var).pack(side="left")
 
-        ttk.Label(win, text="命令 / 代码（Ctrl+Enter 执行）").pack(anchor="w", padx=10, pady=(10, 2))
+        input_label = ttk.Label(win, text="命令 / 代码 / AI 消息（Ctrl+Enter 执行）")
+        input_label.pack(anchor="w", padx=10, pady=(10, 2))
         code_box = scrolledtext.ScrolledText(win, height=8, font=("Consolas", 10))
         code_box.pack(fill="both", expand=True, padx=10)
 
@@ -1265,6 +1279,7 @@ class FaceVerifyGUI:
         bar.pack(fill="x", padx=10, pady=6)
         run_btn = ttk.Button(bar, text="▶ 执行")
         run_btn.pack(side="left")
+        ttk.Button(bar, text="清空输出", command=lambda: set_out("（已清空）")).pack(side="left", padx=(6, 0))
         ttk.Button(bar, text="关闭", command=win.destroy).pack(side="right")
         meta = ttk.Label(bar, text="", foreground="#374151")
         meta.pack(side="left", padx=12)
@@ -1276,6 +1291,11 @@ class FaceVerifyGUI:
         out_box.insert("end", "（尚未执行）")
         out_box.config(state="disabled")
 
+        # AI 对话模式需要的状态
+        ai_chat = ai_assistant.AIChat(model=ai_model_var.get())
+        ai_free_var = tk.BooleanVar(value=False)
+        ai_busy = [False]          # 用可变对象闭包
+
         def set_out(text):
             out_box.config(state="normal")
             out_box.delete("1.0", "end")
@@ -1283,10 +1303,44 @@ class FaceVerifyGUI:
             out_box.see("end")
             out_box.config(state="disabled")
 
+        def append_out(text, tag=None):
+            out_box.config(state="normal")
+            if out_box.get("1.0", "end").strip() in ("（尚未执行）", "（已清空）"):
+                out_box.delete("1.0", "end")
+            if tag:
+                out_box.insert("end", text.rstrip() + "\n", tag)
+            else:
+                out_box.insert("end", text.rstrip() + "\n")
+            out_box.see("end")
+            out_box.config(state="disabled")
+
+        def remove_thinking_line():
+            out_box.config(state="normal")
+            text = out_box.get("1.0", "end")
+            lines = text.split("\n")
+            for i in range(len(lines) - 1, -1, -1):
+                if "正在思考，请稍候" in lines[i]:
+                    start = "%d.0" % (i + 1)
+                    end = "%d.end+1c" % (i + 1)
+                    out_box.delete(start, end)
+                    break
+            out_box.config(state="disabled")
+
+        def mode_label():
+            m = mode_var.get()
+            return {"cmd": "系统命令", "python": "Python 代码",
+                    "ai": "AI 对话", "ollama": "ollama 单次"}.get(m, m)
+
+        def ai_toggle_free_mode():
+            on = not ai_free_var.get()
+            ai_free_var.set(on)
+            append_out("🤖 %s" % ("已进入自由对话模式，提示词限制已关闭。"
+                                   if on else "已退出自由对话模式，恢复考场助手提示词。"))
+
         def do_run(event=None):
             code = code_box.get("1.0", "end").rstrip("\n")
             if not code.strip():
-                messagebox.showwarning("提示", "请输入要执行的命令或代码" if is_full
+                messagebox.showwarning("提示", "请输入要执行的命令、代码或 AI 消息" if is_full
                                        else "请输入 `ollama run <模型> [提示词]`")
                 return "break"
             try:
@@ -1296,6 +1350,60 @@ class FaceVerifyGUI:
             # 模式由层级决定，不信任界面控件：管理员恒为 ollama
             mode = mode_var.get() if is_full else "ollama"
 
+            # ---------- AI 对话模式：走 ai_assistant 多轮聊天 ----------
+            if mode == "ai":
+                text = code.strip()
+                if text == "EDY_POWERQ":
+                    ai_toggle_free_mode()
+                    code_box.delete("1.0", "end")
+                    return "break"
+                if ai_busy[0]:
+                    append_out("⚠ 上一条 AI 请求还未完成，请稍候再试。")
+                    return "break"
+                nonlocal ai_chat
+                model_want = ai_model_var.get().strip() or ai_assistant.DEFAULT_MODEL
+                if ai_chat.model != model_want:
+                    ai_chat = ai_assistant.AIChat(model=model_want)
+                ai_busy[0] = True
+                run_btn.config(state="disabled")
+                meta.config(text="AI 思考中…（%s）" % ("自由对话" if ai_free_var.get() else "考场助手"))
+                append_out("🧑 你：%s" % text)
+                append_out("🤖 AI 正在思考，请稍候…")
+                code_box.delete("1.0", "end")
+
+                def ai_worker():
+                    try:
+                        ok, reply, transport = ai_chat.ask(
+                            text, operator=self.user["username"], tier=tier,
+                            source="gui-cmd", timeout=to,
+                            free_mode=bool(ai_free_var.get()))
+                    except Exception as e:
+                        ok, reply, transport = False, "AI 调用异常：%s" % e, ""
+
+                    def ai_apply():
+                        try:
+                            if not win.winfo_exists():
+                                return
+                        except tk.TclError:
+                            return
+                        ai_busy[0] = False
+                        remove_thinking_line()
+                        tag = "ai_ok" if ok else "ai_err"
+                        line = "%s：%s" % ("🤖 AI" if ok else "⚠ AI 调用失败", reply)
+                        append_out(line, tag=tag)
+                        # 同步到主界面结果区
+                        self._append_to_main_output(line)
+                        meta.config(text=("✅ 已回复 ｜ %s" % transport if ok
+                                          else "❌ 失败"))
+                        run_btn.config(state="normal")
+                    try:
+                        win.after(0, ai_apply)
+                    except tk.TclError:
+                        pass
+                threading.Thread(target=ai_worker, daemon=True).start()
+                return "break"
+
+            # ---------- 命令 / Python / ollama 单次 ----------
             run_btn.config(state="disabled")
             meta.config(text="执行中…")
             set_out("（执行中，请稍候…）")
@@ -1344,6 +1452,10 @@ class FaceVerifyGUI:
         run_btn.config(command=do_run)
         code_box.bind("<Control-Return>", do_run)
         code_box.focus_set()
+
+        # 标签颜色
+        out_box.tag_config("ai_ok", foreground="#34d399")
+        out_box.tag_config("ai_err", foreground="#fca5a5")
 
     # ---------------- 内置命令控制台（与视频并排，不弹窗） ----------------
     def _build_console_panel(self, box):
@@ -1734,8 +1846,11 @@ class FaceVerifyGUI:
                 except tk.TclError:
                     return
                 self._ai_busy = False
-                # 把之前的“正在思考…”提示删掉，换成正式回复
-                self._ai_remove_thinking_line()
+                # 把之前的“正在思考…”提示删掉，换成正式回复（删除失败也不影响后续输出）
+                try:
+                    self._ai_remove_thinking_line()
+                except Exception:
+                    pass
                 tag = "🤖 AI" if ok else "⚠ AI 调用失败"
                 line = "%s：%s" % (tag, reply)
                 self._ai_append_out(line, tag=("ai_bot" if ok else "ai_err"))
@@ -1867,6 +1982,35 @@ class FaceVerifyGUI:
                     box_w.config(values=vals)
                     if not cur and names:
                         self.ai_model_var.set(names[0])
+                except tk.TclError:
+                    pass
+            try:
+                self.root.after(0, apply)
+            except (tk.TclError, RuntimeError):
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ai_refresh_models_popup(self, box):
+        """给命令控制台弹窗里的模型下拉框刷新模型列表"""
+        import ai_assistant
+
+        def work():
+            try:
+                names = ai_assistant.list_models()
+            except Exception:
+                return
+
+            def apply():
+                if not self._widget_alive(box):
+                    return
+                try:
+                    cur = box.get().strip()
+                    vals = tuple(names)
+                    if cur and cur not in names:
+                        vals = (cur,) + vals
+                    box.config(values=vals)
+                    if not cur and names:
+                        box.set(names[0])
                 except tk.TclError:
                     pass
             try:
