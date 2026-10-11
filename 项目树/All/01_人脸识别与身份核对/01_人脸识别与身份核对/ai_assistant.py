@@ -10,7 +10,7 @@ AI 助手：基于本地 ollama 大模型的多轮对话 + 当前操作感知（
 
 安全与隐私边界（与 cmd_console 一致的设计立场，改动前请先读完）：
   · 只调用 ollama：优先走本机 HTTP API（127.0.0.1:11434），
-    API 不可用时回退到 `ollama run <模型> <提示词>` 子进程（shell=False，
+    API 不可用时回退到 `ollama run <提示词>` 子进程（shell=False，
     与 cmd_console 白名单同一条执行路径）——不引入任何新的执行面；
   · 模型与数据都在本机，快照不会出本机；
   · 快照只含界面状态与结果摘要（结果区本身已按项目隐私策略脱敏），
@@ -33,28 +33,34 @@ import cmd_console
 DEFAULT_MODEL = "modelscope.cn/Qwen/Qwen3-4B-GGUF"
 API_CHAT_URL = "http://127.0.0.1:11434/api/chat"
 API_TAGS_URL = "http://127.0.0.1:11434/api/tags"
-CHAT_TIMEOUT = 300            # 对话最长等待（秒）：本地 4B 模型 CPU 推理可能较慢
-WATCH_TIMEOUT = 180           # AI 巡视最长等待（秒）
-MAX_HISTORY = 10              # 保留的对话轮数（防止上下文无限增长）
-API_PROBE_TIMEOUT = 1.5       # 探测 ollama API 是否在线的超时（秒）
+CHAT_TIMEOUT = 180           # 对话最长等待（秒）：关闭了思考模式后，4B 模型通常几秒就回
+WATCH_TIMEOUT = 120          # AI 巡视最长等待（秒）
+MAX_HISTORY = 10             # 保留的对话轮数（防止上下文无限增长）
+API_PROBE_TIMEOUT = 1.0      # 探测 ollama API 是否在线的超时（秒）
+API_AVAIL_TTL = 5            # API 可用性缓存有效期（秒）：避免每条消息都额外探测一次
 
 SYSTEM_PROMPT = (
     "你是「智能考场 · 人脸识别与身份核对」终端的内置 AI 助手，运行在本地 ollama 上。\n"
     "每条用户消息都会附带【当前界面状态快照】，请结合快照理解操作员正在做什么。\n"
-    "你的职责：\n"
-    "1) 回答操作员的问题，尤其是关于当前操作、核验结果、拦截原因的疑问；\n"
-    "2) 发现流程遗漏（未开视频、未登记同意、证件未人工核对等）时主动提醒；\n"
-    "3) 回答使用简体中文，简洁、条目化，不超过 6 行；\n"
+    "回答要求：\n"
+    "1) 直接给出答案，不要输出思考过程；\n"
+    "2) 使用简体中文，简洁、条目化，不超过 6 行；\n"
+    "3) 发现流程遗漏（未开视频、未登记同意、证件未人工核对等）时主动提醒；\n"
     "4) 不要编造快照里不存在的信息；不确定就说不确定。"
 )
 
 WATCH_PROMPT = (
-    "以下是考场核验终端操作员当前的界面状态快照。请用简体中文 2-4 句话说明：\n"
+    "以下是考场核验终端操作员当前的界面状态快照。请直接给出结论，不要思考过程。\n"
+    "用简体中文 2-4 句话说明：\n"
     "① 操作员当前正在做什么；\n"
     "② 是否存在异常或流程遗漏（如未开实时视频、未登记单独同意、人脸通过后证件未核对）；\n"
     "③ 下一步建议。\n"
-    "直接给结论，不要复述快照原文。"
+    "不要复述快照原文。"
 )
+
+# 复用同一个 opener，让多次 API 调用能复用 TCP 连接（keep-alive），减少握手开销。
+_API_OPENER = urllib.request.build_opener(urllib.request.HTTPHandler())
+_API_AVAIL_CACHE = {"avail": None, "at": 0, "ttl": API_AVAIL_TTL}
 
 
 def _strip_think(text):
@@ -67,12 +73,19 @@ def _strip_think(text):
 
 
 def _api_available():
-    """ollama HTTP API 是否在线（快速探测，不在线不阻塞）"""
+    """
+    ollama HTTP API 是否在线。带 5 秒缓存，避免连续对话/巡视时每轮都多发一次探测请求。
+    """
+    now = time.time()
+    if _API_AVAIL_CACHE["avail"] is not None and now - _API_AVAIL_CACHE["at"] < _API_AVAIL_CACHE["ttl"]:
+        return _API_AVAIL_CACHE["avail"]
     try:
-        with urllib.request.urlopen(API_TAGS_URL, timeout=API_PROBE_TIMEOUT):
-            return True
+        with _API_OPENER.open(API_TAGS_URL, timeout=API_PROBE_TIMEOUT):
+            avail = True
     except Exception:
-        return False
+        avail = False
+    _API_AVAIL_CACHE.update({"avail": avail, "at": now})
+    return avail
 
 
 def list_models(timeout=10):
@@ -82,7 +95,7 @@ def list_models(timeout=10):
     """
     names = []
     try:
-        with urllib.request.urlopen(API_TAGS_URL, timeout=API_PROBE_TIMEOUT) as resp:
+        with _API_OPENER.open(API_TAGS_URL, timeout=API_PROBE_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8", "replace"))
         for m in data.get("models", []):
             n = (m.get("name") or m.get("model") or "").strip()
@@ -126,35 +139,16 @@ def _flatten_for_cli(messages):
             parts.append("【你之前的回答】\n" + content)
         else:
             parts.append("【操作员】\n" + content)
-    parts.append("请直接回复最后一条【操作员】消息。")
+    parts.append("请直接回复最后一条【操作员】消息，不要输出思考过程。")
     return "\n\n".join(parts)
 
 
-def _api_generate(model, messages, timeout, think=False):
-    """
-    调一次 /api/chat。返回 (ok, reply, err)。
-    think=False：关闭 Qwen3 等模型的思考模式——本地小模型一想就是几分钟，
-    界面上表现为"AI 巡视分析中…"却迟迟没输出（真实反馈的问题）。
-    """
-    payload = {
-        "model": model,
-        "messages": messages,
-        "stream": False,
-        "think": think,                     # 不支持的旧版本会在调用方 400 重试时去掉
-        "options": {"num_predict": 384},    # 限制回复长度：考场助手不需要长篇大论
-    }
-    req = urllib.request.Request(
-        API_CHAT_URL,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read().decode("utf-8", "replace")
+def _parse_api_response(raw):
+    """解析 /api/chat 的返回：单 JSON 或 NDJSON（旧版 ollama 忽略 stream:false）"""
     try:
         data = json.loads(raw)
         return True, ((data.get("message") or {}).get("content") or ""), ""
     except json.JSONDecodeError:
-        # 老版本 ollama 忽略 stream:false，返回的是逐行 JSON（NDJSON）：
-        # 把所有行的 message.content 拼起来就是完整回复
         parts = []
         for line in raw.splitlines():
             line = line.strip()
@@ -170,22 +164,46 @@ def _api_generate(model, messages, timeout, think=False):
         return False, "", "无法解析 ollama 的返回"
 
 
-def ollama_chat(model, messages, timeout=CHAT_TIMEOUT):
+def _api_generate(model, messages, timeout, num_predict=384, think=False):
+    """调一次 /api/chat。think 仅对 Qwen 系模型启用，避免其它模型 400。"""
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "options": {"num_predict": num_predict},
+    }
+    # Qwen3 的 /no_think 对应 API 参数：只有 Qwen 模型才发 think:false
+    if think and "qwen" in model.lower():
+        payload["think"] = False
+    req = urllib.request.Request(
+        API_CHAT_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"})
+    with _API_OPENER.open(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", "replace")
+    return _parse_api_response(raw)
+
+
+def ollama_chat(model, messages, timeout=CHAT_TIMEOUT, num_predict=384):
     """
     调 ollama 完成一轮对话。返回 (ok, reply, err, transport)。
     transport: "api"（HTTP API）或 "cli"（ollama run 子进程）。
     """
     model = (model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    is_qwen = "qwen" in model.lower()
 
     # 路径一：HTTP API（多轮原生支持，速度更快）
     if _api_available():
         try:
-            ok, reply, err = _api_generate(model, messages, timeout)
+            ok, reply, err = _api_generate(model, messages, timeout,
+                                           num_predict=num_predict,
+                                           think=is_qwen)
         except urllib.error.HTTPError as e:
-            if e.code == 400:
+            if e.code == 400 and is_qwen:
                 # 旧版 ollama 不认识 think 字段：去掉后重试一次
                 try:
-                    ok, reply, err = _api_generate_no_think(model, messages, timeout)
+                    ok, reply, err = _api_generate(model, messages, timeout,
+                                                   num_predict=num_predict)
                 except Exception as e2:
                     return False, "", "ollama API 调用失败：%s" % e2, "api"
             elif e.code == 404:
@@ -202,7 +220,9 @@ def ollama_chat(model, messages, timeout=CHAT_TIMEOUT):
 
     # 路径二：`ollama run <模型> <提示词>`（shell=False，与 cmd_console 白名单同路径）
     # 结尾附 /no_think：Qwen3 的关闭思考指令，其它模型会把它当普通文本，无害
-    prompt = _flatten_for_cli(messages) + "\n\n/no_think"
+    prompt = _flatten_for_cli(messages)
+    if is_qwen:
+        prompt += "\n\n/no_think"
     res = cmd_console.run_ollama(["ollama", "run", model, prompt],
                                  timeout=timeout)
     if res["ok"] and (res["stdout"] or "").strip():
@@ -213,31 +233,6 @@ def ollama_chat(model, messages, timeout=CHAT_TIMEOUT):
     elif not err:
         err = "ollama 不可用或未安装模型 %s" % model
     return False, "", err, "cli"
-
-
-def _api_generate_no_think(model, messages, timeout):
-    """不带 think 字段的重试（兼容旧版 ollama）"""
-    payload = {"model": model, "messages": messages, "stream": False,
-               "options": {"num_predict": 384}}
-    req = urllib.request.Request(
-        API_CHAT_URL, data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read().decode("utf-8", "replace")
-    try:
-        data = json.loads(raw)
-        return True, ((data.get("message") or {}).get("content") or ""), ""
-    except json.JSONDecodeError:
-        parts = []
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                parts.append((json.loads(line).get("message") or {}).get("content") or "")
-            except Exception:
-                pass
-        return (True, "".join(parts), "") if parts else (False, "", "无法解析 ollama 的返回")
 
 
 def _audit_chat(kind, model, text, ok, detail, duration_ms, operator, tier, source,
@@ -281,7 +276,8 @@ class AIChat:
                     + self.history
                     + [{"role": "user", "content": user_content}])
         started = time.time()
-        ok, reply, err, transport = ollama_chat(self.model, messages, timeout=timeout)
+        ok, reply, err, transport = ollama_chat(self.model, messages, timeout=timeout,
+                                                num_predict=512)  # 对话允许略长
         duration_ms = int((time.time() - started) * 1000)
         if ok:
             reply = _strip_think(reply)
@@ -308,7 +304,8 @@ def analyze_activity(snapshot, model=None, operator="", tier="full", source="gui
         {"role": "user", "content": WATCH_PROMPT + "\n\n" + (snapshot or "（无快照）")},
     ]
     started = time.time()
-    ok, reply, err, transport = ollama_chat(model, messages, timeout=timeout)
+    ok, reply, err, transport = ollama_chat(model, messages, timeout=timeout,
+                                            num_predict=256)  # 巡视更短更快
     duration_ms = int((time.time() - started) * 1000)
     if ok:
         reply = _strip_think(reply)
