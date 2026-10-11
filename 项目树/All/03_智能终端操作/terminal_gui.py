@@ -15,6 +15,7 @@
 """
 import os
 import shutil
+import json
 import sys
 import threading
 import time
@@ -273,122 +274,322 @@ class TerminalApp(object):
         self.v_out.insert("end", "桥接状态：%s\n%s\n" % (
             "✅ 可用" if ok else "⚠ " + why, why if not ok else ""))
 
-    # ---------- 监控查看（真实视频流，仅 owner/admin/patrol 可见） ----------
+    # ---------- 监控查看（多摄像头视频流，仅 owner/admin/patrol 可见） ----------
+    def _monitor_load(self):
+        p = config.DATA_ROOT / "monitors.json"
+        if not p.exists():
+            return []
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+
+    def _monitor_save(self):
+        try:
+            (config.DATA_ROOT / "monitors.json").write_text(
+                json.dumps(self.monitors, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+        except Exception as e:
+            messagebox.showerror("保存失败", str(e))
+
     def _build_monitor_tab(self):
         f = self.tab_monitor
-        ttk.Label(f, text="实时视频监控（RTSP / HTTP 推流）", font=FONT_B).pack(anchor="w")
+        ttk.Label(f, text="实时视频监控（多摄像头同时播放）", font=FONT_B).pack(anchor="w")
         if not HAS_CV2 or not HAS_PIL:
             ttk.Label(f, text="⚠ 缺少视频播放依赖：需要 opencv-python 与 Pillow",
                       foreground="#c00").pack(anchor="w", pady=10)
             return
 
+        self.monitors = self._monitor_load()
+        self._cam_threads = {}      # url -> thread
+        self._cam_caps = {}         # url -> cap
+        self._cam_running = {}      # url -> bool
+        self._cam_photos = {}       # url -> PhotoImage
+
         bar = ttk.Frame(f)
         bar.pack(fill="x", pady=(6, 6))
-        ttk.Label(bar, text="推流地址：").pack(side="left")
-        self.monitor_url = tk.StringVar()
-        # 尝试读取上次保存的地址
-        try:
-            p = config.DATA_ROOT / "monitor_url.txt"
-            if p.exists():
-                self.monitor_url.set(p.read_text(encoding="utf-8").strip())
-        except Exception:
-            pass
-        ttk.Entry(bar, textvariable=self.monitor_url, width=70).pack(side="left", padx=4)
-        self.monitor_btn = ttk.Button(bar, text="▶ 开始播放", command=self._monitor_start)
-        self.monitor_btn.pack(side="left", padx=4)
-        ttk.Button(bar, text="⏹ 停止", command=self._monitor_stop).pack(side="left")
+        ttk.Button(bar, text="📹 管理摄像头",
+                   command=self._monitor_manage).pack(side="left")
+        ttk.Button(bar, text="▶ 全部播放",
+                   command=self._monitor_play_all).pack(side="left", padx=6)
+        ttk.Button(bar, text="⏹ 全部停止",
+                   command=self._monitor_stop_all).pack(side="left")
+        self.monitor_status = ttk.Label(bar, text="就绪", foreground="#666")
+        self.monitor_status.pack(side="right")
 
-        self.monitor_label = tk.Label(f, bg="#000", relief="sunken")
-        self.monitor_label.pack(fill="both", expand=True, pady=(0, 6))
-        self.monitor_status = ttk.Label(f, text="就绪：请输入推流地址后点击开始播放",
-                                        foreground="#666")
-        self.monitor_status.pack(anchor="w")
+        # 摄像头画面网格容器
+        self.monitor_grid = ttk.Frame(f)
+        self.monitor_grid.pack(fill="both", expand=True)
+        self._monitor_render_grid()
 
-        self._cap = None
-        self._monitor_thread = None
-        self._monitor_running = False
-        self._monitor_photo = None
-
-    def _monitor_start(self):
-        if self._monitor_running:
+    def _monitor_render_grid(self):
+        """根据 monitors 列表渲染摄像头面板网格"""
+        for w in self.monitor_grid.winfo_children():
+            w.destroy()
+        if not self.monitors:
+            ttk.Label(self.monitor_grid,
+                      text="暂无摄像头，请点击「管理摄像头」添加（考场编号 / 设备名称 / 推流URL）。",
+                      foreground="#888").pack(pady=30)
             return
-        url = self.monitor_url.get().strip()
-        if not url:
-            messagebox.showwarning("提示", "请先填写推流地址")
-            return
-        try:
-            (config.DATA_ROOT / "monitor_url.txt").write_text(url, encoding="utf-8")
-        except Exception:
-            pass
-        self._monitor_stop()
-        self._cap = cv2.VideoCapture(url)
-        if not self._cap.isOpened():
-            messagebox.showerror("播放失败", "无法打开视频流：%s" % url)
-            self._cap = None
-            return
-        self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        self._monitor_running = True
-        self.monitor_btn.config(text="播放中…")
-        self.monitor_status.config(text="正在缓冲 %s…" % url)
-        self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
-        self._monitor_thread.start()
+        cols = 2
+        for i, cam in enumerate(self.monitors):
+            room = cam.get("room", "未命名考场")
+            device = cam.get("device", "未命名设备")
+            url = cam.get("url", "")
+            frame = ttk.LabelFrame(self.monitor_grid, text=" %s · %s " % (room, device),
+                                   padding=4)
+            frame.grid(row=i // cols, column=i % cols, sticky="nsew", padx=4, pady=4)
+            self.monitor_grid.rowconfigure(i // cols, weight=1)
+            self.monitor_grid.columnconfigure(i % cols, weight=1)
 
-    def _monitor_loop(self):
-        while self._monitor_running and self._cap and self._cap.isOpened():
-            ok, frame = self._cap.read()
+            lbl = tk.Label(frame, bg="#000", relief="sunken")
+            lbl.pack(fill="both", expand=True)
+            cam["_label"] = lbl
+            status = ttk.Label(frame, text="未播放", foreground="#666")
+            status.pack(anchor="w")
+            cam["_status"] = status
+            bbar = ttk.Frame(frame)
+            bbar.pack(fill="x", pady=(2, 0))
+            cam["_btn"] = ttk.Button(bbar, text="▶ 播放",
+                                     command=lambda u=url: self._cam_play(u))
+            cam["_btn"].pack(side="left")
+            ttk.Button(bbar, text="⏹ 停止",
+                       command=lambda u=url: self._cam_stop(u)).pack(side="left", padx=4)
+
+    @staticmethod
+    def _monitor_try_open(url):
+        """尝试多种后端打开视频流，返回 (cap, backend_name, info)"""
+        backends = []
+        if hasattr(cv2, "CAP_FFMPEG"):
+            backends.append((cv2.CAP_FFMPEG, "FFMPEG"))
+        if hasattr(cv2, "CAP_GSTREAMER"):
+            backends.append((cv2.CAP_GSTREAMER, "GSTREAMER"))
+        backends.append((0, "默认"))
+        last_info = ""
+        for backend, name in backends:
+            try:
+                cap = cv2.VideoCapture(url, backend) if backend else cv2.VideoCapture(url)
+                if cap.isOpened():
+                    ok, frame = cap.read()
+                    if ok and frame is not None:
+                        return cap, name, ""
+                    last_info = "%s 后端能打开但读不到帧" % name
+                    cap.release()
+                else:
+                    last_info = "%s 后端无法打开" % name
+            except Exception as e:
+                last_info = "%s 后端异常：%s" % (name, e)
+        return None, "", last_info
+
+    def _cam_play(self, url):
+        if not url or self._cam_running.get(url):
+            return
+        self._cam_stop(url)
+        cap, backend, info = self._monitor_try_open(url)
+        cam = self._cam_by_url(url)
+        if cap is None:
+            self._cam_set_status(url, "打开失败：%s" % info, "#c00")
+            return
+        self._cam_caps[url] = cap
+        self._cam_running[url] = True
+        self._cam_set_status(url, "[%s后端] 缓冲中…" % backend, "#1f56b8")
+        self._cam_btn_text(url, "播放中…")
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        t = threading.Thread(target=lambda: self._cam_loop(url), daemon=True)
+        self._cam_threads[url] = t
+        t.start()
+
+    def _cam_loop(self, url):
+        cap = self._cam_caps.get(url)
+        while self._cam_running.get(url) and cap and cap.isOpened():
+            ok, frame = cap.read()
             if not ok or frame is None:
                 time.sleep(0.05)
                 continue
             try:
-                self.root.after(0, lambda f=frame: self._monitor_update(f))
+                self.root.after(0, lambda f=frame, u=url: self._cam_update(u, f))
             except (tk.TclError, RuntimeError):
                 break
-            time.sleep(0.033)   # ~30 fps 刷新 UI，避免主线程卡死
+            time.sleep(0.033)
         try:
-            self.root.after(0, self._monitor_cleanup)
+            self.root.after(0, lambda u=url: self._cam_stopped_ui(u))
         except (tk.TclError, RuntimeError):
             pass
 
-    def _monitor_update(self, frame):
-        if not self.monitor_label.winfo_exists():
+    def _cam_update(self, url, frame):
+        cam = self._cam_by_url(url)
+        if cam is None:
+            return
+        lbl = cam.get("_label")
+        if lbl is None or not lbl.winfo_exists():
             return
         try:
-            h = self.monitor_label.winfo_height()
-            w = self.monitor_label.winfo_width()
+            h = lbl.winfo_height()
+            w = lbl.winfo_width()
             if h < 50:
-                h = 480
+                h = 240
             if w < 50:
-                w = 640
+                w = 320
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             img = Image.fromarray(rgb)
             img.thumbnail((w, h), Image.Resampling.LANCZOS)
-            self._monitor_photo = ImageTk.PhotoImage(image=img)
-            self.monitor_label.config(image=self._monitor_photo)
-            self.monitor_status.config(text="播放中：%s" % self.monitor_url.get())
+            self._cam_photos[url] = ImageTk.PhotoImage(image=img)
+            lbl.config(image=self._cam_photos[url])
+            self._cam_set_status(url, "播放中", "#0a7d28")
         except Exception as e:
-            self.monitor_status.config(text="画面渲染失败：%s" % e)
+            self._cam_set_status(url, "渲染失败：%s" % e, "#c00")
 
-    def _monitor_stop(self):
-        self._monitor_running = False
-        if self._cap:
+    def _cam_stop(self, url):
+        self._cam_running[url] = False
+        cap = self._cam_caps.pop(url, None)
+        if cap:
             try:
-                self._cap.release()
+                cap.release()
             except Exception:
                 pass
-            self._cap = None
-        self._monitor_photo = None
+        self._cam_photos.pop(url, None)
+        self._cam_stopped_ui(url)
+
+    def _cam_stopped_ui(self, url):
+        cam = self._cam_by_url(url)
+        if cam is None:
+            return
         try:
-            self.monitor_label.config(image="")
-            self.monitor_btn.config(text="▶ 开始播放")
-            self.monitor_status.config(text="已停止播放")
+            if cam.get("_label") and cam["_label"].winfo_exists():
+                cam["_label"].config(image="")
+            self._cam_btn_text(url, "▶ 播放")
+            self._cam_set_status(url, "已停止", "#666")
         except tk.TclError:
             pass
 
-    def _monitor_cleanup(self):
-        self._monitor_stop()
+    def _cam_by_url(self, url):
+        for c in self.monitors:
+            if c.get("url") == url:
+                return c
+        return None
+
+    def _cam_set_status(self, url, text, color):
+        cam = self._cam_by_url(url)
+        if cam and cam.get("_status") and cam["_status"].winfo_exists():
+            cam["_status"].config(text=text, foreground=color)
+
+    def _cam_btn_text(self, url, text):
+        cam = self._cam_by_url(url)
+        if cam and cam.get("_btn") and cam["_btn"].winfo_exists():
+            cam["_btn"].config(text=text)
+
+    def _monitor_play_all(self):
+        for cam in self.monitors:
+            url = cam.get("url", "")
+            if url:
+                self._cam_play(url)
+        self.monitor_status.config(text="已启动全部摄像头")
+
+    def _monitor_stop_all(self):
+        for cam in list(self.monitors):
+            url = cam.get("url", "")
+            if url:
+                self._cam_stop(url)
+        self.monitor_status.config(text="已停止全部摄像头")
+
+    def _monitor_manage(self):
+        """管理摄像头配置：考场编号、设备名称、推流URL"""
+        win = tk.Toplevel(self.root)
+        win.title("管理摄像头")
+        win.geometry("700x400")
+        win.transient(self.root)
+        win.grab_set()
+
+        cols = ("room", "device", "url")
+        tree = ttk.Treeview(win, columns=cols, show="headings", height=10)
+        tree.heading("room", text="考场编号")
+        tree.heading("device", text="设备名称")
+        tree.heading("url", text="推流地址")
+        tree.column("room", width=100)
+        tree.column("device", width=120)
+        tree.column("url", width=400)
+        tree.pack(fill="both", expand=True, padx=10, pady=6)
+
+        def reload():
+            for i in tree.get_children():
+                tree.delete(i)
+            for c in self.monitors:
+                tree.insert("", "end", values=(c.get("room", ""),
+                                               c.get("device", ""),
+                                               c.get("url", "")))
+        reload()
+
+        def add_or_edit(item=None):
+            old = ("", "", "") if item is None else tree.item(item)["values"]
+            dlg = tk.Toplevel(win)
+            dlg.title("摄像头" + ("编辑" if item else "新增"))
+            dlg.geometry("500x180")
+            dlg.transient(win)
+            dlg.grab_set()
+            f = ttk.Frame(dlg, padding=12)
+            f.pack(fill="both", expand=True)
+            v = [tk.StringVar(value=old[0]), tk.StringVar(value=old[1]), tk.StringVar(value=old[2])]
+            labels = ["考场编号：", "设备名称：", "推流地址："]
+            for i, (lab, var) in enumerate(zip(labels, v)):
+                ttk.Label(f, text=lab).grid(row=i, column=0, sticky="e", pady=4)
+                ttk.Entry(f, textvariable=var, width=50).grid(row=i, column=1, sticky="w")
+
+            def save():
+                room, device, url = [x.get().strip() for x in v]
+                if not room or not device or not url:
+                    messagebox.showwarning("提示", "考场编号、设备名称、推流地址均不能为空")
+                    return
+                new = {"room": room, "device": device, "url": url}
+                if item is None:
+                    self.monitors.append(new)
+                else:
+                    idx = tree.index(item)
+                    self.monitors[idx] = new
+                self._monitor_save()
+                reload()
+                dlg.destroy()
+
+            bbar = ttk.Frame(f)
+            bbar.grid(row=3, column=0, columnspan=2, pady=10)
+            ttk.Button(bbar, text="保存", command=save).pack(side="left", padx=6)
+            ttk.Button(bbar, text="取消", command=dlg.destroy).pack(side="left", padx=6)
+
+        def do_add():
+            add_or_edit()
+
+        def do_edit():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showinfo("提示", "请先选择一行")
+                return
+            add_or_edit(sel[0])
+
+        def do_del():
+            sel = tree.selection()
+            if not sel:
+                return
+            idx = tree.index(sel[0])
+            url = self.monitors[idx].get("url", "")
+            self._cam_stop(url)
+            del self.monitors[idx]
+            self._monitor_save()
+            reload()
+
+        bbar = ttk.Frame(win)
+        bbar.pack(fill="x", padx=10, pady=6)
+        ttk.Button(bbar, text="＋ 新增", command=do_add).pack(side="left")
+        ttk.Button(bbar, text="✏ 编辑", command=do_edit).pack(side="left", padx=6)
+        ttk.Button(bbar, text="🗑 删除", command=do_del).pack(side="left")
+        ttk.Button(bbar, text="关闭", command=win.destroy).pack(side="right")
+
+        def on_close():
+            self._monitor_stop_all()
+            self._monitor_render_grid()
+            win.destroy()
+        win.protocol("WM_DELETE_WINDOW", on_close)
 
     def refresh_monitor(self):
-        """监控页暂无列表数据，状态由视频线程自行维护"""
+        """监控页状态由视频线程自行维护，这里只保证网格与配置一致"""
         pass
 
     # ---------- 运行状态与管控 ----------
