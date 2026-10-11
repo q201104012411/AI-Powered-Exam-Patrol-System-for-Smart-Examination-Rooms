@@ -32,6 +32,11 @@ try:
     HAS_PIL = True
 except Exception:
     HAS_PIL = False
+try:
+    import person_detect as pd_mod
+    HAS_PD = True
+except Exception:
+    HAS_PD = False
 
 import access
 import alerts as alerts_mod
@@ -48,6 +53,52 @@ import storage
 FONT = ("Microsoft YaHei", 10)
 FONT_B = ("Microsoft YaHei", 10, "bold")
 MONO = ("Consolas", 10)
+
+
+class _BehaviorTracker(object):
+    """逐人异常行为计数：同一人同一行为连续达到阈值且冷却完成后才在本终端生成告警"""
+    THRESHOLD = 20          # 连续 20 帧（约 0.7 秒）
+    COOLDOWN_SEC = 30       # 同一人同一行为 30 秒内只报一次
+
+    def __init__(self):
+        # key: (url, pid, behavior) -> {"count": int, "last_alert": float}
+        self._state = {}
+
+    def update(self, url, persons):
+        now = time.time()
+        seen = set()
+        triggered = []
+        for p in persons:
+            pid = p.get("pid", 0)
+            for b in p.get("behaviors", ()):
+                key = (url, pid, b)
+                seen.add(key)
+                s = self._state.get(key)
+                if s is None:
+                    s = {"count": 0, "last_alert": 0}
+                    self._state[key] = s
+                s["count"] += 1
+                if s["count"] >= self.THRESHOLD \
+                        and (now - s["last_alert"]) > self.COOLDOWN_SEC:
+                    s["last_alert"] = now
+                    triggered.append({"pid": pid, "behavior": b,
+                                      "crosses": p.get("crosses", 0)})
+        for key, s in list(self._state.items()):
+            if key[0] == url and key not in seen:
+                s["count"] = 0
+        return triggered
+
+
+# 行为 -> 03 告警码（与 02 linkage_bridge 保持一致）
+_BEHAVIOR_ALERT_CODE = {
+    "触碰红线": "REPEATED_TOUCH_LINE",
+    "越界": "PERSON_OUT_OF_BOUNDS",
+    "大幅度偏转": "BIG_TURN",
+    "起立/站立": "STAND_UP",
+    "前倾/趴桌": "LEAN_FORWARD",
+    "东张西望": "TURN_HEAD",
+    "长时间低头": "LOOK_DOWN",
+}
 
 
 class TerminalApp(object):
@@ -305,6 +356,9 @@ class TerminalApp(object):
         self._cam_caps = {}         # url -> cap
         self._cam_running = {}      # url -> bool
         self._cam_photos = {}       # url -> PhotoImage
+        self._person_detectors = {}  # url -> PersonTracker（每路一条轨迹集）
+        self._behavior_tracker = _BehaviorTracker()
+        self._ai_error_file = config.DATA_ROOT / "ai_detect_error.txt"
 
         bar = ttk.Frame(f)
         bar.pack(fill="x", pady=(6, 6))
@@ -314,6 +368,11 @@ class TerminalApp(object):
                    command=self._monitor_play_all).pack(side="left", padx=6)
         ttk.Button(bar, text="⏹ 全部停止",
                    command=self._monitor_stop_all).pack(side="left")
+        self.mon_ai = tk.BooleanVar(value=False)
+        if HAS_PD:
+            ttk.Checkbutton(
+                bar, text="AI 框选识别（逐人：绿=正常 红=越界/触线）",
+                variable=self.mon_ai).pack(side="left", padx=12)
         self.monitor_status = ttk.Label(bar, text="就绪", foreground="#666")
         self.monitor_status.pack(side="right")
 
@@ -436,6 +495,27 @@ class TerminalApp(object):
         if lbl is None or not lbl.winfo_exists():
             return
         try:
+            # AI 框选识别：勾选了才跑，避免不必要的 CPU 占用
+            if HAS_PD and getattr(self, "mon_ai", None) and self.mon_ai.get():
+                det = self._person_detectors.get(url)
+                if det is None:
+                    try:
+                        det = pd_mod.PersonTracker()
+                        self._person_detectors[url] = det
+                    except Exception as e:
+                        self.mon_ai.set(False)
+                        err = str(e)
+                        self.monitor_status.config(text="AI识别不可用：%s" % err)
+                        try:
+                            self._ai_error_file.write_text(err, encoding="utf-8")
+                        except Exception:
+                            pass
+                        det = None
+                if det is not None:
+                    frame, viol, persons = det.draw(frame)
+                    self.monitor_status.config(
+                        text="AI识别中：%d 人，越界 %d" % (len(persons), viol))
+                    self._ai_ingest_behaviors(url, cam, persons)
             h = lbl.winfo_height()
             w = lbl.winfo_width()
             if h < 50:
@@ -451,6 +531,28 @@ class TerminalApp(object):
         except Exception as e:
             self._cam_set_status(url, "渲染失败：%s" % e, "#c00")
 
+    def _ai_ingest_behaviors(self, url, cam, persons):
+        """逐人异常行为达到阈值后，直接在本终端生成告警（进 03 自己的告警列表）"""
+        try:
+            alerts = self._behavior_tracker.update(url, persons)
+        except Exception:
+            return
+        for a in alerts:
+            code = _BEHAVIOR_ALERT_CODE.get(a["behavior"],
+                                            "PERSON_BEHAVIOR_ABNORMAL")
+            detail = "AI 框选识别：#%d 号人员「%s」" % (a["pid"], a["behavior"])
+            if a["crosses"] >= 2:
+                detail += "（已触碰警戒线 %d 次）" % a["crosses"]
+            detail += "，请复核处置。"
+            alert = models.Alert(code=code, detail=detail,
+                                 room_id=cam.get("room", ""),
+                                 device_id=cam.get("device", "") or url,
+                                 source="terminal_ai")
+            try:
+                self.hub.ingest(alert)
+            except Exception:
+                pass
+
     def _cam_stop(self, url):
         self._cam_running[url] = False
         cap = self._cam_caps.pop(url, None)
@@ -460,6 +562,7 @@ class TerminalApp(object):
             except Exception:
                 pass
         self._cam_photos.pop(url, None)
+        self._person_detectors.pop(url, None)   # 轨迹随停止清空，编号重新计
         self._cam_stopped_ui(url)
 
     def _cam_stopped_ui(self, url):

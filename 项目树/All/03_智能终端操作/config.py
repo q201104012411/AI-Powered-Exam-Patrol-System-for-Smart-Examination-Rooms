@@ -88,6 +88,13 @@ ALERT_CODE_LEVEL = {
     "VIDEO_BLUR": LEVEL_ORANGE,     # 视频模糊
     "OFFLINE": LEVEL_ORANGE,        # 设备离线
     "CLOCK_DRIFT": LEVEL_ORANGE,    # 时钟偏差
+    # ---- AI 框选识别行为告警（02/03 实时监控共用） ----
+    "REPEATED_TOUCH_LINE": LEVEL_RED,   # 多次触碰警戒线（严重）
+    "PERSON_OUT_OF_BOUNDS": LEVEL_ORANGE,  # 越界
+    "BIG_TURN": LEVEL_ORANGE,           # 大幅度偏转/侧转回头
+    "STAND_UP": LEVEL_ORANGE,           # 起立/站立
+    "LEAN_FORWARD": LEVEL_ORANGE,       # 前倾/趴桌
+    "PERSON_BEHAVIOR_ABNORMAL": LEVEL_ORANGE,  # 其他异常行为兜底
 }
 
 # 告警码 -> 中文含义（界面显示用）

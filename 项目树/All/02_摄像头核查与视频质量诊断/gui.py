@@ -57,31 +57,35 @@ HIDE_CMD_FLAG = str(config.HIDE_CMD_FLAG)
 
 
 class _BehaviorTracker(object):
-    """实时监控 AI 行为连续帧计数：达到阈值且冷却完成后才向 03 发告警"""
-    THRESHOLD = 30          # 连续 30 帧（约 1 秒）视为一次有效异常
-    COOLDOWN_SEC = 30       # 同类型行为 30 秒内只报一次
+    """逐人异常行为计数：同一人同一行为连续达到阈值且冷却完成后才向 03 发告警"""
+    THRESHOLD = 20          # 连续 20 帧（约 0.7 秒）视为一次有效异常
+    COOLDOWN_SEC = 30       # 同一人同一行为 30 秒内只报一次
 
     def __init__(self):
-        # key: (code, behavior) -> {"count": int, "last_alert": float}
+        # key: (code, pid, behavior) -> {"count": int, "last_alert": float}
         self._state = {}
 
-    def update(self, code, behaviors):
+    def update(self, code, persons):
+        """persons: [{"pid", "behaviors", "crosses"}]，返回 [{pid, behavior, crosses}]"""
         now = time.time()
         seen = set()
         triggered = []
-        for b in behaviors:
-            key = (code, b)
-            seen.add(key)
-            s = self._state.get(key)
-            if s is None:
-                s = {"count": 0, "last_alert": 0}
-                self._state[key] = s
-            s["count"] += 1
-            if s["count"] >= self.THRESHOLD \
-                    and (now - s["last_alert"]) > self.COOLDOWN_SEC:
-                s["last_alert"] = now
-                triggered.append(b)
-        # 当前帧没出现的异常行为，计数清零
+        for p in persons:
+            pid = p.get("pid", 0)
+            for b in p.get("behaviors", ()):
+                key = (code, pid, b)
+                seen.add(key)
+                s = self._state.get(key)
+                if s is None:
+                    s = {"count": 0, "last_alert": 0}
+                    self._state[key] = s
+                s["count"] += 1
+                if s["count"] >= self.THRESHOLD \
+                        and (now - s["last_alert"]) > self.COOLDOWN_SEC:
+                    s["last_alert"] = now
+                    triggered.append({"pid": pid, "behavior": b,
+                                      "crosses": p.get("crosses", 0)})
+        # 当前帧没出现的 (code,pid,behavior)，计数清零
         for key, s in list(self._state.items()):
             if key[0] == code and key not in seen:
                 s["count"] = 0
@@ -942,22 +946,21 @@ class App(object):
                         except Exception:
                             pass
                 if self._person_detector is not None:
-                    frame, viol, behaviors = self._person_detector.draw(frame)
-                    status_text = "AI检测中，越界：%d" % viol
-                    if behaviors:
-                        status_text += "，行为：%s" % "、".join(set(behaviors))
+                    frame, viol, persons = self._person_detector.draw(frame)
+                    status_text = "AI识别中：%d 人，越界 %d" % (len(persons), viol)
                     self.mon_status.config(text=status_text)
-                    # 多次异常行为上报 03 智能终端
-                    alerts = self._behavior_tracker.update(code, behaviors)
+                    # 逐人多次异常行为上报 03 智能终端
+                    alerts = self._behavior_tracker.update(code, persons)
                     if alerts:
                         dev = self._dev_by_code(code)
-                        for b in alerts:
+                        for a in alerts:
                             try:
                                 import linkage_bridge
                                 linkage_bridge.report_behavior(
                                     device_code=code,
-                                    behavior=b,
-                                    consecutive_frames=self._behavior_tracker.THRESHOLD,
+                                    behavior=a["behavior"],
+                                    pid=a["pid"],
+                                    crosses=a["crosses"],
                                     room_id=dev.room_id if dev else "",
                                     seat_no="",
                                     operator=self.user.username if self.user else "02_ai")
