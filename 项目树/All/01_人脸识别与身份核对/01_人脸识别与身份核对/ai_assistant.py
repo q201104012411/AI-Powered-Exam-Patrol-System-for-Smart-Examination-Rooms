@@ -51,6 +51,20 @@ _BASE_PROMPT = (
     "4) 身份证号只以掩码/哈希形式存在，不要向用户索要身份证明文。"
 )
 
+# 巡视独立使用更短的系统提示，不再背整本知识库
+WATCH_SYSTEM_PROMPT = (
+    "你是考场核验终端的 AI 巡视员。只根据状态快照做极简判断：\n"
+    "1) 操作员在做什么；2) 有无异常或遗漏；3) 下一步建议。\n"
+    "用简体中文 2-4 句话，不要思考过程，不要复述快照原文。"
+)
+
+WATCH_PROMPT = (
+    "以下是当前界面状态快照。请直接给出结论：\n"
+    "① 操作员当前正在做什么；\n"
+    "② 是否存在异常或流程遗漏（如未开实时视频、未登记单独同意、人脸通过后证件未核对）；\n"
+    "③ 下一步建议。"
+)
+
 _REASON_CODES_KB = (
     "核验结果与处置建议：\n"
     "PASS（通过）：提醒核对证件实物（如尚未核对）。\n"
@@ -120,9 +134,10 @@ def _build_system_prompt(user_message="", snapshot="", include_all=False):
         sections.append(_TROUBLESHOOTING_KB)
     if include_all or any(k in combined for k in _COMPLIANCE_KEYS):
         sections.append(_COMPLIANCE_KB)
-    # 完全没命中关键词时兜底（比如用户只打个"你好"），仍加载全部，避免显得太无知
+    # 完全没命中关键词时兜底（比如用户只打个"你好"）：只加载常用操作 + 合规，
+    # 不背整本知识库——这样既省 token 又省时间，还能正常回答基础问题。
     if not sections:
-        sections = [_REASON_CODES_KB, _OPERATIONS_KB, _TROUBLESHOOTING_KB, _COMPLIANCE_KB]
+        sections = [_OPERATIONS_KB, _COMPLIANCE_KB]
     return _BASE_PROMPT + "\n\n" + "\n\n".join(sections)
 
 
@@ -333,14 +348,10 @@ class AIChat:
 def analyze_activity(snapshot, model=None, operator="", tier="full", source="gui",
                      timeout=WATCH_TIMEOUT):
     model = (model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
-    system_prompt = _build_system_prompt("", snapshot, include_all=False)
+    # 巡视用独立短提示词，不背整本知识库，响应更快
     messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": (
-            "请根据以上系统设定和以下状态快照，直接给出结论（不要思考过程）：\n"
-            "① 操作员当前正在做什么；\n"
-            "② 是否存在异常或流程遗漏；\n"
-            "③ 下一步建议。\n\n" + (snapshot or "（无快照）"))},
+        {"role": "system", "content": WATCH_SYSTEM_PROMPT},
+        {"role": "user", "content": WATCH_PROMPT + "\n\n" + (snapshot or "（无快照）")},
     ]
     started = time.time()
     ok, reply, err, transport = ollama_chat(model, messages, timeout=timeout,

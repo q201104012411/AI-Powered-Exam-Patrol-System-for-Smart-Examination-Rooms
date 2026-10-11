@@ -1777,7 +1777,7 @@ class FaceVerifyGUI:
         except Exception:
             pass
         try:                            # 结果区尾部：最近一次核验的结果与原因
-            tail = self.output.get("end-14l", "end-1l").strip()
+            tail = self.output.get("end-8l", "end-1l").strip()
             if tail:
                 lines.append("最近的界面输出（尾部）：\n" + tail)
         except Exception:
