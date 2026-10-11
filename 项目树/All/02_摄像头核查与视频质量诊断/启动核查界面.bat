@@ -37,8 +37,12 @@ if defined FLAG (
     set "PYW=%PY:python.exe=pythonw.exe%"
     if /i "%PYW%"=="%PY%" set "PYW=pythonw.exe"
     if not exist "%PYW%" set "PYW=pythonw.exe"
-    start "" "%PYW%" "%H%gui.py"
-    exit /b 0
+    if exist "%PYW%" (
+        start "" "%PYW%" "%H%gui.py"
+        exit /b 0
+    )
+    echo [警告] 找不到 pythonw.exe：%PYW%
+    echo          将改用 python.exe 显示命令行窗口启动，便于排查问题。
 )
 
 echo ============================================
