@@ -142,6 +142,7 @@ class TerminalApp(object):
         ttk.Button(bar, text="🔄 刷新", command=self.refresh_alerts).pack(side="left")
         ttk.Button(bar, text="✓ 确认选中", command=self._ack).pack(side="left", padx=4)
         ttk.Button(bar, text="📣 一键上报", command=self._report).pack(side="left", padx=4)
+        ttk.Button(bar, text="📋 复制编号", command=self._copy_alert_id).pack(side="left", padx=4)
         if self.session.can("dispatch"):
             ttk.Button(bar, text="🧪 生成演示告警",
                        command=self._demo).pack(side="left", padx=(16, 4))
@@ -291,6 +292,11 @@ class TerminalApp(object):
     def _toggle_hide_cmd(self):
         """所有者开关：是否隐藏启动器命令行窗口（写标记文件，由 .bat 读取）"""
         on = self.hide_cmd.get()
+        ok_report, _ = self._report_sensitive_action(
+            "隐藏命令行窗口", "%s" % ("开启" if on else "关闭"))
+        if not ok_report:
+            self.hide_cmd.set(os.path.exists(str(config.HIDE_CMD_FLAG)))
+            return
         flag = str(config.HIDE_CMD_FLAG)
         try:
             os.makedirs(os.path.dirname(flag), exist_ok=True)
@@ -305,6 +311,33 @@ class TerminalApp(object):
         self.store.log("隐藏命令行窗口", "开启" if on else "关闭", self.session.username)
         messagebox.showinfo("已设置", "下次通过「启动终端界面.bat」启动时%s命令行窗口。"
                             % ("隐藏" if on else "显示（便于查看报错）"))
+
+    # ---------- 敏感权限操作上报（owner 直接执行，其它角色需上报说明） ----------
+    def _report_sensitive_action(self, action_name, detail=""):
+        """
+        对改变权限/配置/数据的高危操作进行上报：
+          · owner 拥有最高权限，直接记审计即可；
+          · 其它角色必须填写上报说明，否则拒绝执行。
+        返回 (ok, report_note)。
+        """
+        if self.session.role == config.ROLE_OWNER:
+            return True, ""
+        note = self._ask_text("权限操作上报",
+                              "[%s] 需要向上级/所有者上报。\n请填写操作说明：" % action_name)
+        if note is None or not note.strip():
+            messagebox.showwarning("已取消", "%s 需要上报说明，未填写则取消执行。" % action_name)
+            return False, ""
+        # 写审计并尝试推送平台（有配置时）
+        full = "%s | %s | %s" % (action_name, detail, note.strip())
+        self.store.log("权限操作上报", full, self.session.username)
+        try:
+            link = bridge.PlatformLink()
+            if link.connectivity():
+                link.post_report({"action": action_name, "detail": detail,
+                                  "note": note.strip(), "operator": self.session.username})
+        except Exception:
+            pass
+        return True, note.strip()
 
     # ---------- 命令控制台（默认关闭；管理员需所有者单独授权） ----------
     def _toggle_console(self):
@@ -325,6 +358,11 @@ class TerminalApp(object):
                 "确定开启？"):
             self.console_on.set(False)          # 取消 -> 回退勾选，不留"看起来开着"的假象
             return
+        ok_report, _ = self._report_sensitive_action(
+            "命令控制台总开关", "设置为 %s" % ("开启" if on else "关闭"))
+        if not ok_report:
+            self.console_on.set(console.console_enabled())
+            return
         ok, msg = console.set_console(on)
         if not ok:
             self.console_on.set(console.console_enabled())
@@ -337,6 +375,11 @@ class TerminalApp(object):
     def _toggle_console_admin(self):
         """所有者开关：单独授权管理员使用 ollama AI 辅助（总开关关闭时授权不生效）"""
         allow = self.console_admin.get()
+        ok_report, _ = self._report_sensitive_action(
+            "命令控制台管理员授权", "%s" % ("授权" if allow else "收回"))
+        if not ok_report:
+            self.console_admin.set(console.console_admin_allowed())
+            return
         ok, msg = console.set_console_admin(allow)
         if not ok:
             self.console_admin.set(console.console_admin_allowed())
@@ -349,6 +392,11 @@ class TerminalApp(object):
     def _toggle_ai_chat(self):
         """所有者开关：授权非所有者角色（管理员/巡考员等）使用 AI 多轮对话"""
         allow = self.ai_chat_on.get()
+        ok_report, _ = self._report_sensitive_action(
+            "AI 对话授权", "%s" % ("授权" if allow else "收回"))
+        if not ok_report:
+            self.ai_chat_on.set(console.ai_chat_allowed())
+            return
         ok, msg = console.set_ai_chat(allow)
         if not ok:
             self.ai_chat_on.set(console.ai_chat_allowed())
@@ -371,8 +419,10 @@ class TerminalApp(object):
                 # 总开关关闭时授权无从生效，把复选框置灰，免得误解为"授权了就能用"
                 self.admin_chk.config(state=("normal" if st["enabled"] else "disabled"))
             if self.ai_chat_chk is not None:
+                # AI 对话授权开关：总开关关时置灰；所有者始终能 AI 对话，但复选框只控制非所有者
                 self.ai_chat_chk.config(state=("normal" if st["enabled"] else "disabled"))
-            if st["can_run"]:
+            # 命令控制台按钮只按命令控制台层级显示：AI 对话走底部常驻面板，不混在这里
+            if st["tier"] != console.CONSOLE_TIER_NONE:
                 self.console_btn.pack(side="left", padx=6)
             else:
                 self.console_btn.pack_forget()
@@ -661,7 +711,8 @@ class TerminalApp(object):
         self.ai_watch_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(top, text="AI 自动分析（无对话时自动分析状态）",
                         variable=self.ai_watch_var).pack(side="left", padx=(12, 0))
-        ttk.Button(top, text="清空记录", command=self._ai_clear).pack(side="right")
+        ttk.Button(top, text="立即分析", command=self._ai_force_analyze).pack(side="right")
+        ttk.Button(top, text="清空记录", command=self._ai_clear).pack(side="right", padx=(0, 6))
 
         self.ai_out = tk.Text(frame, height=6, wrap="word", font=MONO,
                               background="#0f172a", foreground="#e2e8f0")
@@ -683,7 +734,12 @@ class TerminalApp(object):
 
         # 启动 AI 自动分析守护（无对话且状态变化时触发）
         self._ai_last_snapshot = ""
-        self.root.after(5000, self._ai_watch_tick)
+        self.root.after(2000, self._ai_watch_tick)
+
+    def _ai_force_analyze(self):
+        """手动强制触发一次 AI 自动分析（用户等不及自动轮询时点）"""
+        self._ai_last_snapshot = ""   # 强制认为状态有变化
+        self._ai_watch_maybe()
 
     def _ai_watch_tick(self):
         """AI 巡视调度：无对话且开启自动分析时，定期请 AI 分析当前状态"""
@@ -694,19 +750,28 @@ class TerminalApp(object):
             return
         try:
             self._ai_watch_maybe()
-        except Exception:
-            pass
+        except Exception as e:
+            # 不要把异常吞掉，否则用户永远不知道为什么不自动分析
+            self._ai_append_out("⚠ AI 自动分析调度异常：%s" % e, tag="ai_err")
         try:
-            self.root.after(30000, self._ai_watch_tick)
+            self.root.after(10000, self._ai_watch_tick)
         except (tk.TclError, RuntimeError):
             pass
 
     def _ai_watch_maybe(self):
-        if not self.ai_watch_var.get() or self.ai_busy:
+        if not self.ai_watch_var.get():
+            return
+        if self.ai_busy:
             return
         if not console.can_ai_chat(self.session.role):
+            self._ai_append_out("⚠ AI 自动分析未启用：当前角色未获得 AI 对话授权。",
+                                tag="ai_err")
             return
-        snapshot = self._ai_snapshot()
+        try:
+            snapshot = self._ai_snapshot()
+        except Exception as e:
+            self._ai_append_out("⚠ 生成状态快照失败：%s" % e, tag="ai_err")
+            return
         if snapshot == self._ai_last_snapshot:
             return
         self._ai_last_snapshot = snapshot
@@ -966,6 +1031,10 @@ class TerminalApp(object):
 
             def save():
                 rooms = [x.strip() for x in v["rooms"].get().split(",") if x.strip()]
+                ok_report, _ = self._report_sensitive_action(
+                    "新建终端账户", "用户名=%s 角色=%s" % (v["username"].get(), role_v.get()))
+                if not ok_report:
+                    return
                 ok, m = self.accounts.create(v["username"].get(), v["password"].get(),
                                              role_v.get(), v["name"].get(), rooms,
                                              by_role=self.session.role)
@@ -988,6 +1057,9 @@ class TerminalApp(object):
             p = simpledialog.askstring("重置口令", "为 %s 设置新口令：" % u, show="●", parent=win)
             if not p:
                 return
+            ok_report, _ = self._report_sensitive_action("重置终端账户口令", "用户名=%s" % u)
+            if not ok_report:
+                return
             ok, m = self.accounts.reset_password(u, p, by_role=self.session.role)
             msg.config(text=("%s" % m), foreground=("#0a7d28" if ok else "#c00"))
             reload()
@@ -998,6 +1070,9 @@ class TerminalApp(object):
                 messagebox.showinfo("提示", "请先选一个账户")
                 return
             if not messagebox.askyesno("删除账户", "确定删除 %s？" % u):
+                return
+            ok_report, _ = self._report_sensitive_action("删除终端账户", "用户名=%s" % u)
+            if not ok_report:
                 return
             ok, m = self.accounts.delete(u, by_role=self.session.role)
             msg.config(text=m, foreground=("#0a7d28" if ok else "#c00"))
@@ -1011,7 +1086,7 @@ class TerminalApp(object):
         ttk.Button(bar, text="关闭", command=win.destroy).pack(side="right")
 
     def _wipe_all(self):
-        """所有者：清空本地运行数据（告警/复核/队列/账户）——需二次确认"""
+        """所有者：清空本地运行数据（告警/复核/队列/账户）——需二次确认+非所有者上报"""
         try:
             self.session.require("manage")
         except access.AccessError as e:
@@ -1025,7 +1100,11 @@ class TerminalApp(object):
         if code != "WIPE":
             messagebox.showinfo("已取消", "确认码不正确，未执行。")
             return
-        self.store.log("清空本地数据", "所有者手动执行", self.session.username)
+        ok_report, note = self._report_sensitive_action("清空本地数据", "WIPE 二次确认通过")
+        if not ok_report:
+            return
+        self.store.log("清空本地数据", "手动执行" + (" | 上报说明：%s" % note if note else ""),
+                       self.session.username)
         import os as _os
         try:
             for f in _os.listdir(str(config.DATA_ROOT)):
@@ -1130,6 +1209,18 @@ class TerminalApp(object):
         self.status.config(text=msg)
         if not ok:
             messagebox.showerror("失败", msg)
+
+    def _copy_alert_id(self):
+        """复制选中告警的编号到剪贴板"""
+        a = self._selected()
+        if a is None:
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(a.alert_id)
+            self.status.config(text="已复制告警编号：%s" % a.alert_id)
+        except Exception as e:
+            messagebox.showerror("复制失败", str(e))
 
     def _demo(self):
         created, dup = self.hub.ingest_many(self.hub.simulate(6))

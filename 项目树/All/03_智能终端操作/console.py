@@ -154,12 +154,14 @@ def console_tier(role):
 def can_ai_chat(role):
     """
     当前角色能否使用「AI 对话」模式。
-    规则：总开关开启，且（所有者 或 已知非所有者角色且已授权 AI 对话）。
+    规则：
+      · 所有者：始终可用，不依赖命令控制台总开关；
+      · 非所有者：总开关开启 + 已知角色 + 已授权 AI 对话。
     """
-    if not console_enabled():
-        return False
     if role == config.ROLE_OWNER:
         return True
+    if not console_enabled():
+        return False
     # 只给系统中已定义的角色；未知/空角色即使授权开关开着也不放行
     if role not in config.ROLE_ACTIONS:
         return False
@@ -167,13 +169,17 @@ def can_ai_chat(role):
 
 
 def console_modes(role):
-    """该角色可选的可执行类型（界面用它决定选择框里放什么、要不要禁用）"""
+    """该角色在命令控制台弹窗里可选的可执行类型"""
+    # 命令控制台总开关关闭时，弹窗不出现，自然也没有可选类型
+    if not console_enabled():
+        return []
     modes = []
     tier = console_tier(role)
     if tier == CONSOLE_TIER_FULL:
         modes = ["cmd", "python"]
     elif tier == CONSOLE_TIER_OLLAMA:
         modes = ["ollama"]
+    # AI 对话模式：总开关开启，且角色获得 AI 对话授权
     if can_ai_chat(role):
         modes.append("ai")
     return modes
@@ -190,7 +196,7 @@ def console_status(role):
         "ai_chat": ai_chat,
         "tier": tier,
         "tier_text": TIER_TEXT[tier],
-        "can_run": tier != CONSOLE_TIER_NONE or ai_chat,
+        "can_run": tier != CONSOLE_TIER_NONE,
         "can_full": tier == CONSOLE_TIER_FULL,
         "can_ai_chat": ai_chat,
         "modes": console_modes(role),
