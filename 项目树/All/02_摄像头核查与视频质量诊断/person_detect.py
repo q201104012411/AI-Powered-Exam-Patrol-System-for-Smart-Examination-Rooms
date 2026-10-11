@@ -11,6 +11,25 @@
 生产环境建议换成 YOLO / 边缘 AI 节点返回的检测框。
 """
 import cv2
+import numpy as np
+import os
+from PIL import Image, ImageDraw, ImageFont
+
+
+def _load_font(size=18):
+    """加载支持中文的字体，找不到则回退到默认字体"""
+    candidates = [
+        os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "msyh.ttc"),
+        os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "simhei.ttf"),
+        os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "simsun.ttc"),
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                pass
+    return ImageFont.load_default()
 
 
 class PersonDetector(object):
@@ -58,6 +77,32 @@ class PersonDetector(object):
             return True
         return False
 
+    @staticmethod
+    def action_of(frame, rect, boundary_ratio=0.5):
+        """
+        基于人体框位置/尺寸做简单行为推断（演示级）。
+        返回动作描述字符串，用于在画面上显示当前在做什么。
+        """
+        fh, fw = frame.shape[:2]
+        x, y, w, h = rect
+        bottom = y + h
+        line_y = int(fh * boundary_ratio)
+        # 起立/站立：人体框较高且底部跨过中间线
+        if h > fh * 0.55 and bottom > line_y:
+            return "起立/站立"
+        # 坐下：框较矮，位于画面下半
+        if h < fh * 0.45 and bottom > line_y:
+            return "坐下"
+        # 身体前倾：框比较宽
+        if w > h * 0.55:
+            return "前倾/趴桌"
+        # 靠近左侧或右侧边界
+        if x < fw * 0.12:
+            return "靠左"
+        if x + w > fw * 0.88:
+            return "靠右"
+        return "正常姿态"
+
     def draw(self, frame, boundary_ratio=0.5):
         """在帧上绘制检测框和越界线，返回（标记后的帧，越界数量）"""
         fh, fw = frame.shape[:2]
@@ -70,11 +115,24 @@ class PersonDetector(object):
                 violation += 1
             x, y, w, h = r
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-            label = "越界" if bad else "正常"
-            cv2.putText(frame, label, (x, y - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
         line_y = int(fh * boundary_ratio)
         cv2.line(frame, (0, line_y), (fw, line_y), (0, 165, 255), 2)
-        cv2.putText(frame, "越界线", (10, line_y - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 165, 255), 2)
+
+        # 用 PIL 绘制中文标签（OpenCV putText 不支持中文）
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        pil = Image.fromarray(rgb)
+        draw = ImageDraw.Draw(pil)
+        font = _load_font(18)
+        for r in rects:
+            bad = self.is_out_of_bounds(frame, r, boundary_ratio=boundary_ratio)
+            color = (0, 0, 255) if bad else (0, 255, 0)
+            x, y, w, h = r
+            action = self.action_of(frame, r, boundary_ratio=boundary_ratio)
+            label = "%s（%s）" % ("越界" if bad else "正常", action)
+            # BGR -> RGB
+            fill = (color[2], color[1], color[0])
+            draw.text((x, y - 22), label, font=font, fill=fill)
+        # 越界线标签
+        draw.text((10, line_y - 26), "越界线", font=font, fill=(255, 165, 0))
+        frame = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
         return frame, violation
