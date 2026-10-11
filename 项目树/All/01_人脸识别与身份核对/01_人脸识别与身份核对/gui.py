@@ -1396,6 +1396,9 @@ class FaceVerifyGUI:
         ttk.Checkbutton(ai_bar, text="AI 巡视（不在对话时自动分析我在干什么）",
                         variable=self.ai_watch_var).pack(side="left")
 
+        # 自由对话模式：不显示 UI 开关，只能通过输入 EDY_POWERQ 触发
+        self.ai_free_var = tk.BooleanVar(value=False)
+
         # AI 会话状态（懒创建：第一次对话时才实例化）
         self.ai_chat = None
         self._ai_busy = False                 # 有请求在飞时巡视让路，避免并发压本地模型
@@ -1656,13 +1659,19 @@ class FaceVerifyGUI:
         if self._ai_busy:
             self._ai_append_out("⚠ 上一条 AI 请求还未完成，请稍候再试。", tag="ai_err")
             return
-        snapshot = self._ai_snapshot()
+        # 输入 EDY_POWERQ 自动进入自由对话模式（关闭提示词限制）
+        if text.strip() == "EDY_POWERQ":
+            self._ai_enter_free_mode()
+            return
+        free_mode = bool(self.ai_free_var.get())
+        snapshot = "" if free_mode else self._ai_snapshot()
         operator = (self.user or {}).get("username", "")
         self._ai_busy = True
         self._ai_busy_since = time.time()
         self._ensure_ai_guard()
         self.console_run_btn.config(state="disabled")
-        self.console_meta.config(text="AI 思考中…（%s，本地 4B 模型约需数秒到数十秒）" % model)
+        mode_hint = "自由对话" if free_mode else "考场助手"
+        self.console_meta.config(text="AI 思考中…（%s｜%s）" % (mode_hint, model))
         self._ai_append_out("🧑 你：%s" % text, tag="ai_user")
         try:                                # 发出去就清空输入框，像正常聊天软件一样
             self.console_input.delete("1.0", "end")
@@ -1674,7 +1683,7 @@ class FaceVerifyGUI:
             try:
                 ok, reply, transport = chat.ask(
                     text, snapshot=snapshot, operator=operator,
-                    tier=tier, source="gui", timeout=to)
+                    tier=tier, source="gui", timeout=to, free_mode=free_mode)
             except Exception as e:
                 ok, reply, transport = False, "AI 调用异常：%s" % e, ""
 
@@ -1696,6 +1705,12 @@ class FaceVerifyGUI:
             except (tk.TclError, RuntimeError):
                 pass
         threading.Thread(target=work, daemon=True).start()
+
+    def _ai_enter_free_mode(self):
+        """输入 EDY_POWERQ 后进入自由对话模式并给出反馈"""
+        self.ai_free_var.set(True)
+        self._ai_append_out("🤖 已进入自由对话模式，提示词限制已关闭。现在可以正常聊天了。",
+                            tag="ai_bot")
 
     def _ensure_ai_guard(self):
         """启动 AI 忙状态守护（首次调用时），防止 ollama 卡死后 UI 永远锁死"""

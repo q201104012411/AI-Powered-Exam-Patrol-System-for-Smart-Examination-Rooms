@@ -896,6 +896,7 @@ async function runCmdConsole() {
 // 系统状态快照由服务端在每次请求时实时生成——AI 总能"看到"你最近在干什么。
 let aiHistory = [];
 let aiBusy = false;
+let aiFreeMode = false;  // 只能通过输入 EDY_POWERQ 开启
 
 async function showAiAssistant() {
   let models = [], defModel = "";
@@ -998,8 +999,14 @@ async function sendAiChat() {
   const ta = document.getElementById("aiInput");
   const err = document.getElementById("aiErr");
   const btn = document.getElementById("aiSendBtn");
-  const message = (ta.value || "").trim();
+  let message = (ta.value || "").trim();
   if (!message) return;
+  // 输入 EDY_POWERQ 自动进入自由对话模式
+  if (message === "EDY_POWERQ") {
+    aiFreeMode = true;
+    aiAppendBubble("bot", "🤖 已进入自由对话模式，提示词限制已关闭。现在可以正常聊天了。");
+    return;
+  }
   err.textContent = "";
   aiBusy = true;
   btn.disabled = true;
@@ -1014,6 +1021,7 @@ async function sendAiChat() {
         message,
         model: document.getElementById("aiModel").value,
         history: aiHistory,
+        free_mode: aiFreeMode,
       })
     });
     if (thinking) thinking.remove();

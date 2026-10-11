@@ -316,21 +316,27 @@ class AIChat:
         self.history = []
 
     def ask(self, text, snapshot="", operator="", tier="full", source="gui",
-            timeout=CHAT_TIMEOUT):
+            timeout=CHAT_TIMEOUT, free_mode=False):
         text = (text or "").strip()
         if not text:
             return False, "请输入内容", ""
-        user_content = text
-        if snapshot:
-            user_content = ("【当前界面状态快照】\n%s\n\n【我的消息】\n%s"
-                            % (snapshot, text))
-        system_prompt = _build_system_prompt(text, snapshot)
-        messages = ([{"role": "system", "content": system_prompt}]
-                    + self.history
-                    + [{"role": "user", "content": user_content}])
+        if free_mode:
+            # 自由对话：不注入考场知识库和界面快照，只保留最基本的助手设定
+            messages = [
+                {"role": "system", "content": "你是一个本地 AI 助手，请用中文自然、友好地回答用户。"},
+            ] + self.history + [{"role": "user", "content": text}]
+        else:
+            user_content = text
+            if snapshot:
+                user_content = ("【当前界面状态快照】\n%s\n\n【我的消息】\n%s"
+                                % (snapshot, text))
+            system_prompt = _build_system_prompt(text, snapshot)
+            messages = ([{"role": "system", "content": system_prompt}]
+                        + self.history
+                        + [{"role": "user", "content": user_content}])
         started = time.time()
         ok, reply, err, transport = ollama_chat(self.model, messages, timeout=timeout,
-                                                num_predict=384)
+                                                num_predict=(512 if free_mode else 384))
         duration_ms = int((time.time() - started) * 1000)
         if ok:
             reply = _strip_think(reply)

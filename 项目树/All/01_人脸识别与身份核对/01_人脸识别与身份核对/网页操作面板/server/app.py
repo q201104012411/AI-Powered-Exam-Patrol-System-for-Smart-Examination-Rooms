@@ -461,11 +461,17 @@ def ai_chat():
                 and isinstance(m.get("content"), str)):
             clean_history.append({"role": m["role"], "content": m["content"][:4000]})
 
-    user_content = ("【当前系统状态快照】\n%s\n\n【我的消息】\n%s"
-                    % (_web_snapshot(), message))
-    messages = ([{"role": "system", "content": ai_assistant.SYSTEM_PROMPT}]
-                + clean_history
-                + [{"role": "user", "content": user_content}])
+    free_mode = bool(data.get("free_mode"))
+    if free_mode:
+        messages = [
+            {"role": "system", "content": "你是一个本地 AI 助手，请用中文自然、友好地回答用户。"},
+        ] + clean_history + [{"role": "user", "content": message}]
+    else:
+        user_content = ("【当前系统状态快照】\n%s\n\n【我的消息】\n%s"
+                        % (_web_snapshot(), message))
+        messages = ([{"role": "system", "content": ai_assistant.SYSTEM_PROMPT}]
+                    + clean_history
+                    + [{"role": "user", "content": user_content}])
     try:
         timeout = min(max(int(data.get("timeout") or 120), 30), 300)
     except (TypeError, ValueError):
