@@ -228,7 +228,7 @@ class CmdConsoleGuiTestCase(unittest.TestCase):
         L = self.gui_mod.CONSOLE_MODE_LABELS
         self.assertEqual(str(self.g.console_mode_box.cget("state")), "readonly")
         self.assertEqual(tuple(self.g.console_mode_box.cget("values")),
-                         (L["cmd"], L["python"]))
+                         (L["cmd"], L["python"], L["ai"]))
 
     def test_owner_hint_does_not_leak_ollama_restriction(self):
         """

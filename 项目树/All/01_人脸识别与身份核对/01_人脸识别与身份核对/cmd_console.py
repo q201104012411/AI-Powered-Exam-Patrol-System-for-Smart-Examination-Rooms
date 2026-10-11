@@ -102,7 +102,38 @@ def parse_ollama_command(text):
 
 def run_ollama(argv, cwd=None, timeout=DEFAULT_TIMEOUT):
     """执行白名单命令：arg 列表 + shell=False，不存在被 shell 解释的可能"""
-    return _execute(argv=argv, cwd=cwd, timeout=timeout, prefer_utf8=True)
+    # TERM=dumb / NO_COLOR=1：请 ollama 不要输出彩色/光标控制序列（不支持也会忽略）
+    return _execute(argv=argv, cwd=cwd, timeout=timeout, prefer_utf8=True,
+                    env_extra={"TERM": "dumb", "NO_COLOR": "1"})
+
+
+# ---------------- 输出清洗：ANSI 转义序列 / 进度条回车 ----------------
+# ollama 等 TUI 程序会向管道写入 ANSI 控制序列（光标移动、清行、颜色等），
+# 直接显示就是截图里那种 "@?[?2026h@?[?25l[1G[K" 乱码。这里统一剥掉。
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-9;?]*[ -/]*[@-~]"          # CSI 序列：\x1b[?2026h、\x1b[1G、\x1b[K …
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC 序列：\x1b]标题\x07
+    r"|\x1b[@-_]"                          # 两字符序列：\x1bM、\x1bc …
+)
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def clean_output(text):
+    """
+    清洗子进程输出，让它能在文本框里正常显示：
+      1. 剥掉 ANSI 转义序列（颜色 / 光标 / 清屏）；
+      2. 同一行内的 \\r（进度条、旋转光标反复重写）只保留最后一帧；
+      3. 删掉其余不可见控制字符，折叠连续空行。
+    """
+    if not text:
+        return text
+    text = _ANSI_RE.sub("", text)
+    text = text.replace("\r\n", "\n")
+    if "\r" in text:
+        text = "\n".join(line.split("\r")[-1] for line in text.split("\n"))
+    text = _CTRL_RE.sub("", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text
 
 
 def _oem_encoding():
@@ -273,8 +304,8 @@ def _execute(argv=None, shell_cmd=None, cwd=None, timeout=DEFAULT_TIMEOUT,
     return {
         "ok": (not timed_out) and code == 0,
         "exit_code": code,
-        "stdout": _decode(out_sink.bytes(), prefer_utf8),
-        "stderr": _decode(err_sink.bytes(), prefer_utf8),
+        "stdout": clean_output(_decode(out_sink.bytes(), prefer_utf8)),
+        "stderr": clean_output(_decode(err_sink.bytes(), prefer_utf8)),
         "duration_ms": int((time.time() - started) * 1000),
         "truncated": out_sink.truncated or err_sink.truncated,
         "timed_out": timed_out,

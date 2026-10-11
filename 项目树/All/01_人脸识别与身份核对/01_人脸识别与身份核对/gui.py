@@ -35,10 +35,11 @@ from verifier import FaceVerifier
 # 所有者可切换：是否隐藏启动器的命令行窗口（由 .bat 读取该标记文件）
 HIDE_CMD_FLAG = os.path.join(str(config.DATA_ROOT), "hide_cmd.on")
 
-# 命令控制台的执行类型：下拉框显示中文，执行时再映射回 cmd / python / ollama
+# 命令控制台的执行类型：下拉框显示中文，执行时再映射回 cmd / python / ollama / ai
 CONSOLE_MODE_LABELS = {"cmd": "系统命令 (cmd)",
                        "python": "Python 代码",
-                       "ollama": "AI 辅助 (ollama)"}
+                       "ollama": "AI 辅助 (ollama)",
+                       "ai": "🤖 AI 对话"}
 CONSOLE_MODE_KEYS = dict((v, k) for k, v in CONSOLE_MODE_LABELS.items())
 
 # pythonw 隐藏窗口启动时 stdout/stderr 为 None，兜住避免 print 崩溃
@@ -1066,6 +1067,10 @@ class FaceVerifyGUI:
             return "输入任意系统命令 / Python 代码（Ctrl+Enter 执行）"
         return "仅可执行：ollama run <模型> [提示词]（管理员层级）"
 
+    # AI 对话模式的提示语（选中「🤖 AI 对话」时替换默认提示）
+    AI_HINT = ("🤖 AI 对话：直接输入问题，AI 能看到你当前的界面状态；\n"
+               "输入 ollama run <模型> 可随时切换模型。")
+
     def _sync_console_controls(self):
         """
         按当前层级重配内置控制台的标题 / 提示语 / 类型选择框。
@@ -1091,7 +1096,10 @@ class FaceVerifyGUI:
         hint = getattr(self, "console_hint", None)
         if self._widget_alive(hint):
             try:
-                hint.config(text=self._console_hint_text(is_full))
+                in_ai = (is_full and getattr(self, "console_mode", None) is not None
+                         and self.console_mode.get() == CONSOLE_MODE_LABELS["ai"])
+                hint.config(text=(self.AI_HINT if in_ai
+                                  else self._console_hint_text(is_full)))
             except tk.TclError:
                 pass
 
@@ -1100,10 +1108,11 @@ class FaceVerifyGUI:
             return
         try:
             if is_full:
-                box_w.config(values=(CONSOLE_MODE_LABELS["cmd"],
-                                     CONSOLE_MODE_LABELS["python"]), state="readonly")
-                if self.console_mode.get() not in (CONSOLE_MODE_LABELS["cmd"],
-                                                   CONSOLE_MODE_LABELS["python"]):
+                vals = (CONSOLE_MODE_LABELS["cmd"],
+                        CONSOLE_MODE_LABELS["python"],
+                        CONSOLE_MODE_LABELS["ai"])
+                box_w.config(values=vals, state="readonly")
+                if self.console_mode.get() not in vals:
                     self.console_mode.set(CONSOLE_MODE_LABELS["cmd"])
             else:
                 box_w.config(values=(CONSOLE_MODE_LABELS["ollama"],), state="disabled")
@@ -1271,6 +1280,7 @@ class FaceVerifyGUI:
         所以这里把类型选择框禁用掉只是体验，绕过它也不会多拿到权限。
         """
         import cmd_console
+        import ai_assistant
 
         role = (self.user or {}).get("role")
         is_full = accounts.cmd_console_tier(role) == accounts.CMD_TIER_FULL
@@ -1282,15 +1292,39 @@ class FaceVerifyGUI:
             value=CONSOLE_MODE_LABELS["cmd" if is_full else "ollama"])
         self.console_mode_box = ttk.Combobox(
             bar, textvariable=self.console_mode, width=16,
-            values=((CONSOLE_MODE_LABELS["cmd"], CONSOLE_MODE_LABELS["python"]) if is_full
+            values=((CONSOLE_MODE_LABELS["cmd"], CONSOLE_MODE_LABELS["python"],
+                     CONSOLE_MODE_LABELS["ai"]) if is_full
                     else (CONSOLE_MODE_LABELS["ollama"],)),
             state=("readonly" if is_full else "disabled"))
         self.console_mode_box.pack(side="left")
+        self.console_mode_box.bind("<<ComboboxSelected>>", self._console_mode_changed)
 
         ttk.Label(bar, text="超时").pack(side="left", padx=(6, 2))
         self.console_timeout = tk.StringVar(value=str(cmd_console.DEFAULT_TIMEOUT))
         ttk.Spinbox(bar, from_=1, to=cmd_console.MAX_TIMEOUT, width=5,
                     textvariable=self.console_timeout).pack(side="left")
+
+        # ---- AI 对话工具行：模型选择（可手输）+ 刷新 + AI 巡视开关 ----
+        # 「AI 巡视」即用户要求的"关闭对话功能后 AI 自动分析我在干什么"：
+        # 勾选且不在 AI 对话模式时，界面状态一变化就自动请大模型分析。
+        ai_bar = ttk.Frame(box)
+        ai_bar.pack(fill="x", pady=(4, 0))
+        ttk.Label(ai_bar, text="模型：").pack(side="left")
+        self.ai_model_var = tk.StringVar(value=ai_assistant.DEFAULT_MODEL)
+        self.ai_model_box = ttk.Combobox(
+            ai_bar, textvariable=self.ai_model_var, width=30,
+            values=(ai_assistant.DEFAULT_MODEL,))
+        self.ai_model_box.pack(side="left")
+        ttk.Button(ai_bar, text="🔄", width=3,
+                   command=self._ai_refresh_models).pack(side="left", padx=(2, 8))
+        self.ai_watch_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(ai_bar, text="AI 巡视（不在对话时自动分析我在干什么）",
+                        variable=self.ai_watch_var).pack(side="left")
+
+        # AI 会话状态（懒创建：第一次对话时才实例化）
+        self.ai_chat = None
+        self._ai_busy = False                 # 有请求在飞时巡视让路，避免并发压本地模型
+        self._ai_last_snapshot = ""           # 上次巡视的快照（没变就不重复分析）
 
         # 提示语必须**随层级变化**（见 _sync_console_controls）：
         # 面板是登录时一次性建好的，若那一刻总开关还没开，这里会先写成 ollama 提示；
@@ -1322,6 +1356,10 @@ class FaceVerifyGUI:
         self.console_out.pack(fill="both", expand=True, pady=(2, 0))
         self.console_out.insert("end", "（尚未执行）")
         self.console_out.config(state="disabled")
+
+        # 后台：刷新模型列表 + 启动 AI 巡视轮询（仅所有者层级会真正触发分析）
+        self.root.after(600, self._ai_refresh_models)
+        self.root.after(self.AI_WATCH_INTERVAL_MS, self._ai_watch_tick)
 
     def _console_hotkey(self, event=None):
         self._console_run()
@@ -1380,10 +1418,23 @@ class FaceVerifyGUI:
             to = int(self.console_timeout.get())
         except (TypeError, ValueError):
             to = cmd_console.DEFAULT_TIMEOUT
-        # 下拉框显示的是中文标签，这里映射回 cmd / python；管理员恒为 ollama
+        # 下拉框显示的是中文标签，这里映射回 cmd / python / ai；管理员恒为 ollama
         # （模式由层级决定，不信任界面控件）
         mode = (CONSOLE_MODE_KEYS.get(self.console_mode.get(), "cmd")
                 if tier == accounts.CMD_TIER_FULL else "ollama")
+
+        # ---- AI 对话入口 ----
+        # 1) 任何模式下输入裸的 `ollama run <模型>`（不带提示词）：
+        #    原行为是拉起交互式 REPL，输出一堆 ANSI 控制序列（用户反馈的乱码来源）。
+        #    现在按用户预期处理：切换/选中该模型并进入 AI 对话。
+        # 2) 类型选「🤖 AI 对话」：输入内容即对话消息（自动附带当前界面快照）。
+        ok_cmd, argv, _msg = cmd_console.parse_ollama_command(code)
+        if tier == accounts.CMD_TIER_FULL and ok_cmd and len(argv) == 3:
+            self._ai_start_chat(argv[2])
+            return
+        if mode == "ai":
+            self._ai_chat_send(code, tier)
+            return
 
         self.console_run_btn.config(state="disabled")
         self.console_meta.config(text="执行中…")
@@ -1428,6 +1479,248 @@ class FaceVerifyGUI:
                 pass
 
         threading.Thread(target=worker, daemon=True).start()
+
+    # ---------------- AI 对话 / AI 巡视（ollama，仅所有者层级） ----------------
+    AI_WATCH_INTERVAL_MS = 20000        # AI 巡视轮询间隔（毫秒）
+
+    def _console_mode_changed(self, event=None):
+        """类型切换时同步提示语（选中 AI 对话时换成对话说明）"""
+        hint = getattr(self, "console_hint", None)
+        if not self._widget_alive(hint):
+            return
+        try:
+            if self.console_mode.get() == CONSOLE_MODE_LABELS["ai"]:
+                hint.config(text=self.AI_HINT)
+            else:
+                is_full = (accounts.cmd_console_tier((self.user or {}).get("role"))
+                           == accounts.CMD_TIER_FULL)
+                hint.config(text=self._console_hint_text(is_full))
+        except tk.TclError:
+            pass
+
+    def _ai_append_out(self, text):
+        """向控制台输出区**追加**一段内容（对话与巡视都走这里，不覆盖历史）"""
+        out = getattr(self, "console_out", None)
+        if not self._widget_alive(out):
+            return
+        try:
+            out.config(state="normal")
+            if out.get("1.0", "end").strip() in ("（尚未执行）", "（执行中，请稍候…）"):
+                out.delete("1.0", "end")
+            out.insert("end", text.rstrip() + "\n" + "─" * 38 + "\n")
+            out.see("end")
+            out.config(state="disabled")
+        except tk.TclError:
+            pass
+
+    def _ai_start_chat(self, model):
+        """输入 `ollama run <模型>` 后进入 AI 对话：选定模型、切换类型、新建会话"""
+        import ai_assistant
+        model = (model or "").strip() or ai_assistant.DEFAULT_MODEL
+        self.ai_model_var.set(model)
+        if (accounts.cmd_console_tier((self.user or {}).get("role"))
+                == accounts.CMD_TIER_FULL):
+            self.console_mode.set(CONSOLE_MODE_LABELS["ai"])
+        self._console_mode_changed()
+        self.ai_chat = ai_assistant.AIChat(model=model)
+        self.action_log.log("AI对话开始", "模型=%s" % model)
+        self._ai_append_out(
+            "🤖 已加载模型 %s，进入 AI 对话。\n"
+            "直接输入问题即可——我能看到你当前的界面状态（考生、视频、核验结果等），\n"
+            "可以问我「我现在在干什么」「刚才为什么被拦截」「下一步该做什么」。" % model)
+
+    def _ai_chat_send(self, text, tier):
+        """发送一条对话消息（后台线程调 ollama，不卡界面）"""
+        import ai_assistant
+        model = (self.ai_model_var.get() or "").strip() or ai_assistant.DEFAULT_MODEL
+        if self.ai_chat is None or self.ai_chat.model != model:
+            self.ai_chat = ai_assistant.AIChat(model=model)
+        try:
+            to = max(int(self.console_timeout.get()), 120)
+        except (TypeError, ValueError):
+            to = 180
+        snapshot = self._ai_snapshot()
+        operator = (self.user or {}).get("username", "")
+        self._ai_busy = True
+        self.console_run_btn.config(state="disabled")
+        self.console_meta.config(text="AI 思考中…（%s）" % model)
+        self._ai_append_out("🧑 你：%s" % text)
+        chat = self.ai_chat
+
+        def work():
+            try:
+                ok, reply, transport = chat.ask(
+                    text, snapshot=snapshot, operator=operator,
+                    tier=tier, source="gui", timeout=to)
+            except Exception as e:
+                ok, reply, transport = False, "AI 调用异常：%s" % e, ""
+
+            def apply():
+                try:
+                    if not self.root.winfo_exists():
+                        return
+                except tk.TclError:
+                    return
+                self._ai_busy = False
+                tag = "🤖 AI" if ok else "⚠ AI 调用失败"
+                self._ai_append_out("%s：%s" % (tag, reply))
+                self.console_meta.config(
+                    text=("✅ 已回复" if ok else "❌ 失败") + " ｜ 模型 " + model)
+                self.console_run_btn.config(state="normal")
+            try:
+                self.root.after(0, apply)
+            except (tk.TclError, RuntimeError):
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ai_snapshot(self):
+        """
+        界面状态快照 —— "AI 可以调取当前我在干什么"的数据来源。
+        只取界面状态与结果摘要（结果区本身已按隐私策略脱敏），不含证件明文。
+        """
+        lines = ["时间：%s" % time.strftime("%Y-%m-%d %H:%M:%S")]
+        u = self.user or {}
+        try:
+            role_text = accounts.role_text(u.get("role")) if u.get("role") else "未登录"
+        except Exception:
+            role_text = u.get("role") or "未登录"
+        lines.append("操作员：%s（%s）" % (u.get("username", "-"), role_text))
+
+        def _get(var, default="-"):
+            try:
+                return var.get().strip() or default
+            except Exception:
+                return default
+
+        lines.append("设备编号：%s" % _get(self.device_var))
+        lines.append("当前考生：%s" % _get(self.candidate_var, "未选择"))
+        lines.append("核验模式：%s" % ("1:1 入场核验" if _get(self.mode_var) == "1:1"
+                                       else "1:N 考场抽查"))
+        for label, name in ((self.consent_label, "同意状态"),
+                            (self.doc_label, "证件核对")):
+            try:
+                lines.append("%s：%s" % (name, label.cget("text")))
+            except Exception:
+                pass
+        vs = self.video_stream
+        lines.append("实时视频：%s" % ("开启中（FPS=%.1f）" % vs.fps
+                                      if vs is not None and vs.running else "未开启"))
+        lines.append("现场图像：%s" % (self.live_desc or "未采集"))
+        try:
+            lines.append("自动核验：%s" % ("开启" if self.auto_verify.get() else "关闭"))
+        except Exception:
+            pass
+        try:                            # 结果区尾部：最近一次核验的结果与原因
+            tail = self.output.get("end-14l", "end-1l").strip()
+            if tail:
+                lines.append("最近的界面输出（尾部）：\n" + tail)
+        except Exception:
+            pass
+        return "\n".join(lines)
+
+    def _ai_refresh_models(self):
+        """后台刷新模型下拉框（`ollama list` 可能耗时，放线程里）"""
+        import ai_assistant
+
+        def work():
+            try:
+                names = ai_assistant.list_models()
+            except Exception:
+                return
+
+            def apply():
+                box_w = getattr(self, "ai_model_box", None)
+                if not self._widget_alive(box_w):
+                    return
+                try:
+                    cur = self.ai_model_var.get().strip()
+                    vals = tuple(names)
+                    if cur and cur not in names:
+                        vals = (cur,) + vals
+                    box_w.config(values=vals)
+                    if not cur and names:
+                        self.ai_model_var.set(names[0])
+                except tk.TclError:
+                    pass
+            try:
+                self.root.after(0, apply)
+            except (tk.TclError, RuntimeError):
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ai_watch_tick(self):
+        """AI 巡视调度：固定间隔检查一次界面状态，有变化才请 AI 分析"""
+        try:
+            if not self.root.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        try:
+            self._ai_watch_maybe()
+        except Exception:
+            pass                            # 巡视是辅助功能，任何异常都不能影响主界面
+        try:
+            self.root.after(self.AI_WATCH_INTERVAL_MS, self._ai_watch_tick)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def _ai_watch_maybe(self):
+        """
+        用户要求："如果关闭了 AI 对话功能，AI 自动分析我在干什么"。
+        触发条件（同时满足）：
+          · 勾选了「AI 巡视」；      · 控制台面板展开着；
+          · 当前**不在** AI 对话模式（对话时用户自己在问，巡视不打扰）；
+          · 没有请求在飞；            · 界面状态相比上次有变化。
+        """
+        if not self.ai_watch_var.get() or self._ai_busy:
+            return
+        role = (self.user or {}).get("role")
+        if not accounts.can_cmd_console(role):
+            return
+        tier = accounts.cmd_console_tier(role)
+        if tier != accounts.CMD_TIER_FULL:
+            return                          # 巡视沿用对话的层级限制：仅所有者
+        panel = getattr(self, "console_panel", None)
+        if not self._widget_alive(panel) or not panel.winfo_manager():
+            return
+        if self.console_mode.get() == CONSOLE_MODE_LABELS["ai"]:
+            return                          # 正在 AI 对话模式 = 功能开启中，不自动分析
+        snapshot = self._ai_snapshot()
+        if snapshot == self._ai_last_snapshot:
+            return
+        self._ai_last_snapshot = snapshot
+
+        import ai_assistant
+        model = (self.ai_model_var.get() or "").strip() or ai_assistant.DEFAULT_MODEL
+        operator = (self.user or {}).get("username", "")
+        self._ai_busy = True
+        self.console_meta.config(text="🔎 AI 巡视分析中…")
+
+        def work():
+            try:
+                ok, text, _t = ai_assistant.analyze_activity(
+                    snapshot, model=model, operator=operator, tier=tier,
+                    source="gui", timeout=ai_assistant.WATCH_TIMEOUT)
+            except Exception as e:
+                ok, text = False, "AI 巡视异常：%s" % e
+
+            def apply():
+                try:
+                    if not self.root.winfo_exists():
+                        return
+                except tk.TclError:
+                    return
+                self._ai_busy = False
+                if ok:
+                    self._ai_append_out("🔎 AI 巡视（自动分析当前操作）：\n%s" % text)
+                else:
+                    self._ai_append_out("⚠ AI 巡视失败：%s" % text)
+                self.console_meta.config(text="")
+            try:
+                self.root.after(0, apply)
+            except (tk.TclError, RuntimeError):
+                pass
+        threading.Thread(target=work, daemon=True).start()
 
     def _build_index(self, only_selected=False):
         targets = self.candidates
