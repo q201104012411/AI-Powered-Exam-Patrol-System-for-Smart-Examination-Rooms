@@ -575,17 +575,18 @@ class TerminalApp(object):
             self._monitor_save()
             reload()
 
+        def on_close():
+            self._monitor_stop_all()
+            self._monitor_render_grid()
+            win.destroy()
+
         bbar = ttk.Frame(win)
         bbar.pack(fill="x", padx=10, pady=6)
         ttk.Button(bbar, text="＋ 新增", command=do_add).pack(side="left")
         ttk.Button(bbar, text="✏ 编辑", command=do_edit).pack(side="left", padx=6)
         ttk.Button(bbar, text="🗑 删除", command=do_del).pack(side="left")
-        ttk.Button(bbar, text="关闭", command=win.destroy).pack(side="right")
+        ttk.Button(bbar, text="关闭", command=on_close).pack(side="right")
 
-        def on_close():
-            self._monitor_stop_all()
-            self._monitor_render_grid()
-            win.destroy()
         win.protocol("WM_DELETE_WINDOW", on_close)
 
     def refresh_monitor(self):
