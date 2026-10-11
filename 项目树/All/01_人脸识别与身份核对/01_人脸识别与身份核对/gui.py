@@ -1616,6 +1616,26 @@ class FaceVerifyGUI:
             except Exception:
                 pass
 
+    def _ai_remove_thinking_line(self):
+        """删除控制台输出区里最后一条“AI 正在思考，请稍候…”的临时提示"""
+        out = getattr(self, "console_out", None)
+        if not self._widget_alive(out):
+            return
+        try:
+            out.config(state="normal")
+            # 从后往前找包含“正在思考，请稍候”的行并删除
+            text = out.get("1.0", "end")
+            lines = text.split("\n")
+            for i in range(len(lines) - 1, -1, -1):
+                if "正在思考，请稍候" in lines[i]:
+                    start = "%d.0" % (i + 1)
+                    end = "%d.end+1c" % (i + 1)
+                    out.delete(start, end)
+                    break
+            out.config(state="disabled")
+        except Exception:
+            pass
+
     def _append_to_main_output(self, text):
         """把 AI 回复也写到主「核验结果」区，确保控制台收起时用户也能看到"""
         try:
@@ -1677,9 +1697,9 @@ class FaceVerifyGUI:
         if self._ai_busy:
             self._ai_append_out("⚠ 上一条 AI 请求还未完成，请稍候再试。", tag="ai_err")
             return
-        # 输入 EDY_POWERQ 自动进入自由对话模式（关闭提示词限制）
+        # EDY_POWERQ：第一次开自由对话，第二次关（切换）
         if text.strip() == "EDY_POWERQ":
-            self._ai_enter_free_mode()
+            self._ai_toggle_free_mode()
             return
         free_mode = bool(self.ai_free_var.get())
         snapshot = "" if free_mode else self._ai_snapshot()
@@ -1691,6 +1711,8 @@ class FaceVerifyGUI:
         mode_hint = "自由对话" if free_mode else "考场助手"
         self.console_meta.config(text="AI 思考中…（%s｜%s）" % (mode_hint, model))
         self._ai_append_out("🧑 你：%s" % text, tag="ai_user")
+        # 立即给出“正在思考”反馈，避免用户以为卡死（ollama 本地 4B 可能需要几秒到几十秒）
+        self._ai_append_out("🤖 AI 正在思考，请稍候…", tag="ai_dim")
         try:                                # 发出去就清空输入框，像正常聊天软件一样
             self.console_input.delete("1.0", "end")
         except tk.TclError:
@@ -1712,6 +1734,8 @@ class FaceVerifyGUI:
                 except tk.TclError:
                     return
                 self._ai_busy = False
+                # 把之前的“正在思考…”提示删掉，换成正式回复
+                self._ai_remove_thinking_line()
                 tag = "🤖 AI" if ok else "⚠ AI 调用失败"
                 line = "%s：%s" % (tag, reply)
                 self._ai_append_out(line, tag=("ai_bot" if ok else "ai_err"))
@@ -1725,11 +1749,14 @@ class FaceVerifyGUI:
                 pass
         threading.Thread(target=work, daemon=True).start()
 
-    def _ai_enter_free_mode(self):
-        """输入 EDY_POWERQ 后进入自由对话模式并给出反馈"""
-        self.ai_free_var.set(True)
-        self._ai_append_out("🤖 已进入自由对话模式，提示词限制已关闭。现在可以正常聊天了。",
-                            tag="ai_bot")
+    def _ai_toggle_free_mode(self):
+        """输入 EDY_POWERQ 切换自由对话模式：开/关"""
+        on = not bool(self.ai_free_var.get())
+        self.ai_free_var.set(on)
+        self._ai_append_out(
+            "🤖 %s" % ("已进入自由对话模式，提示词限制已关闭。现在可以正常聊天了。"
+                       if on else "已退出自由对话模式，恢复考场助手提示词。"),
+            tag="ai_bot")
 
     def _ensure_ai_guard(self):
         """启动 AI 忙状态守护（首次调用时），防止 ollama 卡死后 UI 永远锁死"""

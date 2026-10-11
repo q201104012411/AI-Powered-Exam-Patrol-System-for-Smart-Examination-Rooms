@@ -1001,10 +1001,12 @@ async function sendAiChat() {
   const btn = document.getElementById("aiSendBtn");
   let message = (ta.value || "").trim();
   if (!message) return;
-  // 输入 EDY_POWERQ 自动进入自由对话模式
+  // 输入 EDY_POWERQ 切换自由对话模式：开/关
   if (message === "EDY_POWERQ") {
-    aiFreeMode = true;
-    aiAppendBubble("bot", "🤖 已进入自由对话模式，提示词限制已关闭。现在可以正常聊天了。");
+    aiFreeMode = !aiFreeMode;
+    aiAppendBubble("bot", aiFreeMode
+      ? "🤖 已进入自由对话模式，提示词限制已关闭。现在可以正常聊天了。"
+      : "🤖 已退出自由对话模式，恢复考场助手提示词。");
     return;
   }
   err.textContent = "";
@@ -1012,7 +1014,8 @@ async function sendAiChat() {
   btn.disabled = true;
   ta.value = "";
   aiAppendBubble("user", message);
-  const thinking = aiAppendBubble("thinking", "思考中…（本地 4B 模型可能需要数秒到几十秒）");
+  // 立即显示“正在思考”，否则用户会觉得没反应 / 卡死
+  const thinking = aiAppendBubble("thinking", "🤖 AI 正在思考，请稍候…");
 
   try {
     const r = await api("/ai/chat", {
