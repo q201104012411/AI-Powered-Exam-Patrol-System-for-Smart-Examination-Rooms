@@ -21,6 +21,17 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+try:
+    import cv2
+    HAS_CV2 = True
+except Exception:
+    HAS_CV2 = False
+try:
+    from PIL import Image, ImageTk
+    HAS_PIL = True
+except Exception:
+    HAS_PIL = False
+
 import access
 import alerts as alerts_mod
 import bridge
@@ -117,17 +128,24 @@ class TerminalApp(object):
         self.tab_alerts = ttk.Frame(nb, padding=8)
         self.tab_review = ttk.Frame(nb, padding=8)
         self.tab_verify = ttk.Frame(nb, padding=8)
-        self.tab_monitor = ttk.Frame(nb, padding=8)
         self.tab_ops = ttk.Frame(nb, padding=8)
+        # 监控查看：仅所有者、管理员、巡考员可见
+        self.can_monitor = self.session.role in (config.ROLE_OWNER,
+                                                 config.ROLE_ADMIN,
+                                                 config.ROLE_PATROL)
+        if self.can_monitor:
+            self.tab_monitor = ttk.Frame(nb, padding=8)
         nb.add(self.tab_alerts, text="  告警处置  ")
         nb.add(self.tab_review, text="  复核留痕  ")
         nb.add(self.tab_verify, text="  手持核验  ")
-        nb.add(self.tab_monitor, text="  监控查看  ")
+        if self.can_monitor:
+            nb.add(self.tab_monitor, text="  监控查看  ")
         nb.add(self.tab_ops, text="  运行状态与管控  ")
         self._build_alerts_tab()
         self._build_review_tab()
         self._build_verify_tab()
-        self._build_monitor_tab()
+        if self.can_monitor:
+            self._build_monitor_tab()
         self._build_ops_tab()
 
         # 常驻 AI 对话面板：放在 4 个标签页下方，切换界面始终可见
@@ -255,72 +273,123 @@ class TerminalApp(object):
         self.v_out.insert("end", "桥接状态：%s\n%s\n" % (
             "✅ 可用" if ok else "⚠ " + why, why if not ok else ""))
 
-    # ---------- 监控查看 ----------
+    # ---------- 监控查看（真实视频流，仅 owner/admin/patrol 可见） ----------
     def _build_monitor_tab(self):
         f = self.tab_monitor
-        ttk.Label(f, text="各考场实时态势与最近审计", font=FONT_B).pack(anchor="w")
-        bar = ttk.Frame(f)
-        bar.pack(fill="x", pady=(4, 6))
-        ttk.Button(bar, text="🔄 刷新", command=self.refresh_monitor).pack(side="left")
-
-        cols = ttk.Frame(f)
-        cols.pack(fill="both", expand=True)
-        left = ttk.LabelFrame(cols, text="考场监控概览", padding=6)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        right = ttk.LabelFrame(cols, text="最近审计 / 操作", padding=6)
-        right.grid(row=0, column=1, sticky="nsew")
-        cols.columnconfigure(0, weight=1)
-        cols.columnconfigure(1, weight=1)
-
-        self.monitor_tree = ttk.Treeview(
-            left, columns=("room", "latest", "code", "status", "pending", "reviewed"),
-            show="headings", height=12)
-        for col, w, txt in (("room", 100, "考场"),
-                            ("latest", 160, "最新告警时间"),
-                            ("code", 220, "最新告警"),
-                            ("status", 80, "状态"),
-                            ("pending", 70, "待处置"),
-                            ("reviewed", 70, "已复核")):
-            self.monitor_tree.heading(col, text=txt)
-            self.monitor_tree.column(col, width=w, anchor="center")
-        self.monitor_tree.pack(fill="both", expand=True)
-
-        self.monitor_log = tk.Text(right, height=18, wrap="word", font=MONO)
-        self.monitor_log.pack(fill="both", expand=True)
-
-    def refresh_monitor(self):
-        """刷新监控查看页：按考场聚合最新告警与审计"""
-        try:
-            alerts = self.store.list_alerts(limit=1000)
-            by_room = {}
-            for a in alerts:
-                rid = a.room_id or "未分配考场"
-                by_room.setdefault(rid, []).append(a)
-            for i in self.monitor_tree.get_children():
-                self.monitor_tree.delete(i)
-            for rid, lst in sorted(by_room.items()):
-                lst.sort(key=lambda x: x.created_epoch or 0, reverse=True)
-                latest = lst[0]
-                pending = sum(1 for a in lst if a.status == models.ST_PENDING)
-                reviewed = sum(1 for a in lst if a.status == models.ST_REVIEWED)
-                code_text = config.ALERT_CODE_TEXT.get(latest.code, latest.code)
-                self.monitor_tree.insert("", "end", values=(
-                    rid, latest.created_at,
-                    "%s（%s）" % (latest.code, code_text),
-                    self._st_text(latest.status), pending, reviewed))
-        except Exception as e:
-            self.monitor_log.delete("1.0", "end")
-            self.monitor_log.insert("end", "刷新监控失败：%s\n" % e)
+        ttk.Label(f, text="实时视频监控（RTSP / HTTP 推流）", font=FONT_B).pack(anchor="w")
+        if not HAS_CV2 or not HAS_PIL:
+            ttk.Label(f, text="⚠ 缺少视频播放依赖：需要 opencv-python 与 Pillow",
+                      foreground="#c00").pack(anchor="w", pady=10)
             return
 
+        bar = ttk.Frame(f)
+        bar.pack(fill="x", pady=(6, 6))
+        ttk.Label(bar, text="推流地址：").pack(side="left")
+        self.monitor_url = tk.StringVar()
+        # 尝试读取上次保存的地址
         try:
-            self.monitor_log.delete("1.0", "end")
-            for r in self.store.audit_rows(limit=40):
-                self.monitor_log.insert("end", "%s  %s  %s  %s\n" % (
-                    r.get("ts"), r.get("action"), r.get("operator") or "-",
-                    r.get("detail") or ""))
+            p = config.DATA_ROOT / "monitor_url.txt"
+            if p.exists():
+                self.monitor_url.set(p.read_text(encoding="utf-8").strip())
         except Exception:
             pass
+        ttk.Entry(bar, textvariable=self.monitor_url, width=70).pack(side="left", padx=4)
+        self.monitor_btn = ttk.Button(bar, text="▶ 开始播放", command=self._monitor_start)
+        self.monitor_btn.pack(side="left", padx=4)
+        ttk.Button(bar, text="⏹ 停止", command=self._monitor_stop).pack(side="left")
+
+        self.monitor_label = tk.Label(f, bg="#000", relief="sunken")
+        self.monitor_label.pack(fill="both", expand=True, pady=(0, 6))
+        self.monitor_status = ttk.Label(f, text="就绪：请输入推流地址后点击开始播放",
+                                        foreground="#666")
+        self.monitor_status.pack(anchor="w")
+
+        self._cap = None
+        self._monitor_thread = None
+        self._monitor_running = False
+        self._monitor_photo = None
+
+    def _monitor_start(self):
+        if self._monitor_running:
+            return
+        url = self.monitor_url.get().strip()
+        if not url:
+            messagebox.showwarning("提示", "请先填写推流地址")
+            return
+        try:
+            (config.DATA_ROOT / "monitor_url.txt").write_text(url, encoding="utf-8")
+        except Exception:
+            pass
+        self._monitor_stop()
+        self._cap = cv2.VideoCapture(url)
+        if not self._cap.isOpened():
+            messagebox.showerror("播放失败", "无法打开视频流：%s" % url)
+            self._cap = None
+            return
+        self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self._monitor_running = True
+        self.monitor_btn.config(text="播放中…")
+        self.monitor_status.config(text="正在缓冲 %s…" % url)
+        self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        self._monitor_thread.start()
+
+    def _monitor_loop(self):
+        while self._monitor_running and self._cap and self._cap.isOpened():
+            ok, frame = self._cap.read()
+            if not ok or frame is None:
+                time.sleep(0.05)
+                continue
+            try:
+                self.root.after(0, lambda f=frame: self._monitor_update(f))
+            except (tk.TclError, RuntimeError):
+                break
+            time.sleep(0.033)   # ~30 fps 刷新 UI，避免主线程卡死
+        try:
+            self.root.after(0, self._monitor_cleanup)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def _monitor_update(self, frame):
+        if not self.monitor_label.winfo_exists():
+            return
+        try:
+            h = self.monitor_label.winfo_height()
+            w = self.monitor_label.winfo_width()
+            if h < 50:
+                h = 480
+            if w < 50:
+                w = 640
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(rgb)
+            img.thumbnail((w, h), Image.Resampling.LANCZOS)
+            self._monitor_photo = ImageTk.PhotoImage(image=img)
+            self.monitor_label.config(image=self._monitor_photo)
+            self.monitor_status.config(text="播放中：%s" % self.monitor_url.get())
+        except Exception as e:
+            self.monitor_status.config(text="画面渲染失败：%s" % e)
+
+    def _monitor_stop(self):
+        self._monitor_running = False
+        if self._cap:
+            try:
+                self._cap.release()
+            except Exception:
+                pass
+            self._cap = None
+        self._monitor_photo = None
+        try:
+            self.monitor_label.config(image="")
+            self.monitor_btn.config(text="▶ 开始播放")
+            self.monitor_status.config(text="已停止播放")
+        except tk.TclError:
+            pass
+
+    def _monitor_cleanup(self):
+        self._monitor_stop()
+
+    def refresh_monitor(self):
+        """监控页暂无列表数据，状态由视频线程自行维护"""
+        pass
 
     # ---------- 运行状态与管控 ----------
     def _build_ops_tab(self):
@@ -1218,7 +1287,8 @@ class TerminalApp(object):
     def refresh_all(self):
         self.refresh_alerts()
         self.refresh_reviews()
-        self.refresh_monitor()
+        if self.can_monitor:
+            self.refresh_monitor()
         self.refresh_ops()
 
     def refresh_alerts(self):
