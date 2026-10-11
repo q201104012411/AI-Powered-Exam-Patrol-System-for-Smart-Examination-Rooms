@@ -75,6 +75,13 @@ class FaceVerifyGUI:
         self.live_token = None          # 现场令牌
         self.live_desc = "未采集"
 
+        # 所有者设置：人脸通过后是否自动带出报名库证件信息（默认开启）
+        self.auto_fill_doc = tk.BooleanVar(value=accounts.auto_fill_doc_enabled())
+
+        # AI 助手忙状态守护（防止 ollama 请求卡死后 UI 永远锁死）
+        self._ai_busy_since = 0
+        self._ai_guard_sched = False
+
         # 操作人员必须先登录（登录界面直接建在主窗口内，避免 Toplevel/transient 不显示的问题）
         self._build_login_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -333,16 +340,19 @@ class FaceVerifyGUI:
                                                       sticky="ew", pady=(8, 4))
         ttk.Label(elem, text="报名库带出（只读）：").grid(row=4, column=0, sticky="w")
         self.id_card_var = tk.StringVar()
-        ttk.Entry(elem, textvariable=self.id_card_var, width=24, state="readonly"
-                  ).grid(row=4, column=1, sticky="w", padx=4)
+        self.id_card_entry = ttk.Entry(elem, textvariable=self.id_card_var, width=24,
+                                       state="readonly")
+        self.id_card_entry.grid(row=4, column=1, sticky="w", padx=4)
         ttk.Label(elem, text="准考证：").grid(row=4, column=2, sticky="w", padx=(12, 0))
         self.ticket_var = tk.StringVar()
-        ttk.Entry(elem, textvariable=self.ticket_var, width=16, state="readonly"
-                  ).grid(row=4, column=3, sticky="w", padx=4)
+        self.ticket_entry = ttk.Entry(elem, textvariable=self.ticket_var, width=16,
+                                      state="readonly")
+        self.ticket_entry.grid(row=4, column=3, sticky="w", padx=4)
         ttk.Label(elem, text="座位：").grid(row=4, column=4, sticky="w", padx=(12, 0))
         self.seat_var = tk.StringVar()
-        ttk.Entry(elem, textvariable=self.seat_var, width=10, state="readonly"
-                  ).grid(row=4, column=5, sticky="w", padx=4)
+        self.seat_entry = ttk.Entry(elem, textvariable=self.seat_var, width=10,
+                                    state="readonly")
+        self.seat_entry.grid(row=4, column=5, sticky="w", padx=4)
         ttk.Label(elem, text="身份证号仅显示掩码（库中只存加盐哈希，明文不可逆）：请对照证件实物目视核对。",
                   foreground="#888").grid(row=5, column=0, columnspan=7, sticky="w", pady=(6, 0))
 
@@ -516,14 +526,38 @@ class FaceVerifyGUI:
         self.id_card_var.set(c.id_card_masked or "（未登记）")
         self.ticket_var.set(c.ticket_no or "-")
         self.seat_var.set(c.seat_no or "-")
+        self._flash_doc_fields()
         self.action_log.log("自动补齐身份信息",
                             "考生=%s 准考证=%s 座位=%s" % (c.candidate_id, c.ticket_no, c.seat_no))
+
+    def _flash_doc_fields(self):
+        """报名信息带出时给只读字段一个黄色高亮闪烁，提醒工作人员「这一片刚更新了」"""
+        fields = [getattr(self, n, None) for n in ("id_card_entry", "ticket_entry", "seat_entry")]
+        fields = [w for w in fields if self._widget_alive(w)]
+        if not fields:
+            return
+        for w in fields:
+            try:
+                w.config(background="#fef08a")
+            except tk.TclError:
+                pass
+        def restore():
+            for w in fields:
+                try:
+                    w.config(background="")
+                except tk.TclError:
+                    pass
+        try:
+            self.root.after(900, restore)
+        except (tk.TclError, RuntimeError):
+            pass
 
     def _enable_doc_check(self, candidate_id, enabled):
         """人脸通过后，把该考生的证件信息（掩码）显示出来供目视核对"""
         c = self.candidates.get(candidate_id)
         if enabled and c is not None:
-            self._auto_fill_from(candidate_id)          # 自动补齐并跳出
+            if self.auto_fill_doc.get():
+                self._auto_fill_from(candidate_id)          # 自动补齐并高亮
             self.doc_label.config(text=self.verifier.document_info(c), foreground="#1f56b8")
             self.doc_ok_btn.config(state="normal")
             self.doc_bad_btn.config(state="normal")
@@ -630,6 +664,16 @@ class FaceVerifyGUI:
             self.cmd_btn = ttk.Button(owner_box, text="⌨ 打开命令控制台",
                                       command=self._show_cmd_console)
             self.cmd_btn.pack(anchor="w", pady=(6, 0))
+
+            # ---- 人脸通过后是否自动带出报名库证件信息（默认开启）----
+            ttk.Checkbutton(owner_box, text="人脸通过后自动带出证件信息（只读）",
+                            variable=self.auto_fill_doc,
+                            command=self._toggle_auto_fill_doc).pack(anchor="w", pady=(10, 0))
+            ttk.Label(owner_box,
+                      text="开启：扫脸通过后，下方「报名库带出（只读）」自动显示该考生身份证掩码、准考证、座位；\n"
+                           "关闭：不自动跳出，工作人员需手动点「按所选考生带入」或查看报名库。",
+                      foreground="#888", justify="left").pack(anchor="w", pady=(2, 0))
+
             self._sync_cmd_btn()
 
         ttk.Label(win, text="核验审计记录（哈希链，含操作人 / 见证人 / 结果 / 原因码）",
@@ -1008,6 +1052,17 @@ class FaceVerifyGUI:
             return bool(w.winfo_exists())
         except tk.TclError:
             return False
+
+    def _toggle_auto_fill_doc(self):
+        """所有者开关：人脸通过后是否自动带出报名库证件信息"""
+        on = self.auto_fill_doc.get()
+        ok, msg = accounts.set_auto_fill_doc(on)
+        if not ok:
+            messagebox.showerror("设置失败", msg)
+            self.auto_fill_doc.set(accounts.auto_fill_doc_enabled())
+            return
+        self.action_log.log("自动带出证件信息", "开启" if on else "关闭")
+
 
     def _toggle_cmd_console_admin(self):
         """所有者开关：是否授权管理员使用 ollama AI 辅助（默认关闭）"""
@@ -1517,7 +1572,7 @@ class FaceVerifyGUI:
         threading.Thread(target=worker, daemon=True).start()
 
     # ---------------- AI 对话 / AI 巡视（ollama，仅所有者层级） ----------------
-    AI_WATCH_INTERVAL_MS = 20000        # AI 巡视轮询间隔（毫秒）
+    AI_WATCH_INTERVAL_MS = 30000        # AI 巡视轮询间隔（毫秒）：30 秒，降低 CPU 占用
 
     def _console_mode_changed(self, event=None):
         """类型切换时同步提示语（选中 AI 对话时换成对话说明）"""
@@ -1598,9 +1653,14 @@ class FaceVerifyGUI:
             to = max(int(self.console_timeout.get()), 120)
         except (TypeError, ValueError):
             to = 180
+        if self._ai_busy:
+            self._ai_append_out("⚠ 上一条 AI 请求还未完成，请稍候再试。", tag="ai_err")
+            return
         snapshot = self._ai_snapshot()
         operator = (self.user or {}).get("username", "")
         self._ai_busy = True
+        self._ai_busy_since = time.time()
+        self._ensure_ai_guard()
         self.console_run_btn.config(state="disabled")
         self.console_meta.config(text="AI 思考中…（%s，本地 4B 模型约需数秒到数十秒）" % model)
         self._ai_append_out("🧑 你：%s" % text, tag="ai_user")
@@ -1636,6 +1696,44 @@ class FaceVerifyGUI:
             except (tk.TclError, RuntimeError):
                 pass
         threading.Thread(target=work, daemon=True).start()
+
+    def _ensure_ai_guard(self):
+        """启动 AI 忙状态守护（首次调用时），防止 ollama 卡死后 UI 永远锁死"""
+        if self._ai_guard_sched:
+            return
+        self._ai_guard_sched = True
+        self._ai_guard_tick()
+
+    def _ai_guard_tick(self):
+        """
+        每 10 秒检查一次：如果 _ai_busy 已持续超过最大预期时间 + 15 秒缓冲，
+        就认为 ollama 请求已经卡死/丢失回调，强制恢复 UI。
+        """
+        try:
+            if not self.root.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if self._ai_busy:
+            try:
+                limit = max(120, int(self.console_timeout.get() or 120)) + 15
+            except (TypeError, ValueError):
+                limit = 135
+            elapsed = time.time() - self._ai_busy_since
+            if elapsed > limit:
+                self._ai_busy = False
+                try:
+                    self.console_run_btn.config(state="normal")
+                    self.console_meta.config(text="")
+                except tk.TclError:
+                    pass
+                self._ai_append_out("⚠ AI 请求超时或卡死，已强制恢复，可重新发送。",
+                                    tag="ai_err")
+                self.action_log.log("AI 守护", "强制重置忙状态（%.0fs 无响应）" % elapsed)
+        try:
+            self.root.after(10000, self._ai_guard_tick)
+        except (tk.TclError, RuntimeError):
+            pass
 
     def _ai_snapshot(self):
         """
@@ -1759,7 +1857,11 @@ class FaceVerifyGUI:
         import ai_assistant
         model = (self.ai_model_var.get() or "").strip() or ai_assistant.DEFAULT_MODEL
         operator = (self.user or {}).get("username", "")
+        if self._ai_busy:
+            return                                  # 聊天或上一轮巡视还没完，先让路
         self._ai_busy = True
+        self._ai_busy_since = time.time()
+        self._ensure_ai_guard()
         self.console_meta.config(text="🔎 AI 巡视分析中…")
         self._append("🔎 AI 巡视：检测到界面状态变化，正在分析…")
 
@@ -1880,9 +1982,12 @@ class FaceVerifyGUI:
         预览统一降采样到宽 ≤480，既省界面线程开销，也让实时预览更跟手。"""
         import cv2
         h, w = frame.shape[:2]
+        # 只用 INTER_AREA 做大幅下采样（>2 倍），小幅缩放改用更快的 INTER_LINEAR
         if w > 480:
-            frame = cv2.resize(frame, (480, max(1, int(h * 480.0 / w))),
-                               interpolation=cv2.INTER_AREA)
+            scale = 480.0 / w
+            new_w, new_h = 480, max(1, int(h * scale))
+            interp = cv2.INTER_AREA if scale < 0.5 else cv2.INTER_LINEAR
+            frame = cv2.resize(frame, (new_w, new_h), interpolation=interp)
         try:
             from PIL import Image, ImageTk
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -1914,7 +2019,8 @@ class FaceVerifyGUI:
         self.fps_label.config(text="FPS: %.1f" % s.fps)
         self.video_status.config(text=s.status_text(),
                                  foreground="#0a7d28" if not s.error else "#b00")
-        self.root.after(55, self._update_video)        # ≈18Hz，肉眼流畅且更省界面线程
+        # 30 FPS（33ms）让预览更顺滑；界面转换已做降采样，开销可控
+        self.root.after(33, self._update_video)
 
     def _use_live_frame(self):
         """便利化：没开视频就自动开；抓当前帧后立即核验（真实相机帧 + 现场令牌）"""

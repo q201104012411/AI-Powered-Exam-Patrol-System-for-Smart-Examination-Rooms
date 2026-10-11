@@ -76,10 +76,20 @@ class VideoStream:
         if self._capture_factory is not None:
             return self._capture_factory(self.camera_index)
         import cv2
-        cap = cv2.VideoCapture(self.camera_index)
+        import sys as _sys
+        # Windows 下默认 MSMF 后端常导致高延迟/卡顿，优先用 DirectShow；
+        # 其它平台保持默认后端。
+        if _sys.platform == "win32":
+            cap = cv2.VideoCapture(self.camera_index + cv2.CAP_DSHOW)
+        else:
+            cap = cv2.VideoCapture(self.camera_index)
         try:
+            # 把内部缓冲区降到 1，减少"画面滞后好几秒"的问题
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            # 尽量请求 30fps；摄像头不支持的会回退到自身能力，不会出错
+            cap.set(cv2.CAP_PROP_FPS, 30)
         except Exception:
             pass
         return cap

@@ -364,6 +364,8 @@ def set_strict_mode(on):
 CMD_CONSOLE_FLAG = os.path.join(str(config.DATA_ROOT), "cmd_console.on")
 # 所有者授权：允许管理员使用「ollama AI 辅助判断」（默认关闭，且以总开关开启为前提）
 CMD_CONSOLE_ADMIN_FLAG = os.path.join(str(config.DATA_ROOT), "cmd_console_admin.on")
+# 人脸通过后是否自动带出报名库证件信息（默认开启；关闭后需手动点「按所选考生带入」）
+AUTO_FILL_DOC_FLAG = os.path.join(str(config.DATA_ROOT), "auto_fill_doc.on")
 
 CMD_TIER_NONE = "none"
 CMD_TIER_OLLAMA = "ollama"
@@ -408,6 +410,37 @@ def set_cmd_console_admin(allow):
         return False, str(e)
     return True, ("已授权管理员使用 AI 辅助判断（仅限 `ollama run <模型>`，不能执行其它命令）"
                   if allow else "已收回管理员的 AI 辅助判断权限")
+
+
+# 人脸通过后是否自动带出报名库证件信息（默认开启；关闭后需手动点「按所选考生带入」）
+AUTO_FILL_DOC_FLAG = os.path.join(str(config.DATA_ROOT), "auto_fill_doc.on")
+AUTO_FILL_DOC_OFF_FLAG = AUTO_FILL_DOC_FLAG + ".off"
+
+
+def auto_fill_doc_enabled():
+    """人脸通过后是否自动带出报名库证件信息（默认开启）"""
+    # 显式关闭文件存在 = 用户主动关；否则都算开（兼容旧版本未创建任何文件的情况）
+    if os.path.exists(AUTO_FILL_DOC_OFF_FLAG):
+        return False
+    return True
+
+
+def set_auto_fill_doc(on):
+    """所有者设置：人脸通过后是否自动带出报名库证件信息。返回 (ok, msg)"""
+    try:
+        os.makedirs(os.path.dirname(AUTO_FILL_DOC_FLAG), exist_ok=True)
+        if on:
+            if os.path.exists(AUTO_FILL_DOC_OFF_FLAG):
+                os.remove(AUTO_FILL_DOC_OFF_FLAG)
+            with open(AUTO_FILL_DOC_FLAG, "w", encoding="utf-8") as f:
+                f.write("1\n")
+        else:
+            with open(AUTO_FILL_DOC_OFF_FLAG, "w", encoding="utf-8") as f:
+                f.write("0\n")
+    except OSError as e:
+        return False, str(e)
+    return True, ("已开启：人脸通过后将自动带出证件信息（只读）"
+                  if on else "已关闭：人脸通过后不再自动带出证件信息，需手动查看")
 
 
 def cmd_console_tier(role):
