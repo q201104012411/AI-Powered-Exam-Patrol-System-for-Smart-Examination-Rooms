@@ -16,9 +16,23 @@
 
 运行：python gui.py      （隐藏命令行窗口见「切换命令行窗口.bat」）
 """
+import json
 import os
+import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
+
+try:
+    import cv2
+    HAS_CV2 = True
+except Exception:
+    HAS_CV2 = False
+try:
+    from PIL import Image, ImageTk
+    HAS_PIL = True
+except Exception:
+    HAS_PIL = False
 
 import config
 import diagnose
@@ -196,14 +210,23 @@ class App(object):
         self.t_chk = ttk.Frame(nb, padding=8)
         self.t_wo = ttk.Frame(nb, padding=8)
         self.t_rep = ttk.Frame(nb, padding=8)
+        # 实时监控：仅所有者和管理员可见
+        self.can_monitor = self.user.role in (web_accounts.ROLE_OWNER,
+                                              web_accounts.ROLE_ADMIN)
+        if self.can_monitor:
+            self.t_mon = ttk.Frame(nb, padding=8)
         nb.add(self.t_dev, text="  设备台账  ")
         nb.add(self.t_chk, text="  巡检核查  ")
         nb.add(self.t_wo, text="  整改工单  ")
         nb.add(self.t_rep, text="  报告与指标  ")
+        if self.can_monitor:
+            nb.add(self.t_mon, text="  实时监控  ")
         self._dev_tab()
         self._chk_tab()
         self._wo_tab()
         self._rep_tab()
+        if self.can_monitor:
+            self._mon_tab()
         self.status = ttk.Label(self.root, text="就绪　｜　%s（%s）"
                                 % (self.user.username, self.user.role_text),
                                 foreground="#666")
@@ -718,6 +741,207 @@ class App(object):
         self.refresh_checks()
         self.refresh_orders()
         self.refresh_report()
+        if self.can_monitor:
+            self.refresh_mon()
+
+    # ---------------- 实时监控（多摄像头，owner/admin 可见） ----------------
+    def _mon_tab(self):
+        f = self.t_mon
+        ttk.Label(f, text="实时监控（基于设备台账取流地址，多摄像头同时播放）",
+                  font=FONT).pack(anchor="w")
+        if not HAS_CV2 or not HAS_PIL:
+            ttk.Label(f, text="⚠ 缺少视频播放依赖：需要 opencv-python 与 Pillow",
+                      foreground="#c00").pack(anchor="w", pady=10)
+            return
+
+        self._cam_threads = {}
+        self._cam_caps = {}
+        self._cam_running = {}
+        self._cam_photos = {}
+
+        bar = ttk.Frame(f)
+        bar.pack(fill="x", pady=(6, 6))
+        ttk.Button(bar, text="🔄 刷新设备", command=self.refresh_mon).pack(side="left")
+        ttk.Button(bar, text="▶ 全部播放", command=self._mon_play_all).pack(side="left", padx=6)
+        ttk.Button(bar, text="⏹ 全部停止", command=self._mon_stop_all).pack(side="left")
+        self.mon_status = ttk.Label(bar, text="就绪", foreground="#666")
+        self.mon_status.pack(side="right")
+
+        self.mon_grid = ttk.Frame(f)
+        self.mon_grid.pack(fill="both", expand=True)
+        self.refresh_mon()
+
+    def refresh_mon(self):
+        """根据设备台账重建摄像头网格"""
+        if not self.can_monitor:
+            return
+        self._mon_stop_all()
+        for w in self.mon_grid.winfo_children():
+            w.destroy()
+        devs = self.store.list_devices(enabled_only=False)
+        devs = [d for d in devs if getattr(d, "url", "")]
+        if not devs:
+            ttk.Label(self.mon_grid,
+                      text="暂无带取流地址的设备，请在「设备台账」页添加机位和 URL。",
+                      foreground="#888").pack(pady=30)
+            return
+        cols = 2
+        for i, dev in enumerate(devs):
+            room = dev.room_id or "未分配考场"
+            name = dev.name or dev.code or "未命名"
+            code = dev.code
+            frame = ttk.LabelFrame(self.mon_grid, text=" %s · %s " % (room, name), padding=4)
+            frame.grid(row=i // cols, column=i % cols, sticky="nsew", padx=4, pady=4)
+            self.mon_grid.rowconfigure(i // cols, weight=1)
+            self.mon_grid.columnconfigure(i % cols, weight=1)
+            lbl = tk.Label(frame, bg="#000", relief="sunken")
+            lbl.pack(fill="both", expand=True)
+            dev._mon_label = lbl
+            status = ttk.Label(frame, text="未播放", foreground="#666")
+            status.pack(anchor="w")
+            dev._mon_status = status
+            bbar = ttk.Frame(frame)
+            bbar.pack(fill="x", pady=(2, 0))
+            dev._mon_btn = ttk.Button(bbar, text="▶ 播放",
+                                      command=lambda c=code: self._cam_play(c))
+            dev._mon_btn.pack(side="left")
+            ttk.Button(bbar, text="⏹ 停止",
+                       command=lambda c=code: self._cam_stop(c)).pack(side="left", padx=4)
+
+    @staticmethod
+    def _mon_try_open(url):
+        """尝试多种后端打开视频流，返回 (cap, backend_name, info)"""
+        backends = []
+        if hasattr(cv2, "CAP_FFMPEG"):
+            backends.append((cv2.CAP_FFMPEG, "FFMPEG"))
+        if hasattr(cv2, "CAP_GSTREAMER"):
+            backends.append((cv2.CAP_GSTREAMER, "GSTREAMER"))
+        backends.append((0, "默认"))
+        last_info = ""
+        for backend, name in backends:
+            try:
+                cap = cv2.VideoCapture(url, backend) if backend else cv2.VideoCapture(url)
+                if cap.isOpened():
+                    ok, frame = cap.read()
+                    if ok and frame is not None:
+                        return cap, name, ""
+                    last_info = "%s 后端能打开但读不到帧" % name
+                    cap.release()
+                else:
+                    last_info = "%s 后端无法打开" % name
+            except Exception as e:
+                last_info = "%s 后端异常：%s" % (name, e)
+        return None, "", last_info
+
+    def _cam_play(self, code):
+        dev = self._dev_by_code(code)
+        if dev is None:
+            return
+        url = dev.url
+        if not url or self._cam_running.get(code):
+            return
+        self._cam_stop(code)
+        cap, backend, info = self._mon_try_open(url)
+        if cap is None:
+            self._cam_set_status(code, "打开失败：%s" % info, "#c00")
+            return
+        self._cam_caps[code] = cap
+        self._cam_running[code] = True
+        self._cam_set_status(code, "[%s后端] 缓冲中…" % backend, "#1f56b8")
+        self._cam_btn_text(code, "播放中…")
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        t = threading.Thread(target=lambda: self._cam_loop(code, url), daemon=True)
+        self._cam_threads[code] = t
+        t.start()
+
+    def _cam_loop(self, code, url):
+        cap = self._cam_caps.get(code)
+        while self._cam_running.get(code) and cap and cap.isOpened():
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                time.sleep(0.05)
+                continue
+            try:
+                self.root.after(0, lambda f=frame, c=code: self._cam_update(c, f))
+            except (tk.TclError, RuntimeError):
+                break
+            time.sleep(0.033)
+        try:
+            self.root.after(0, lambda c=code: self._cam_stopped_ui(c))
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def _cam_update(self, code, frame):
+        dev = self._dev_by_code(code)
+        if dev is None or not hasattr(dev, "_mon_label"):
+            return
+        lbl = dev._mon_label
+        if lbl is None or not lbl.winfo_exists():
+            return
+        try:
+            h = lbl.winfo_height()
+            w = lbl.winfo_width()
+            if h < 50:
+                h = 240
+            if w < 50:
+                w = 320
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(rgb)
+            img.thumbnail((w, h), Image.Resampling.LANCZOS)
+            self._cam_photos[code] = ImageTk.PhotoImage(image=img)
+            lbl.config(image=self._cam_photos[code])
+            self._cam_set_status(code, "播放中", "#0a7d28")
+        except Exception as e:
+            self._cam_set_status(code, "渲染失败：%s" % e, "#c00")
+
+    def _cam_stop(self, code):
+        self._cam_running[code] = False
+        cap = self._cam_caps.pop(code, None)
+        if cap:
+            try:
+                cap.release()
+            except Exception:
+                pass
+        self._cam_photos.pop(code, None)
+        self._cam_stopped_ui(code)
+
+    def _cam_stopped_ui(self, code):
+        dev = self._dev_by_code(code)
+        try:
+            if dev is not None and hasattr(dev, "_mon_label") and dev._mon_label.winfo_exists():
+                dev._mon_label.config(image="")
+            self._cam_btn_text(code, "▶ 播放")
+            self._cam_set_status(code, "已停止", "#666")
+        except tk.TclError:
+            pass
+
+    def _dev_by_code(self, code):
+        for d in self.store.list_devices(enabled_only=False):
+            if d.code == code:
+                return d
+        return None
+
+    def _cam_set_status(self, code, text, color):
+        dev = self._dev_by_code(code)
+        if dev is not None and hasattr(dev, "_mon_status") and dev._mon_status.winfo_exists():
+            dev._mon_status.config(text=text, foreground=color)
+
+    def _cam_btn_text(self, code, text):
+        dev = self._dev_by_code(code)
+        if dev is not None and hasattr(dev, "_mon_btn") and dev._mon_btn.winfo_exists():
+            dev._mon_btn.config(text=text)
+
+    def _mon_play_all(self):
+        for d in self.store.list_devices(enabled_only=False):
+            if d.code:
+                self._cam_play(d.code)
+        self.mon_status.config(text="已启动全部摄像头")
+
+    def _mon_stop_all(self):
+        codes = list(self._cam_running.keys())
+        for code in codes:
+            self._cam_stop(code)
+        self.mon_status.config(text="已停止全部摄像头")
 
 
 def _choose_role(parent):
