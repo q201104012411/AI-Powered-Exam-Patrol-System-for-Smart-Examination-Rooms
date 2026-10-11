@@ -1668,9 +1668,10 @@ class FaceVerifyGUI:
         """
         用户要求："如果关闭了 AI 对话功能，AI 自动分析我在干什么"。
         触发条件（同时满足）：
-          · 勾选了「AI 巡视」；      · 控制台面板展开着；
+          · 勾选了「AI 巡视」；
           · 当前**不在** AI 对话模式（对话时用户自己在问，巡视不打扰）；
           · 没有请求在飞；            · 界面状态相比上次有变化。
+        面板收不收起都巡视——分析结果会同步写进主结果输出框，不依赖控制台可见。
         """
         if not self.ai_watch_var.get() or self._ai_busy:
             return
@@ -1680,9 +1681,6 @@ class FaceVerifyGUI:
         tier = accounts.cmd_console_tier(role)
         if tier != accounts.CMD_TIER_FULL:
             return                          # 巡视沿用对话的层级限制：仅所有者
-        panel = getattr(self, "console_panel", None)
-        if not self._widget_alive(panel) or not panel.winfo_manager():
-            return
         if self.console_mode.get() == CONSOLE_MODE_LABELS["ai"]:
             return                          # 正在 AI 对话模式 = 功能开启中，不自动分析
         snapshot = self._ai_snapshot()
@@ -1715,6 +1713,11 @@ class FaceVerifyGUI:
                     self._ai_append_out("🔎 AI 巡视（自动分析当前操作）：\n%s" % text)
                 else:
                     self._ai_append_out("⚠ AI 巡视失败：%s" % text)
+                # 同步写到主结果输出框：巡视是"不盯着控制台也能看到"的提醒，
+                # 只写控制台输出框的话，面板收着时用户根本看不到分析结果
+                tag = "🔎 AI 巡视" if ok else "⚠ AI 巡视失败"
+                for line in ("%s：%s" % (tag, text)).splitlines():
+                    self._append(line)
                 self.console_meta.config(text="")
             try:
                 self.root.after(0, apply)
