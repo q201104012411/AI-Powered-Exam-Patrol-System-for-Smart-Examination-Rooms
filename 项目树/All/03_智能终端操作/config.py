@@ -41,6 +41,16 @@ for _d in (DATA_ROOT, LOG_DIR, ATTACH_DIR, QUEUE_DIR):
 # 是否隐藏启动器的命令行窗口（由所有者在界面里开关，写标记文件，.bat 读取）
 HIDE_CMD_FLAG = DATA_ROOT / "hide_cmd.on"
 
+# ---------------- 命令控制台（所有者显式开启，默认关闭） ----------------
+# 语义与 01 一致：标记文件存在 = 已开启；不存在 = 关闭。
+#   CONSOLE_FLAG       总开关（只有所有者能拨）。关闭时**所有角色**（含已授权管理员）一律无权限
+#   CONSOLE_ADMIN_FLAG 所有者对管理员的单独授权：只放行 `ollama run <模型> [提示词]`，
+#                      且以总开关开启为前提
+# 为什么拆成两把开关：所有者可能想"临时关掉全部执行入口"却保留对管理员的授权意图，
+# 两件事各由一把开关表达；判定入口只有 console.console_tier() 一处。
+CONSOLE_FLAG = DATA_ROOT / "cmd_console.on"
+CONSOLE_ADMIN_FLAG = DATA_ROOT / "cmd_console_admin.on"
+
 # ---------------- 终端类型（《智能终端.md》第一节） ----------------
 TERMINAL_TYPES = {
     "patrol":     {"name": "巡考客户端",   "role": "patrol",   "desc": "告警接收、视频回看、复核判定、处置记录"},
@@ -144,6 +154,10 @@ FACE_MODULE_DIR = os.environ.get(
     "EXAM_FACE_MODULE_DIR",
     str(BASE_DIR.parent / "01_人脸识别与身份核对" / "01_人脸识别与身份核对")).strip()
 
+# 01 的命令控制台实现目录（_cmd_bridge.py 在隔离子进程里 import 它的 cmd_console）。
+# 默认与上面是同一个 01 目录；可单独指到别处，便于把命令控制台部署在另一份副本上。
+CMD_CONSOLE_DIR = os.environ.get("EXAM_CMD_CONSOLE_DIR", FACE_MODULE_DIR).strip()
+
 # ---------------- 时钟（第三节：标准时间） ----------------
 CLOCK_MAX_DRIFT_SEC = 2             # 与标准时间偏差超过即告警
 CLOCK_SYNC_INTERVAL_SEC = 300
@@ -168,6 +182,8 @@ def describe():
         "角色": " ".join("%s=%s" % (ROLE_TEXT[k], _sorted_actions(k))
                         for k in ROLE_ACTIONS),
         "默认脱敏": MASK_DEFAULT,
+        "命令控制台": ("已开启（所有者可执行系统命令 / Python 代码）" if CONSOLE_FLAG.exists()
+                       else "关闭（默认）"),
         "平台对接": PLATFORM_URL or "（未配置，仅本地）",
         "边缘对接": EDGE_URL or "（未配置，仅本地）",
         "人脸模块": FACE_MODULE_DIR,

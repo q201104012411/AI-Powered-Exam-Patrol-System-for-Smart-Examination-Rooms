@@ -1,10 +1,10 @@
-智能终端操作端 · 程序结构
+﻿智能终端操作端 · 程序结构
 ============================================================
 对应《智能终端.md》。本目录是终端侧软件实现。
 
 【入口】
   启动终端界面.bat      -> terminal_gui.py（桌面界面，4 页签）
-  运行自检与测试.bat    -> 单元测试(76) + 端到端自检(55)
+  运行自检与测试.bat    -> 单元测试(106) + 端到端自检(55)
   main.py               -> 端到端自检；默认用临时数据目录，--real 用真实目录
   terminal_gui.py       -> 界面；登录后按角色装配视图
 
@@ -31,9 +31,20 @@
   clock.py     StandardClock：standard_time(来源如实标注)、drift 偏差、
                check_and_alert 产生 CLOCK_DRIFT 告警、广播时刻表与到点触发留痕
   bridge.py    FaceBridge(隔离子进程调 01) + PlatformLink(平台/边缘/认证 HTTP，
-               未配置即如实报"未配置")
+               未配置即如实报"未配置") + CmdBridge(隔离子进程调 01 的命令控制台：
+               本端开关快速拦截 + role 原样传给 01 + 每次调用写审计链)
   _face_bridge.py  子进程侧：把 01 目录放进 sys.path，调用其 verifier，
                以最后一行 JSON 回传；异常一律 ok=false 不伪装成功
+
+  console.py   命令控制台开关与层级（默认**全部关闭**，标记文件语义）：
+               console_enabled/set_console(总开关 data\cmd_console.on)、
+               console_admin_allowed/set_console_admin(管理员授权
+               data\cmd_console_admin.on)、console_tier(role) 唯一判定入口
+               （owner=full / admin且授权=ollama / 其它=none；总开关关=一律 none）、
+               bridge_home() 把开关镜像给 01 侧数据根（不写 01 目录）
+  _cmd_bridge.py   子进程侧：把 01 目录放进 sys.path，调用其 cmd_console.execute，
+               **不自行判权限**（role 原样传，由 01 的 accounts.cmd_console_tier 定），
+               以最后一行 JSON 回传；设 sys.dont_write_bytecode 保证对 01 只读
 
 【数据流】
   边缘/平台 --HTTP--> AlertHub.ingest --> SQLite(alerts) --+
@@ -42,6 +53,12 @@
   管控:  平台 commands -> fleet.apply_pending -> 配置/外设/擦除(二次确认)/升级登记
   时钟:  授时 -> drift -> 超限产生告警；时刻表到点 -> 播报 + 审计
   核验:  界面 -> FaceBridge -> 子进程 _face_bridge -> 01 模块 -> JSON 结果
+  控制台: 界面 -> CmdBridge(console_tier 快速拦截) -> 子进程 _cmd_bridge
+          -> 01 cmd_console.execute --(accounts.cmd_console_tier 最终判定)--> 执行
+          -> 本端审计链(每次调用，含被拒) + 01 审计链(落在 data\cmd_bridge_home)
+  权限分层: 默认关闭；owner=完整 cmd/python；admin=仅在"总开关开 + 单独授权"时
+          可用 `ollama run <模型> [提示词]`（白名单复用 01 的 parse_ollama_command，
+          03 端不复制、不放宽）；其它角色 none
 
 【对外接口（平台侧需实现）】
   GET  /health     联通性探测

@@ -68,13 +68,17 @@ store = CandidateStore()
 
 def _mode_payload():
     """
-    当前两个所有者开关的状态（供前端渲染文案与按钮，避免前端硬编码"必须身份证"之类的说法）：
+    当前所有者开关的状态（供前端渲染文案与按钮，避免前端硬编码"必须身份证"之类的说法）：
       · major_exam  —— 大考模式（默认关闭）：开启后核验必须使用身份证（四要素）
       · strict_mode —— 严格模式（默认开启）：关闭后允许用本地图片核验（会留痕）
+      · cmd_console —— 命令控制台（默认关闭）：开启后所有者可执行完整命令；
+                       再由 cmd_console_admin 决定是否放给管理员（仅 ollama 辅助）
     """
     return {
         "major_exam": accounts.major_exam_enabled(),
         "strict_mode": accounts.strict_mode_enabled(),
+        "cmd_console": accounts.cmd_console_enabled(),
+        "cmd_console_admin": accounts.cmd_console_admin_allowed(),
         "identity_mode": "major" if accounts.major_exam_enabled() else "normal",
         "identity_title": accounts.identity_mode_title(),
         "identity_text": accounts.identity_mode_text(),
@@ -229,8 +233,21 @@ def set_owner_settings():
         if not ok:
             return jsonify({"error": msg}), 500
         changed.append("严格模式=%s" % ("开启" if on else "关闭"))
+    if "cmd_console" in data:
+        on = bool(data.get("cmd_console"))
+        ok, msg = accounts.set_cmd_console(on)
+        if not ok:
+            return jsonify({"error": msg}), 500
+        changed.append("命令控制台=%s" % ("开启" if on else "关闭"))
+    if "cmd_console_admin" in data:
+        on = bool(data.get("cmd_console_admin"))
+        ok, msg = accounts.set_cmd_console_admin(on)
+        if not ok:
+            return jsonify({"error": msg}), 500
+        changed.append("管理员AI辅助=%s" % ("授权" if on else "收回"))
     if not changed:
-        return jsonify({"error": "未提供任何可修改项（major_exam / strict_mode）"}), 400
+        return jsonify({"error": "未提供任何可修改项"
+                                 "（major_exam / strict_mode / cmd_console / cmd_console_admin）"}), 400
 
     detail = "；".join(changed)
     store.log_change("SET_OWNER_SWITCH", detail=detail, operator=request.user["username"])
@@ -283,6 +300,60 @@ def clear_records():
     b = ActionLogger().clear(operator=request.user["username"])
     return jsonify({"removed_audit": a["removed"], "removed_actions": b["removed"],
                     "backup_audit": a["backup"], "backup_actions": b["backup"]})
+
+
+# ---------------- 命令控制台（默认关闭；所有者 full / 管理员 ollama） ----------------
+@app.route("/api/cmd-console", methods=["GET"])
+@require_auth(roles=["owner", "admin"])
+def cmd_console_status():
+    """
+    命令控制台状态。只对 owner / admin 开放——教师等角色连"这台机器有没有开这个入口"
+    都不应该知道，所以这里不用 require_auth() 而是收窄角色。
+
+    返回体里的 tier 说明调用方实际处于哪一档（full / ollama / none），前端据此渲染。
+    """
+    import cmd_console
+    return jsonify(cmd_console.status(request.user["role"]))
+
+
+@app.route("/api/cmd-console/run", methods=["POST"])
+@require_auth(roles=["owner", "admin"])
+@limiter.limit("60 per minute")
+def cmd_console_run():
+    """
+    执行命令 / 代码。四重校验，缺一不可：
+      1. @require_auth(roles=["owner","admin"]) —— 角色每次请求回查数据库，token 里的旧角色无效；
+      2. accounts.can_cmd_console()             —— 总开关必须已开（默认关闭）；
+      3. cmd_console.execute(role=...)          —— **由服务端按角色决定层级**，不由请求方指定；
+      4. 执行过程写入审计哈希链（含被拒绝的尝试）。
+
+    ⚠️ 关键：管理员即使把请求体里的 mode 改成 "python"，也不会得到完整权限——
+    层级由 accounts.cmd_console_tier(role) 决定，管理员恒为 ollama，
+    execute() 会把 mode 强制为 "ollama" 并对命令做白名单解析。
+
+    请求体：{"code": "...", "mode": "cmd"|"python"|"ollama", "timeout": 秒}
+    """
+    import accounts as _accounts
+    import cmd_console
+
+    if not _accounts.can_cmd_console(request.user["role"]):
+        return jsonify({"error": "命令控制台未开启，或当前角色无权执行。"
+                                 "请由所有者在「所有者设置」中开启。"}), 403
+
+    data = request.get_json(silent=True) or {}
+    code = data.get("code") or ""
+    mode = data.get("mode") or "cmd"
+    if mode not in ("cmd", "python", "ollama"):
+        return jsonify({"error": "mode 只能是 cmd / python / ollama"}), 400
+    try:
+        timeout = int(data.get("timeout") or cmd_console.DEFAULT_TIMEOUT)
+    except (TypeError, ValueError):
+        timeout = cmd_console.DEFAULT_TIMEOUT
+
+    result = cmd_console.execute(code, operator=request.user["username"],
+                                 role=request.user["role"],
+                                 mode=mode, source="web", timeout=timeout)
+    return jsonify(result)
 
 
 _VERIFIER_CACHE = {"candidates": None, "index": None}
@@ -671,4 +742,13 @@ if __name__ == "__main__":
     print("CORS 白名单：%s" % _origins)
     print("=" * 58)
     print("提示：生产环境请置于反向代理 + HTTPS 之后，不要直接对外暴露本服务。")
-    app.run(host="127.0.0.1", port=int(os.environ.get("PORT", "5000")), debug=False)
+    # 绑定地址：默认 127.0.0.1（仅本机）。
+    # 需要局域网访问时设置环境变量 HOST=0.0.0.0 —— 但那会同时把**整个面板**
+    # （考生数据接口、命令控制台）暴露给同网段，请确认考场网络可信后再开。
+    host = os.environ.get("HOST", "127.0.0.1")
+    if host not in ("127.0.0.1", "localhost"):
+        print("!" * 58)
+        print("警告：正在监听 %s —— 整个面板（含命令控制台）对同网段可见。" % host)
+        print("      命令控制台等价于本机完全控制权，开启前请确认网络可信、口令已改强。")
+        print("!" * 58)
+    app.run(host=host, port=int(os.environ.get("PORT", "5000")), debug=False)

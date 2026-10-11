@@ -192,6 +192,8 @@
     <div class="nav-item active" data-page="candidates">📋 考生管理</div>
     <div class="nav-item" data-page="users" id="navUsers" onclick="showUsers()">👥 用户管理</div>
     <div class="nav-item" id="navOwner" style="display:none;" onclick="showOwnerSettings()">⚙ 所有者设置</div>
+    <!-- 命令控制台：仅所有者可见，且必须已由所有者显式开启（默认关闭） -->
+    <div class="nav-item" id="navCmd" style="display:none;" onclick="showCmdConsole()">⌨ 命令控制台</div>
     <div class="nav-item" onclick="showRecords()">📋 操作记录</div>
     <div class="nav-item" onclick="openVerify()">🎥 实时核验</div>
     <div class="nav-item" onclick="showChangePwd()">🔑 修改密码</div>
@@ -387,6 +389,8 @@ async function enterApp() {
   // 所有者设置（大考模式 / 严格模式）只归所有者
   const navOwner = document.getElementById("navOwner");
   if (navOwner) navOwner.style.display = isOwner ? "" : "none";
+  // 命令控制台：仅所有者**且开关已开启**时才出现入口（默认关闭，避免误暴露）
+  syncNavCmd();
   if (!isAdmin && !isOwner) {
     document.getElementById("btnClear").style.display = "none";
     document.getElementById("btnSave").style.display = "none";
@@ -659,6 +663,31 @@ async function showOwnerSettings() {
       默认开启：非设备实时抓拍（上传照片）一律拒绝放行；<br>
       关闭后允许上传照片核验，但审计记录会如实标注“严格模式已关闭、本次为非现场来源”。
     </p>
+    <hr style="border:none;border-top:1px solid #e5e7eb;margin:16px 0 12px 0;">
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+      <input type="checkbox" id="osCmd" style="width:auto;margin:0;" ${m.cmd_console ? "checked" : ""}>
+      <b style="color:#b45309;">命令控制台（可执行任意系统命令 / Python 代码）</b>
+    </label>
+    <p style="font-size:12px;color:#6b7280;margin:0 0 6px 0;line-height:1.7;">
+      <b>默认关闭。</b>开启后<b>仅所有者</b>可在「⌨ 命令控制台」与 GUI 中执行任意命令；
+      管理员与教师一律不可（不提供“下放给管理员”的选项）。<br>
+      <span style="color:#b45309;">该能力等价于本机 / 服务器的完全控制权</span>——能执行命令，
+      就等于能读写考生生物特征库、改动程序、安装后门。每次执行都会写入审计哈希链，
+      但审计只能“事后可查”，<b>不能阻止执行</b>。<br>
+      开启前请确认：所有者口令已改强、所处网络可信、确实有此需要。
+    </p>
+    <label style="display:flex;align-items:center;gap:8px;margin:12px 0 4px 22px;">
+      <input type="checkbox" id="osCmdAdmin" style="width:auto;margin:0;" ${m.cmd_console_admin ? "checked" : ""}>
+      <b>允许管理员使用「AI 辅助判断」（仅 ollama）</b>
+    </label>
+    <p style="font-size:12px;color:#6b7280;margin:0 0 6px 22px;line-height:1.7;">
+      勾选后，<b>管理员</b>也能使用命令控制台，但<b>只能</b>执行
+      <code>ollama run &lt;模型&gt; [提示词]</code> 让本地大模型辅助判断，
+      <b>不能</b>执行其它任何程序或其它 ollama 子命令。（执行<b>不经过 shell</b>，
+      所以模型名之后的 <code>|</code> <code>&amp;&amp;</code> <code>&gt;</code>
+      等符号只会作为普通文字传给大模型，跑不出第二条命令。）<br>
+      需先勾选上面的「命令控制台」总开关；关掉总开关会一并停用管理员的权限。
+    </p>
     <div class="err" id="osErr"></div>
   `;
   document.getElementById("modalActions").innerHTML = `
@@ -671,18 +700,191 @@ async function showOwnerSettings() {
 async function saveOwnerSettings() {
   const major = document.getElementById("osMajor").checked;
   const strict = document.getElementById("osStrict").checked;
+  const cmdEl = document.getElementById("osCmd");
+  const cmd = cmdEl ? cmdEl.checked : false;
+  const cmdAdminEl = document.getElementById("osCmdAdmin");
+  const cmdAdmin = cmdAdminEl ? cmdAdminEl.checked : false;
   const err = document.getElementById("osErr");
   err.textContent = "";
+
+  // 开启命令控制台是危险动作：单独确认一次，避免误勾
+  if (cmd && !(currentModes && currentModes.cmd_console)) {
+    const ok = confirm(
+      "即将开启「命令控制台」。\n\n" +
+      "开启后，所有者可在网页端与 GUI 执行任意系统命令 / Python 代码，\n" +
+      "这等价于把本机（或服务器）的完全控制权交出去。\n\n" +
+      "每次执行都会写入审计哈希链，可事后追溯，但无法阻止执行。\n\n" +
+      "确定要开启吗？");
+    if (!ok) { cmdEl.checked = false; return; }
+  }
+  // 授权管理员同样单独确认（虽然其权限被限制在 ollama）
+  if (cmdAdmin && !(currentModes && currentModes.cmd_console_admin)) {
+    const ok = confirm(
+      "即将允许「管理员」使用 AI 辅助判断。\n\n" +
+      "管理员将能执行 `ollama run <模型> [提示词]`，用于让本地大模型辅助判断。\n" +
+      "管理员**不能**执行其它任何命令：白名单只匹配这一种形式，\n" +
+      "且执行不经过 shell，管道 / 重定向 / 链式命令在语法层即被拒绝。\n\n" +
+      "确定要授权吗？");
+    if (!ok) { cmdAdminEl.checked = false; return; }
+  }
+
   try {
     const res = await api("/owner-settings", {
       method: "POST",
-      body: JSON.stringify({ major_exam: major, strict_mode: strict })
+      body: JSON.stringify({ major_exam: major, strict_mode: strict,
+                             cmd_console: cmd, cmd_console_admin: cmdAdmin })
     });
     currentModes = res;
     renderModeBar();
+    syncNavCmd();          // 开关状态变了，立即显示/隐藏导航入口
     closeModal();
     setStatus(res.message || "所有者设置已更新");
   } catch (e) { err.textContent = e.message; }
+}
+
+// 当前命令控制台层级（由服务端下发：full / ollama / none）。
+// 前端只拿它决定"显示哪些选项"，**不做权限判断**——真正的判定在服务端。
+let ccTier = "none";
+
+// 命令控制台导航入口的可见性：
+//   所有者 —— 总开关开启即可见
+//   管理员 —— 还需所有者单独授权（cmd_console_admin）
+function syncNavCmd() {
+  const navCmd = document.getElementById("navCmd");
+  if (!navCmd) return;
+  const role = currentUser && currentUser.role;
+  const on = !!(currentModes && currentModes.cmd_console);
+  const delegated = !!(currentModes && currentModes.cmd_console_admin);
+  const allowed = on && (role === "owner" || (role === "admin" && delegated));
+  navCmd.style.display = allowed ? "" : "none";
+}
+
+// ---------------- 命令控制台（仅所有者 + 默认关闭） ----------------
+// 说明：这是"有意开放的后门"，所以前端只做体验，真正的权限判定全在服务端
+// （/api/cmd-console/run 会再次校验角色与开关，绕过前端也拿不到执行权）。
+async function showCmdConsole() {
+  const role = currentUser && currentUser.role;
+  if (role !== "owner" && role !== "admin") {
+    alert("命令控制台仅所有者与管理员可用。");
+    return;
+  }
+  let st;
+  try {
+    st = await api("/cmd-console");
+  } catch (e) {
+    alert("无法读取命令控制台状态：" + e.message);
+    return;
+  }
+  if (!st.can_run) {
+    alert("命令控制台当前未开启。\n\n请先由所有者在「⚙ 所有者设置」中开启「命令控制台」。");
+    return;
+  }
+
+  // 层级以服务端返回为准：full = 所有者完整权限；ollama = 已授权管理员的 AI 辅助
+  ccTier = st.tier;
+  const isFull = !!st.can_full;
+  document.getElementById("modalTitle").textContent =
+    isFull ? "⌨ 命令控制台（所有者 · 完整权限）"
+           : "⌨ AI 辅助判断（管理员 · 仅 ollama）";
+  document.getElementById("modalBody").innerHTML = `
+    <div style="background:${isFull ? "#fef3c7" : "#e0f2fe"};
+                border-left:4px solid ${isFull ? "#d97706" : "#0284c7"};
+                padding:9px 11px;font-size:12px;line-height:1.7;
+                color:${isFull ? "#92400e" : "#075985"};margin-bottom:12px;">
+      ${isFull
+        ? `⚠ <b>这里输入的内容会以本机 / 服务器当前用户身份直接执行</b>，等价于交出这台机器的控制权。`
+        : `ℹ 你是<b>管理员</b>：只能执行 <code>ollama run &lt;模型&gt; [提示词]</code>，
+           让本地大模型辅助判断。<b>其它命令一律无法执行</b>——白名单只匹配这一种形式，
+           且执行不经过 shell。`}
+      <br>每次执行都会写入审计哈希链（操作人、层级、命令、退出码、耗时），事后删改会被
+      <code>verify_chain</code> 检出。<br>
+      执行工作目录：<code>${st.cwd}</code>
+    </div>
+    <div style="display:flex;gap:14px;align-items:center;margin-bottom:8px;flex-wrap:wrap;">
+      <label style="font-size:13px;">类型：
+        <select id="ccMode" style="width:auto;display:inline-block;margin-left:4px;"
+                ${isFull ? "" : "disabled"}>
+          ${isFull
+            ? `<option value="cmd">系统命令（cmd）</option>
+               <option value="python">Python 代码</option>`
+            : `<option value="ollama">AI 辅助判断（ollama run）</option>`}
+        </select>
+      </label>
+      <label style="font-size:13px;">超时（秒）：
+        <input type="number" id="ccTimeout" value="${st.default_timeout}" min="1"
+               max="${st.max_timeout}" style="width:90px;display:inline-block;margin-left:4px;">
+      </label>
+    </div>
+    <textarea id="ccCode" rows="5" spellcheck="false"
+      placeholder="${isFull
+        ? `系统命令示例：dir&#10;Python 示例：print(1 + 1)`
+        : `示例：ollama run qwen2.5:7b 本次核验相似度偏低，请给出可能原因`}"
+      style="width:100%;font-family:Consolas,monospace;font-size:13px;box-sizing:border-box;
+             padding:8px;border:1px solid #d1d5db;border-radius:6px;"></textarea>
+    <div style="font-size:12px;color:#6b7280;margin:5px 0 10px 0;">
+      快捷键 Ctrl+Enter 执行。子进程没有交互输入：需要输入的命令会直接收到 EOF 而不是挂住。
+    </div>
+    <div id="ccMeta" style="font-size:12px;color:#374151;margin-bottom:5px;"></div>
+    <pre id="ccOut" style="background:#0f172a;color:#e2e8f0;padding:10px;border-radius:6px;
+         max-height:320px;overflow:auto;font-size:12px;line-height:1.6;
+         white-space:pre-wrap;word-break:break-all;margin:0;">（尚未执行）</pre>
+    <div class="err" id="ccErr" style="margin-top:6px;"></div>
+  `;
+  document.getElementById("modalActions").innerHTML = `
+    <button class="secondary" onclick="closeModal()">关闭</button>
+    <button onclick="runCmdConsole()" id="ccRunBtn">▶ 执行</button>
+  `;
+  const ta = document.getElementById("ccCode");
+  ta.addEventListener("keydown", e => {
+    if (e.ctrlKey && e.key === "Enter") { e.preventDefault(); runCmdConsole(); }
+  });
+  document.getElementById("modalBg").classList.add("show");
+  ta.focus();
+}
+
+async function runCmdConsole() {
+  const btn = document.getElementById("ccRunBtn");
+  const out = document.getElementById("ccOut");
+  const meta = document.getElementById("ccMeta");
+  const err = document.getElementById("ccErr");
+  const code = document.getElementById("ccCode").value;
+  // 模式以服务端下发的层级为准，不信任 DOM：
+  // 管理员即使改了页面元素，也只会被当作 ollama，服务端还会再判一次。
+  const mode = (ccTier === "full") ? document.getElementById("ccMode").value : "ollama";
+  const timeout = parseInt(document.getElementById("ccTimeout").value, 10) || 60;
+  err.textContent = "";
+  if (!code.trim()) {
+    err.textContent = (ccTier === "full") ? "请输入要执行的命令或代码"
+                                          : "请输入 `ollama run <模型> [提示词]`";
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = "执行中…";
+  out.textContent = "（执行中，请稍候…）";
+  meta.textContent = "";
+
+  try {
+    const r = await api("/cmd-console/run", {
+      method: "POST",
+      body: JSON.stringify({ code, mode, timeout })
+    });
+    const flag = r.timed_out ? "⏱ 超时已终止"
+               : (r.exit_code === 0 ? "✅ 成功" : "❌ 失败");
+    meta.innerHTML = flag + " ｜ 退出码 <b>" + r.exit_code + "</b> ｜ 耗时 " + r.duration_ms + " ms"
+      + (r.truncated ? ' ｜ <span style="color:#b45309;">输出已截断</span>' : '');
+
+    // 用 textContent 而不是 innerHTML：命令输出是不可信内容，
+    // 若里面含 <script> 或 <img onerror>，用 innerHTML 会造成自伤型 XSS。
+    const body = (r.stdout || "") + (r.stderr ? "\n--- stderr ---\n" + r.stderr : "");
+    out.textContent = body || "（无输出）";
+  } catch (e) {
+    err.textContent = e.message;
+    out.textContent = "（执行未完成）";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "▶ 执行";
+  }
 }
 
 async function showUsers() {

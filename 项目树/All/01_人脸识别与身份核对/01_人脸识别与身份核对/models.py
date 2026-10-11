@@ -46,6 +46,8 @@ RC_DOC_CHECK_CONFIRMED = "DOC_CHECK_CONFIRMED"  # 已带出证件信息并由工
 RC_DOC_MISMATCH = "DOC_MISMATCH"                # 工作人员目视发现证件与考生不符 -> 拦截
 RC_ID_CHECK_SKIPPED = "ID_CHECK_SKIPPED"        # 演示模式：显式跳过身份证哈希比对（必须留痕）
 RC_AUTO_PASS = "AUTO_PASS"                      # 自动核验通过：人脸匹配即放行（免人工确认，留痕）
+# ---- 命令控制台（所有者开关，默认关闭；每次执行都必须留痕）----
+RC_CMD_EXEC = "CMD_EXEC"                        # 命令控制台执行了一条命令 / 一段代码
 
 # 硬失败：属于"必须拦截"，不因重试而改变结论，也不得降级为转人工
 HARD_FAIL_CODES = {
@@ -97,6 +99,7 @@ REASON_TEXT = {
     RC_DOC_MISMATCH: "工作人员发现证件与考生不符，已拦截",
     RC_ID_CHECK_SKIPPED: "演示模式：已显式跳过身份证哈希比对（审计留痕）",
     RC_AUTO_PASS: "自动核验通过：人脸匹配即放行（免人工确认，已留痕）",
+    RC_CMD_EXEC: "命令控制台执行（仅所有者可用，命令与结果明细见 reason 字段）",
 }
 
 

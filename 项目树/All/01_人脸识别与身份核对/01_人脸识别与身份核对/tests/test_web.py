@@ -53,6 +53,13 @@ if HAS_FLASK:
     # 两个新的所有者开关同样重定向，并复位为出厂默认（大考模式关 / 严格模式开）
     accounts_mod.MAJOR_EXAM_FLAG = os.path.join(_TMP, "major_exam.on")
     accounts_mod.STRICT_MODE_FLAG = os.path.join(_TMP, "strict_mode.on")
+    # 命令控制台的两个标记同样重定向（默认关闭，但避免将来被误写进真实数据目录）
+    accounts_mod.CMD_CONSOLE_FLAG = os.path.join(_TMP, "cmd_console.on")
+    accounts_mod.CMD_CONSOLE_ADMIN_FLAG = os.path.join(_TMP, "cmd_console_admin.on")
+    # 审计链与操作日志也要重定向：本文件的用例会调用 /api/owner-settings，
+    # 它会同时写这两份日志（实测每个 run 往真实 data\ 里灌 3 条操作记录）。
+    config.AUDIT_LOG_PATH = os.path.join(_TMP, "web_audit.log")
+    config.ACTION_LOG_PATH = os.path.join(_TMP, "web_action.log")
     for _flag in (accounts_mod.MAJOR_EXAM_FLAG, accounts_mod.STRICT_MODE_FLAG):
         try:
             if os.path.exists(_flag):

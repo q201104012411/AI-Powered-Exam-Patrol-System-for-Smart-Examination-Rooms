@@ -35,6 +35,12 @@ from verifier import FaceVerifier
 # 所有者可切换：是否隐藏启动器的命令行窗口（由 .bat 读取该标记文件）
 HIDE_CMD_FLAG = os.path.join(str(config.DATA_ROOT), "hide_cmd.on")
 
+# 命令控制台的执行类型：下拉框显示中文，执行时再映射回 cmd / python / ollama
+CONSOLE_MODE_LABELS = {"cmd": "系统命令 (cmd)",
+                       "python": "Python 代码",
+                       "ollama": "AI 辅助 (ollama)"}
+CONSOLE_MODE_KEYS = dict((v, k) for k, v in CONSOLE_MODE_LABELS.items())
+
 # pythonw 隐藏窗口启动时 stdout/stderr 为 None，兜住避免 print 崩溃
 config.ensure_stdio("gui_console.log")
 
@@ -43,6 +49,9 @@ class FaceVerifyGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("智能考场 · 人脸识别与身份核对")
+        # 注意：这里设的尺寸会被登录页立刻覆盖（_build_login_ui 用 560x440），
+        # 真正的主界面尺寸在 _do_login 里设置（1180x900）。
+        # 要调窗口大小请改 _do_login，改这里没有任何效果。
         self.root.geometry("980x780")
 
         self.store = CandidateStore()
@@ -210,18 +219,35 @@ class FaceVerifyGUI:
         self.fps_label.grid(row=0, column=6, sticky="e", padx=(16, 4))
         live.columnconfigure(6, weight=1)
 
-        # 视频画面
-        self.video_label = tk.Label(live, text="视频未开启\n（点「开启实时视频」后此处显示实时画面与 FPS）",
-                                    background="#111", foreground="#aaa", width=80, height=14)
-        self.video_label.grid(row=1, column=0, columnspan=7, pady=8)
+        # 命令控制台开关按钮：位于实时视频区右上。
+        # 它只负责**显示 / 隐藏视频右侧的内置控制台**（不再弹独立窗口）。
+        # 仅在有权限且总开关开启时才出现——默认关闭，所以全新安装看不到任何入口。
+        # 显隐统一由 _sync_cmd_btn() 控制（所有者开关随时可变，这里不写死）。
+        self.cmd_nav_btn = ttk.Button(live, text="⌨ 命令控制台",
+                                      command=self._toggle_console_panel)
+        self.cmd_nav_btn.grid(row=0, column=7, padx=(10, 2))
+
+        # 视频画面 + 内置命令控制台：**并排**放在同一行（视频在左，cmd 在右）。
+        # 单独用一个容器才能让两者 side-by-side；控制台默认隐藏，点上面的按钮展开。
+        media = ttk.Frame(live)
+        media.grid(row=1, column=0, columnspan=8, sticky="ew", pady=8)
+
+        self.video_label = tk.Label(media, text="视频未开启\n（点「开启实时视频」后此处显示实时画面与 FPS）",
+                                    background="#111", foreground="#aaa", width=56, height=14)
+        self.video_label.pack(side="left", anchor="n")
+
+        self.console_panel = ttk.LabelFrame(media, text="命令控制台", padding=6)
+        self._build_console_panel(self.console_panel)   # 先把内容建好，但暂不 pack（默认隐藏）
+        self._sync_cmd_btn()
+
         self.video_status = ttk.Label(live, text="视频未开启", foreground="#666")
-        self.video_status.grid(row=2, column=0, columnspan=7, sticky="w")
+        self.video_status.grid(row=2, column=0, columnspan=8, sticky="w")
 
         # 操作按钮：并入视频块；只留常用项，其余收进「更多操作」
-        ttk.Separator(live, orient="horizontal").grid(row=3, column=0, columnspan=7,
+        ttk.Separator(live, orient="horizontal").grid(row=3, column=0, columnspan=8,
                                                       sticky="ew", pady=(10, 6))
         act = ttk.Frame(live)
-        act.grid(row=4, column=0, columnspan=7, sticky="w")
+        act.grid(row=4, column=0, columnspan=8, sticky="w")
         self.verify_btn = ttk.Button(act, text="开始核验", command=self._start_verify)
         self.verify_btn.pack(side="left", padx=4)
 
@@ -258,6 +284,10 @@ class FaceVerifyGUI:
         self.manual_btn.pack(side="left", padx=4)
         if not accounts.can_manual_add((self.user or {}).get("role")):
             self.manual_btn.config(state="disabled")
+
+        # 注：命令控制台入口已移到「现场视频」区右侧（见 _build_ui 中 cmd_nav_btn），
+        # 不再放在「更多操作」里，避免和次要操作混在一起、也不容易被误点。
+
         ttk.Button(self.more_frame, text="🔄 切换账号",
                    command=self._switch_account).pack(side="left", padx=(16, 4))
 
@@ -564,6 +594,35 @@ class FaceVerifyGUI:
                       text="默认开启：非设备实时抓拍（「选择图片」/上传照片）一律拒绝放行；\n"
                            "关闭后允许用本地图片核验，但审计记录会如实标注“严格模式已关闭、本次为非现场来源”。",
                       foreground="#888", justify="left").pack(anchor="w", pady=(2, 0))
+
+            # ---- 命令控制台（默认关闭）：所有者完整权限 / 管理员仅 ollama ----
+            self.cmd_console = tk.BooleanVar(value=accounts.cmd_console_enabled())
+            ttk.Checkbutton(owner_box, text="命令控制台（默认关闭）",
+                            variable=self.cmd_console,
+                            command=self._toggle_cmd_console).pack(anchor="w", pady=(10, 0))
+            ttk.Label(owner_box,
+                      text="默认关闭。开启后**所有者**可执行任意命令 / Python 代码；\n"
+                           "该能力等价于本机完全控制权，每次执行都写入审计哈希链"
+                           "（可事后追溯，但无法阻止执行）。",
+                      foreground="#b45309", justify="left").pack(anchor="w", pady=(2, 0))
+
+            self.cmd_console_admin = tk.BooleanVar(value=accounts.cmd_console_admin_allowed())
+            ttk.Checkbutton(owner_box, text="允许管理员使用「AI 辅助判断」（仅 ollama）",
+                            variable=self.cmd_console_admin,
+                            command=self._toggle_cmd_console_admin).pack(anchor="w", pady=(6, 0))
+            ttk.Label(owner_box,
+                      text="勾选后管理员也能用命令控制台，但**只能**执行 "
+                           "`ollama run <模型> [提示词]` 让本地大模型辅助判断；\n"
+                           "其它程序与其它 ollama 子命令一律被拒。执行不经过 shell，"
+                           "所以模型名之后的管道 / 重定向等符号\n"
+                           "只会成为提示词文本（无效），不会被执行。\n"
+                           "需先开启上面的「命令控制台」总开关；关掉总开关会一并停用。",
+                      foreground="#888", justify="left").pack(anchor="w", pady=(2, 0))
+
+            self.cmd_btn = ttk.Button(owner_box, text="⌨ 打开命令控制台",
+                                      command=self._show_cmd_console)
+            self.cmd_btn.pack(anchor="w", pady=(6, 0))
+            self._sync_cmd_btn()
 
         ttk.Label(win, text="核验审计记录（哈希链，含操作人 / 见证人 / 结果 / 原因码）",
                   font=("Microsoft YaHei", 10, "bold")).pack(anchor="w", padx=10, pady=(10, 2))
@@ -901,6 +960,474 @@ class FaceVerifyGUI:
         self._refresh_photo_button()
         self._append("[设置] %s" % msg)
         messagebox.showinfo("已设置", "%s\n\n（立即生效，无需重启）" % msg)
+
+    # ---------------- 命令控制台（仅所有者 + 默认关闭） ----------------
+    def _toggle_cmd_console(self):
+        """所有者开关：是否开启命令控制台（默认关闭）"""
+        on = self.cmd_console.get()
+        if on and not messagebox.askyesno(
+                "确认开启命令控制台",
+                "开启后，所有者可在本机 GUI 与网页端执行任意系统命令 / Python 代码。\n\n"
+                "这等价于把本机（或部署该网页的服务器）的完全控制权交出去：\n"
+                "能执行命令，就能读写考生生物特征库、改动程序、安装后门。\n\n"
+                "每次执行都会写入审计哈希链，可事后追溯，但**无法阻止执行**。\n\n"
+                "确定要开启吗？"):
+            self.cmd_console.set(False)
+            return
+        ok, msg = accounts.set_cmd_console(on)
+        if not ok:
+            messagebox.showerror("设置失败", msg)
+            self.cmd_console.set(accounts.cmd_console_enabled())   # 回滚勾选状态
+            return
+        self.action_log.log("命令控制台开关",
+                            "操作人=%s %s" % ((self.user or {}).get("username", "?"), msg))
+        self._sync_cmd_btn()
+        self._append("[设置] %s" % msg)
+        messagebox.showinfo("已设置", "%s\n\n（立即生效，无需重启）" % msg)
+
+    @staticmethod
+    def _widget_alive(w):
+        """
+        控件是否还活着。
+
+        所有者设置面板建在「操作记录」这个 Toplevel 里，窗口一关里面的控件就被销毁，
+        但 self.cmd_btn 仍持有那个已死控件的引用；此时再 config() 会抛
+        TclError: invalid command name —— 所以每次操作前必须先确认控件存在。
+        """
+        if w is None:
+            return False
+        try:
+            return bool(w.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def _toggle_cmd_console_admin(self):
+        """所有者开关：是否授权管理员使用 ollama AI 辅助（默认关闭）"""
+        on = self.cmd_console_admin.get()
+        if on and not messagebox.askyesno(
+                "确认授权管理员",
+                "授权后，「管理员」也能使用命令控制台，但只能执行：\n\n"
+                "    ollama run <模型> [提示词]\n\n"
+                "用于让本地大模型辅助判断。管理员**不能**执行其它任何命令——\n"
+                "白名单只匹配这一种形式，且执行不经过 shell，\n"
+                "管道 / 重定向 / 链式命令在语法层即被拒绝。\n\n"
+                "需要「命令控制台」总开关已开启；关掉总开关会一并停用。\n\n"
+                "确定要授权吗？"):
+            self.cmd_console_admin.set(False)
+            return
+        ok, msg = accounts.set_cmd_console_admin(on)
+        if not ok:
+            messagebox.showerror("设置失败", msg)
+            self.cmd_console_admin.set(accounts.cmd_console_admin_allowed())
+            return
+        self.action_log.log("管理员AI辅助授权",
+                            "操作人=%s %s" % ((self.user or {}).get("username", "?"), msg))
+        self._append("[设置] %s" % msg)
+        messagebox.showinfo("已设置", "%s\n\n（立即生效，无需重启）" % msg)
+
+    def _sync_cmd_btn(self):
+        """入口按钮可用性/可见性跟随开关状态（真正的权限判定仍在校验函数里）"""
+        # 所有者设置面板里的按钮（随「操作记录」窗口生灭）
+        btn = getattr(self, "cmd_btn", None)
+        if self._widget_alive(btn):
+            try:
+                btn.config(state=("normal" if accounts.cmd_console_enabled() else "disabled"))
+            except tk.TclError:
+                pass
+
+        # 实时视频区右上的开关按钮：按 grid 管理，用 grid_remove 保留布局参数
+        nav = getattr(self, "cmd_nav_btn", None)
+        allowed = accounts.can_cmd_console((self.user or {}).get("role"))
+        if self._widget_alive(nav):
+            try:
+                if allowed:
+                    nav.grid()
+                else:
+                    nav.grid_remove()
+            except tk.TclError:
+                pass
+
+        # 权限被收回（或总开关关闭）时，已展开的内置控制台也必须一起收起来，
+        # 否则会出现"按钮没了但面板还开着"的越权残留。
+        panel = getattr(self, "console_panel", None)
+        if not allowed and self._widget_alive(panel) and panel.winfo_manager():
+            try:
+                panel.pack_forget()
+            except tk.TclError:
+                pass
+
+        # 层级变了要重配类型选择框
+        self._sync_console_controls()
+
+    @staticmethod
+    def _console_hint_text(is_full):
+        """控制台提示语：所有者说清能干什么，管理员说清**只能**干什么"""
+        if is_full:
+            return "输入任意系统命令 / Python 代码（Ctrl+Enter 执行）"
+        return "仅可执行：ollama run <模型> [提示词]（管理员层级）"
+
+    def _sync_console_controls(self):
+        """
+        按当前层级重配内置控制台的标题 / 提示语 / 类型选择框。
+
+        为什么必须重配：面板是在 _build_ui 时一次性建好的，而总开关默认关闭，
+        所以那一刻层级通常是 none —— 标题、提示语、类型框都会按"管理员 ollama"来写。
+        所有者随后开启总开关时若不重配，就会：
+            · 类型框被锁死在 ollama（用不了完整权限）；
+            · 提示语仍写着"仅可执行 ollama run"（**真实反馈过的问题**，会误导所有者）。
+        这三处必须一起改，只改其中一处就会自相矛盾。
+        """
+        is_full = (accounts.cmd_console_tier((self.user or {}).get("role"))
+                   == accounts.CMD_TIER_FULL)
+
+        panel = getattr(self, "console_panel", None)
+        if self._widget_alive(panel):
+            try:
+                panel.config(text=("命令控制台 · 完整权限" if is_full
+                                   else "命令控制台 · AI 辅助（仅 ollama）"))
+            except tk.TclError:
+                pass
+
+        hint = getattr(self, "console_hint", None)
+        if self._widget_alive(hint):
+            try:
+                hint.config(text=self._console_hint_text(is_full))
+            except tk.TclError:
+                pass
+
+        box_w = getattr(self, "console_mode_box", None)
+        if not self._widget_alive(box_w):
+            return
+        try:
+            if is_full:
+                box_w.config(values=(CONSOLE_MODE_LABELS["cmd"],
+                                     CONSOLE_MODE_LABELS["python"]), state="readonly")
+                if self.console_mode.get() not in (CONSOLE_MODE_LABELS["cmd"],
+                                                   CONSOLE_MODE_LABELS["python"]):
+                    self.console_mode.set(CONSOLE_MODE_LABELS["cmd"])
+            else:
+                box_w.config(values=(CONSOLE_MODE_LABELS["ollama"],), state="disabled")
+                self.console_mode.set(CONSOLE_MODE_LABELS["ollama"])
+        except tk.TclError:
+            pass
+
+    def _show_cmd_console(self):
+        """
+        命令控制台窗口（所有者 = 完整权限；管理员 = 仅 ollama）。
+
+        注意：界面上的锁定只是体验，真正的判定是 accounts.cmd_console_tier()；
+        这里校验一次，执行时 cmd_console.execute(role=...) 还会再判一次。
+        网页端同理——两边都不依赖界面状态。
+        """
+        role = (self.user or {}).get("role")
+        tier = accounts.cmd_console_tier(role)
+        if tier == accounts.CMD_TIER_NONE:
+            messagebox.showerror("权限不足",
+                                 "命令控制台当前不可用。\n\n"
+                                 "· 所有者：请先勾选「命令控制台」总开关\n"
+                                 "· 管理员：需所有者开启总开关，并授权「AI 辅助判断」")
+            return
+        import cmd_console
+
+        is_full = (tier == accounts.CMD_TIER_FULL)
+        win = tk.Toplevel(self.root)
+        win.title(("命令控制台（所有者 · 完整权限）" if is_full
+                   else "AI 辅助判断（管理员 · 仅 ollama）")
+                  + "　｜　%s（%s）"
+                  % (self.user["username"], accounts.role_text(role)))
+        win.geometry("880x700")
+
+        if is_full:
+            warn = ("⚠ 这里的输入会以本机当前用户身份直接执行，等价于交出本机控制权。\n"
+                    "   每次执行都会写入审计哈希链（操作人 / 层级 / 命令 / 退出码 / 耗时）。\n"
+                    "   执行工作目录：%s" % config.BASE_DIR)
+            warn_fg = "#b45309"
+        else:
+            warn = ("ℹ 你是管理员：只能执行 `ollama run <模型> [提示词]`，"
+                    "让本地大模型辅助判断。\n"
+                    "   其它程序与其它 ollama 子命令一律无法执行；执行不经过 shell，\n"
+                    "   模型名之后的管道 / 重定向等符号只会成为提示词文本。\n"
+                    "   每次执行都会写入审计哈希链。执行工作目录：%s" % config.BASE_DIR)
+            warn_fg = "#075985"
+        ttk.Label(win, text=warn, foreground=warn_fg, justify="left",
+                  font=("Microsoft YaHei", 9)).pack(anchor="w", padx=10, pady=(10, 8))
+
+        top = ttk.Frame(win)
+        top.pack(fill="x", padx=10)
+        ttk.Label(top, text="类型：").pack(side="left")
+        if is_full:
+            mode_var = tk.StringVar(value="cmd")
+            ttk.Radiobutton(top, text="系统命令", value="cmd",
+                            variable=mode_var).pack(side="left")
+            ttk.Radiobutton(top, text="Python 代码", value="python",
+                            variable=mode_var).pack(side="left", padx=(6, 16))
+        else:
+            # 管理员锁定为 ollama：界面不给选择，执行时服务端还会强制一次
+            mode_var = tk.StringVar(value="ollama")
+            rb = ttk.Radiobutton(top, text="AI 辅助判断（ollama run）", value="ollama",
+                                 variable=mode_var)
+            rb.pack(side="left", padx=(6, 16))
+            rb.config(state="disabled")
+        ttk.Label(top, text="超时(秒)：").pack(side="left")
+        timeout_var = tk.StringVar(value=str(cmd_console.DEFAULT_TIMEOUT))
+        ttk.Spinbox(top, from_=1, to=cmd_console.MAX_TIMEOUT, width=6,
+                    textvariable=timeout_var).pack(side="left")
+
+        ttk.Label(win, text="命令 / 代码（Ctrl+Enter 执行）").pack(anchor="w", padx=10, pady=(10, 2))
+        code_box = scrolledtext.ScrolledText(win, height=8, font=("Consolas", 10))
+        code_box.pack(fill="both", expand=True, padx=10)
+
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", padx=10, pady=6)
+        run_btn = ttk.Button(bar, text="▶ 执行")
+        run_btn.pack(side="left")
+        ttk.Button(bar, text="关闭", command=win.destroy).pack(side="right")
+        meta = ttk.Label(bar, text="", foreground="#374151")
+        meta.pack(side="left", padx=12)
+
+        ttk.Label(win, text="输出").pack(anchor="w", padx=10, pady=(4, 2))
+        out_box = scrolledtext.ScrolledText(win, height=16, font=("Consolas", 9),
+                                            background="#0f172a", foreground="#e2e8f0")
+        out_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        out_box.insert("end", "（尚未执行）")
+        out_box.config(state="disabled")
+
+        def set_out(text):
+            out_box.config(state="normal")
+            out_box.delete("1.0", "end")
+            out_box.insert("end", text)
+            out_box.see("end")
+            out_box.config(state="disabled")
+
+        def do_run(event=None):
+            code = code_box.get("1.0", "end").rstrip("\n")
+            if not code.strip():
+                messagebox.showwarning("提示", "请输入要执行的命令或代码" if is_full
+                                       else "请输入 `ollama run <模型> [提示词]`")
+                return "break"
+            try:
+                to = int(timeout_var.get())
+            except (TypeError, ValueError):
+                to = cmd_console.DEFAULT_TIMEOUT
+            # 模式由层级决定，不信任界面控件：管理员恒为 ollama
+            mode = mode_var.get() if is_full else "ollama"
+
+            run_btn.config(state="disabled")
+            meta.config(text="执行中…")
+            set_out("（执行中，请稍候…）")
+
+            def worker():
+                # 放后台线程：命令最长可跑 600 秒，直接在 UI 线程执行会把界面卡死
+                try:
+                    res = cmd_console.execute(code, operator=self.user["username"],
+                                              role=role, mode=mode,
+                                              source="gui", timeout=to)
+                except Exception as e:                      # 兜底，绝不让线程静默死掉
+                    res = {"ok": False, "exit_code": None, "stdout": "",
+                           "stderr": "执行异常：%s" % e, "duration_ms": 0,
+                           "truncated": False, "timed_out": False}
+
+                def apply():
+                    # 窗口可能已被用户关掉，必须先判断再操作控件
+                    try:
+                        if not win.winfo_exists():
+                            return
+                    except tk.TclError:
+                        return
+                    if res.get("timed_out"):
+                        flag = "⏱ 超时已终止进程树"
+                    elif res.get("exit_code") == 0:
+                        flag = "✅ 成功"
+                    else:
+                        flag = "❌ 失败"
+                    meta.config(text="%s ｜ 退出码 %s ｜ 耗时 %sms%s"
+                                % (flag, res.get("exit_code"), res.get("duration_ms"),
+                                   " ｜ 输出已截断" if res.get("truncated") else ""))
+                    body = res.get("stdout") or ""
+                    if res.get("stderr"):
+                        body += "\n--- stderr ---\n" + res["stderr"]
+                    set_out(body or "（无输出）")
+                    run_btn.config(state="normal")
+
+                try:
+                    win.after(0, apply)          # 回到 UI 线程更新控件
+                except tk.TclError:
+                    pass
+
+            threading.Thread(target=worker, daemon=True).start()
+            return "break"
+
+        run_btn.config(command=do_run)
+        code_box.bind("<Control-Return>", do_run)
+        code_box.focus_set()
+
+    # ---------------- 内置命令控制台（与视频并排，不弹窗） ----------------
+    def _build_console_panel(self, box):
+        """
+        构建"视频右侧"的内置命令控制台（内容先建好；是否显示由 _toggle_console_panel 决定）。
+
+        层级判定全部走 accounts.cmd_console_tier()：所有者 full、管理员 ollama、其它 none。
+        界面只负责**显示**：真正拦得住的是 cmd_console.execute(role=...)，
+        所以这里把类型选择框禁用掉只是体验，绕过它也不会多拿到权限。
+        """
+        import cmd_console
+
+        role = (self.user or {}).get("role")
+        is_full = accounts.cmd_console_tier(role) == accounts.CMD_TIER_FULL
+
+        bar = ttk.Frame(box)
+        bar.pack(fill="x")
+        ttk.Label(bar, text="类型：").pack(side="left")
+        self.console_mode = tk.StringVar(
+            value=CONSOLE_MODE_LABELS["cmd" if is_full else "ollama"])
+        self.console_mode_box = ttk.Combobox(
+            bar, textvariable=self.console_mode, width=16,
+            values=((CONSOLE_MODE_LABELS["cmd"], CONSOLE_MODE_LABELS["python"]) if is_full
+                    else (CONSOLE_MODE_LABELS["ollama"],)),
+            state=("readonly" if is_full else "disabled"))
+        self.console_mode_box.pack(side="left")
+
+        ttk.Label(bar, text="超时").pack(side="left", padx=(6, 2))
+        self.console_timeout = tk.StringVar(value=str(cmd_console.DEFAULT_TIMEOUT))
+        ttk.Spinbox(bar, from_=1, to=cmd_console.MAX_TIMEOUT, width=5,
+                    textvariable=self.console_timeout).pack(side="left")
+
+        # 提示语必须**随层级变化**（见 _sync_console_controls）：
+        # 面板是登录时一次性建好的，若那一刻总开关还没开，这里会先写成 ollama 提示；
+        # 所有者随后开启时必须同步改写，否则他会以为自己也只能用 ollama（真实反馈过的问题）。
+        self.console_hint = ttk.Label(box, foreground="#888", wraplength=320, justify="left",
+                                      text=self._console_hint_text(is_full))
+        self.console_hint.pack(anchor="w", pady=(6, 3))
+
+        # width 给控制台一个**最小宽度**：panel 用 pack(expand) 吃剩余空间，
+        # 若内部控件不声明宽度，视频一宽就会把控制台挤成一条缝（实测只有 157px）。
+        self.console_input = scrolledtext.ScrolledText(box, height=3, width=34,
+                                                      font=("Consolas", 9))
+        self.console_input.pack(fill="x")
+        self.console_input.bind("<Control-Return>", self._console_hotkey)
+
+        runbar = ttk.Frame(box)
+        runbar.pack(fill="x", pady=(4, 2))
+        self.console_run_btn = ttk.Button(runbar, text="▶ 执行", command=self._console_run)
+        self.console_run_btn.pack(side="left")
+        # 输出很长时还可以弹出大窗口看（复用原有弹窗实现）
+        ttk.Button(runbar, text="↗ 弹出", width=7,
+                   command=self._show_cmd_console).pack(side="left", padx=4)
+        self.console_meta = ttk.Label(runbar, text="", foreground="#374151")
+        self.console_meta.pack(side="left", padx=6)
+
+        self.console_out = scrolledtext.ScrolledText(
+            box, height=11, width=34, font=("Consolas", 9), wrap="word",
+            background="#0f172a", foreground="#e2e8f0")
+        self.console_out.pack(fill="both", expand=True, pady=(2, 0))
+        self.console_out.insert("end", "（尚未执行）")
+        self.console_out.config(state="disabled")
+
+    def _console_hotkey(self, event=None):
+        self._console_run()
+        return "break"
+
+    def _toggle_console_panel(self):
+        """显示 / 隐藏视频右侧的内置控制台（不弹窗）"""
+        panel = getattr(self, "console_panel", None)
+        if not self._widget_alive(panel):
+            return
+        role = (self.user or {}).get("role")
+        if panel.winfo_manager():                 # 已显示 -> 收起
+            panel.pack_forget()
+            if self._widget_alive(getattr(self, "cmd_nav_btn", None)):
+                self.cmd_nav_btn.config(text="⌨ 命令控制台")
+            return
+        if not accounts.can_cmd_console(role):
+            messagebox.showerror(
+                "权限不足",
+                "命令控制台当前不可用。\n\n"
+                "· 所有者：请先在「更多操作 → 操作记录 → 所有者设置」勾选「命令控制台」\n"
+                "· 管理员：需所有者开启总开关，并授权「AI 辅助判断」")
+            return
+        panel.pack(side="left", fill="both", expand=True, padx=(10, 0), anchor="n")
+        if self._widget_alive(getattr(self, "cmd_nav_btn", None)):
+            self.cmd_nav_btn.config(text="⌨ 收起控制台")
+
+    def _console_set_out(self, text):
+        out = getattr(self, "console_out", None)
+        if not self._widget_alive(out):
+            return
+        out.config(state="normal")
+        out.delete("1.0", "end")
+        out.insert("end", text)
+        out.see("end")
+        out.config(state="disabled")
+
+    def _console_run(self):
+        """
+        在内置控制台里执行。执行放后台线程——命令最长可跑 600 秒，
+        直接在 UI 线程跑会把整个界面卡死（连视频都会停）。
+        """
+        import cmd_console
+
+        role = (self.user or {}).get("role")
+        tier = accounts.cmd_console_tier(role)
+        if tier == accounts.CMD_TIER_NONE:
+            messagebox.showerror("权限不足", "命令控制台当前不可用。")
+            return
+        code = self.console_input.get("1.0", "end").rstrip("\n")
+        if not code.strip():
+            messagebox.showwarning("提示", "请输入要执行的命令或代码" if tier == accounts.CMD_TIER_FULL
+                                   else "请输入 `ollama run <模型> [提示词]`")
+            return
+        try:
+            to = int(self.console_timeout.get())
+        except (TypeError, ValueError):
+            to = cmd_console.DEFAULT_TIMEOUT
+        # 下拉框显示的是中文标签，这里映射回 cmd / python；管理员恒为 ollama
+        # （模式由层级决定，不信任界面控件）
+        mode = (CONSOLE_MODE_KEYS.get(self.console_mode.get(), "cmd")
+                if tier == accounts.CMD_TIER_FULL else "ollama")
+
+        self.console_run_btn.config(state="disabled")
+        self.console_meta.config(text="执行中…")
+        self._console_set_out("（执行中，请稍候…）")
+        self.action_log.set_operator(self.user["username"])
+
+        def worker():
+            try:
+                res = cmd_console.execute(code, operator=self.user["username"],
+                                          role=role, mode=mode, source="gui", timeout=to)
+            except Exception as e:                  # 兜底，绝不让线程静默死掉
+                res = {"ok": False, "exit_code": None, "stdout": "",
+                       "stderr": "执行异常：%s" % e, "duration_ms": 0,
+                       "truncated": False, "timed_out": False}
+
+            def apply():
+                try:
+                    if not self.root.winfo_exists():
+                        return
+                except tk.TclError:
+                    return
+                if res.get("timed_out"):
+                    flag = "⏱ 超时已终止进程树"
+                elif res.get("exit_code") == 0:
+                    flag = "✅ 成功"
+                else:
+                    flag = "❌ 失败"
+                self.console_meta.config(
+                    text="%s ｜ 退出码 %s ｜ %sms%s"
+                         % (flag, res.get("exit_code"), res.get("duration_ms"),
+                            " ｜ 已截断" if res.get("truncated") else ""))
+                body = res.get("stdout") or ""
+                if res.get("stderr"):
+                    body += "\n--- stderr ---\n" + res["stderr"]
+                self._console_set_out(body or "（无输出）")
+                self.console_run_btn.config(state="normal")
+
+            # 主循环若已退出，after 会抛 RuntimeError（普通 TclError 捕获不到），一并兜住
+            try:
+                self.root.after(0, apply)
+            except (tk.TclError, RuntimeError):
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _build_index(self, only_selected=False):
         targets = self.candidates
@@ -1334,16 +1861,24 @@ class FaceVerifyGUI:
 
     # ---------------- 模型预热 ----------------
     def _warmup_model(self):
-        """后台预加载人脸模型，避免第一次核验时的长时间无响应"""
+        """
+        后台预加载人脸模型，避免第一次核验时的长时间无响应。
+
+        注意 after() 的传参方式：`after(0, self.status.config, "文本")` 会把文本当成
+        **位置参数**，tkinter 继而把它解释成选项名，于是抛
+        `TclError: unknown option "-文本"`，状态栏永远停在"初始化中…"。
+        必须传 kwargs 字典（与本文件其它几处 after 保持一致）。
+        """
         def work():
             try:
                 import face_engine
-                self.root.after(0, self.status.config, "正在预加载人脸模型…")
+                self.root.after(0, self.status.config, {"text": "正在预加载人脸模型…"})
                 face_engine.get_app()                # 加载检测+识别模型（一次性，之后复用）
-                self.root.after(0, self.status.config, "人脸模型已就绪，可开始核验")
+                self.root.after(0, self.status.config, {"text": "人脸模型已就绪，可开始核验"})
                 self.action_log.log("模型预热", "完成")
             except Exception as e:
-                self.root.after(0, self.status.config, "模型预热失败：%s" % str(e)[:60])
+                self.root.after(0, self.status.config,
+                                {"text": "模型预热失败：%s" % str(e)[:60]})
                 self.action_log.log("模型预热失败", str(e)[:120])
         threading.Thread(target=work, daemon=True).start()
 

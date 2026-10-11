@@ -345,6 +345,96 @@ def set_strict_mode(on):
                   else "已关闭严格模式：允许用本地图片核验，审计将如实标注非现场来源")
 
 
+# ---------------- 命令控制台（所有者开关，默认**关闭**） ----------------
+# 语义（正向，与 manual_add.on / major_exam.on 一致）：标记文件存在 = 已开启。
+#   · 默认关闭：标记文件不存在，GUI 与网页端都不出现任何命令执行入口；
+#   · 开启后分两级（见 cmd_console_tier）：
+#       所有者           -> full    完整 cmd / python
+#       管理员（被授权）  -> ollama  仅 `ollama run <模型>`，用于 AI 辅助判断
+#       其他角色         -> none
+#   · 每次执行都会写入审计哈希链（事后删改会被 verify_chain 检出）。
+#
+# 为什么管理员只能拿到 ollama 这一级：
+# 完整命令执行等价于整机控制权（可读写考生生物特征库、改代码、装后门），因此不下放；
+# 而 `ollama run` 是本地大模型的单向问答，借它做"辅助判断"不触碰系统状态，
+# 属于可以下放的低风险能力。两级之间的边界由 cmd_console.parse_ollama_command() 保证：
+#   · 其它程序、其它 ollama 子命令、以 - 开头的模型名 —— 无法表达成这一形式，直接拒绝；
+#   · 模型名之后的管道 / 重定向 / 链接符号 —— 会整体成为提示词文本，因为执行不经过
+#     shell，它们没有可被解释的路径（是"无效"，不是"被拒绝"，别把这两者混为一谈）。
+CMD_CONSOLE_FLAG = os.path.join(str(config.DATA_ROOT), "cmd_console.on")
+# 所有者授权：允许管理员使用「ollama AI 辅助判断」（默认关闭，且以总开关开启为前提）
+CMD_CONSOLE_ADMIN_FLAG = os.path.join(str(config.DATA_ROOT), "cmd_console_admin.on")
+
+CMD_TIER_NONE = "none"
+CMD_TIER_OLLAMA = "ollama"
+CMD_TIER_FULL = "full"
+
+
+def cmd_console_enabled():
+    """命令控制台总开关是否已由所有者开启（默认关闭：标记文件不存在即关闭）"""
+    return os.path.exists(CMD_CONSOLE_FLAG)
+
+
+def set_cmd_console(on):
+    """所有者设置：是否开启命令控制台总开关。返回 (ok, msg)"""
+    try:
+        os.makedirs(os.path.dirname(CMD_CONSOLE_FLAG), exist_ok=True)
+        if on:
+            with open(CMD_CONSOLE_FLAG, "w", encoding="utf-8") as f:
+                f.write("1\n")
+        elif os.path.exists(CMD_CONSOLE_FLAG):
+            os.remove(CMD_CONSOLE_FLAG)
+    except OSError as e:
+        return False, str(e)
+    return True, ("已开启命令控制台：所有者可用完整 cmd，每次执行均写入审计哈希链" if on
+                  else "已关闭命令控制台：执行入口均已停用（含管理员的 AI 辅助）")
+
+
+def cmd_console_admin_allowed():
+    """所有者是否已授权管理员使用 ollama AI 辅助（默认关闭）"""
+    return os.path.exists(CMD_CONSOLE_ADMIN_FLAG)
+
+
+def set_cmd_console_admin(allow):
+    """所有者设置：是否授权管理员使用 ollama AI 辅助判断。返回 (ok, msg)"""
+    try:
+        os.makedirs(os.path.dirname(CMD_CONSOLE_ADMIN_FLAG), exist_ok=True)
+        if allow:
+            with open(CMD_CONSOLE_ADMIN_FLAG, "w", encoding="utf-8") as f:
+                f.write("1\n")
+        elif os.path.exists(CMD_CONSOLE_ADMIN_FLAG):
+            os.remove(CMD_CONSOLE_ADMIN_FLAG)
+    except OSError as e:
+        return False, str(e)
+    return True, ("已授权管理员使用 AI 辅助判断（仅限 `ollama run <模型>`，不能执行其它命令）"
+                  if allow else "已收回管理员的 AI 辅助判断权限")
+
+
+def cmd_console_tier(role):
+    """
+    当前角色的命令控制台层级 —— **唯一的权限判定入口**，GUI 与网页端都调这里。
+
+        总开关关闭           -> none   （任何人都不行）
+        所有者               -> full   完整 cmd / python
+        管理员（且被授权）    -> ollama 仅 `ollama run <模型>`
+        其他角色             -> none
+
+    管理员层级以**总开关开启**为前提：关掉总开关等于全部停用。
+    """
+    if not cmd_console_enabled():
+        return CMD_TIER_NONE
+    if role == ROLE_OWNER:
+        return CMD_TIER_FULL
+    if role == ROLE_ADMIN and cmd_console_admin_allowed():
+        return CMD_TIER_OLLAMA
+    return CMD_TIER_NONE
+
+
+def can_cmd_console(role):
+    """该角色是否有命令控制台的任何权限（任一层级即为 True）"""
+    return cmd_console_tier(role) != CMD_TIER_NONE
+
+
 # ---------------- 身份要素模式文案（GUI 与网页端共用，避免各处文案不一致） ----------------
 _CN_NUM = {1: "一", 2: "二", 3: "三", 4: "四", 5: "五"}
 
