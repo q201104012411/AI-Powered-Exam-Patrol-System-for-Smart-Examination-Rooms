@@ -658,6 +658,11 @@ class TerminalApp(object):
                                        foreground="#1f56b8")
         self.ai_mode_label.pack(side="left", padx=(12, 0))
 
+        self.ai_watch_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(top, text="AI 自动分析（无对话时自动分析状态）",
+                        variable=self.ai_watch_var).pack(side="left", padx=(12, 0))
+        ttk.Button(top, text="清空记录", command=self._ai_clear).pack(side="right")
+
         self.ai_out = tk.Text(frame, height=6, wrap="word", font=MONO,
                               background="#0f172a", foreground="#e2e8f0")
         self.ai_out.pack(fill="x", pady=(4, 0))
@@ -675,6 +680,118 @@ class TerminalApp(object):
         self.ai_input.bind("<Return>", lambda e: (self._ai_send(), "break")[1])
         self.ai_send_btn = ttk.Button(bar, text="发送", command=self._ai_send)
         self.ai_send_btn.pack(side="left", padx=(6, 0))
+
+        # 启动 AI 自动分析守护（无对话且状态变化时触发）
+        self._ai_last_snapshot = ""
+        self.root.after(5000, self._ai_watch_tick)
+
+    def _ai_watch_tick(self):
+        """AI 巡视调度：无对话且开启自动分析时，定期请 AI 分析当前状态"""
+        try:
+            if not self.root.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        try:
+            self._ai_watch_maybe()
+        except Exception:
+            pass
+        try:
+            self.root.after(30000, self._ai_watch_tick)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def _ai_watch_maybe(self):
+        if not self.ai_watch_var.get() or self.ai_busy:
+            return
+        if not console.can_ai_chat(self.session.role):
+            return
+        snapshot = self._ai_snapshot()
+        if snapshot == self._ai_last_snapshot:
+            return
+        self._ai_last_snapshot = snapshot
+        import ai_assistant
+        model = self.ai_model_var.get().strip() or ai_assistant.DEFAULT_MODEL
+        if self.ai_chat.model != model:
+            self.ai_chat = ai_assistant.AIChat(model=model)
+        self.ai_busy = True
+        self.ai_send_btn.config(state="disabled")
+        self._ai_append_out("🔎 AI 自动分析：状态有变化，正在分析…", tag="ai_dim")
+
+        def work():
+            try:
+                ok, reply, transport = ai_assistant.analyze_activity(
+                    snapshot, model=model, operator=self.session.username,
+                    tier=("full" if self.session.role == config.ROLE_OWNER else "ai"),
+                    source="terminal_watch", timeout=60)
+            except Exception as e:
+                ok, reply = False, "AI 自动分析异常：%s" % e
+
+            def apply():
+                self.ai_busy = False
+                self.ai_send_btn.config(state="normal")
+                self._ai_remove_thinking()
+                if ok:
+                    self._ai_append_out("🔎 AI 自动分析：\n%s" % reply, tag="ai_bot")
+                else:
+                    self._ai_append_out("⚠ AI 自动分析失败：%s" % reply, tag="ai_err")
+            try:
+                self.root.after(0, apply)
+            except (tk.TclError, RuntimeError):
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ai_snapshot(self):
+        """终端当前状态快照（供 AI 自动分析使用）"""
+        lines = ["时间：%s" % time.strftime("%Y-%m-%d %H:%M:%S")]
+        lines.append("操作员：%s（%s）" % (self.session.username,
+                                          config.ROLE_TEXT.get(self.session.role, self.session.role)))
+        try:
+            st = self.outbox.status()
+            lines.append("平台在线：%s　待补传：%d" % ("是" if st.get("online") else "否",
+                                                      st.get("pending", 0)))
+        except Exception:
+            pass
+        try:
+            alerts = self.store.list_alerts(limit=1000)
+            red = sum(1 for a in alerts if a.level == config.LEVEL_RED)
+            orange = sum(1 for a in alerts if a.level == config.LEVEL_ORANGE)
+            pending = sum(1 for a in alerts if a.status == models.ST_PENDING)
+            acked = sum(1 for a in alerts if a.status == models.ST_ACKED)
+            reviewed = sum(1 for a in alerts if a.status == models.ST_REVIEWED)
+            lines.append("告警统计：红 %d　橙 %d　待处置 %d　已确认 %d　已复核 %d" %
+                         (red, orange, pending, acked, reviewed))
+        except Exception:
+            pass
+        try:
+            revs = self.store.list_reviews(limit=20)
+            if revs:
+                lines.append("最近复核：%d 条" % len(revs))
+        except Exception:
+            pass
+        try:
+            logs = self.store.audit_rows(limit=5)
+            if logs:
+                lines.append("最近操作：")
+                for r in logs:
+                    lines.append("  %s %s" % (r.get("action"), r.get("operator") or "-"))
+        except Exception:
+            pass
+        return "\n".join(lines)
+
+    def _ai_clear(self):
+        """清空 AI 对话记录与历史"""
+        try:
+            self.ai_out.config(state="normal")
+            self.ai_out.delete("1.0", "end")
+            self.ai_out.insert("end", "🤖 记录已清空\n")
+            self.ai_out.see("end")
+            self.ai_out.config(state="disabled")
+        except tk.TclError:
+            pass
+        import ai_assistant
+        self.ai_chat = ai_assistant.AIChat(model=self.ai_model_var.get().strip()
+                                           or ai_assistant.DEFAULT_MODEL)
 
     def _ai_refresh_models(self):
         import ai_assistant
