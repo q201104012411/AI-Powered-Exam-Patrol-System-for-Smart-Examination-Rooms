@@ -81,7 +81,7 @@ class TerminalApp(object):
         self.login_msg = ttk.Label(box, text="", foreground="#c00")
         self.login_msg.pack(pady=(8, 0))
         ttk.Label(box, text="预置账户（口令请向系统所有者索取）\n"
-                            "Owner（所有者·最高权限）\n"
+                            "owner（所有者·最高权限）\n"
                             "admin（管理员·日常全权）\n"
                             "patrol1（巡考员·全部考场）\n"
                             "inv01（监考员·仅 A-01）\n"
@@ -665,7 +665,7 @@ class TerminalApp(object):
         self.ai_out.tag_config("ai_bot", foreground="#34d399")
         self.ai_out.tag_config("ai_err", foreground="#fca5a5")
         self.ai_out.tag_config("ai_dim", foreground="#64748b")
-        self.ai_out.insert("end", "🤖 你好，我是智能终端 AI 助手。输入 EDY_POWERQ 可切换自由对话模式。\n")
+        self.ai_out.insert("end", "🤖 AI 助手就绪\n")
         self.ai_out.config(state="disabled")
 
         bar = ttk.Frame(frame)

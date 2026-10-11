@@ -12,7 +12,7 @@ if not defined PY (
     exit /b 1
 )
 
-REM ---- 是否隐藏命令行窗口（所有者可在界面里开关：data\hide_cmd.on）----
+REM ---- 默认隐藏命令行窗口；如需显示，由所有者在界面里取消勾选，或删除 data\hide_cmd.on ----
 for %%d in ("%PY%") do set "PYDIR=%%~dpd"
 set "PYW=%PYDIR%pythonw.exe"
 if not exist "%PYW%" set "PYW=%PY%"
@@ -25,10 +25,10 @@ if exist "%H%data\hide_cmd.on" (
 
 echo ============================================
 echo   智能终端操作端
-echo   账户：Owner（所有者·最高权限） admin（管理员）
+echo   账户：owner（所有者·最高权限） admin（管理员）
 echo         patrol1（巡考员） inv01（监考员·仅A-01） check1（核验员）
 echo   口令请向系统所有者索取
-echo   提示：以 Owner 登录后可在「运行状态与管控」里隐藏此窗口
+echo   提示：以 owner 登录后可在「运行状态与管控」里隐藏此窗口
 echo ============================================
 "%PY%" "%H%terminal_gui.py"
 set "RC=%ERRORLEVEL%"

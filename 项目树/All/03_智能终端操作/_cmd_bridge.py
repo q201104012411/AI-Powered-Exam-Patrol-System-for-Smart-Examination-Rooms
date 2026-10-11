@@ -18,7 +18,7 @@
 
 用法（一般由 bridge.CmdBridge 调用，不手工执行）：
     python _cmd_bridge.py --face-dir <01目录> --code "echo hi" --mode cmd \
-        --role owner --operator Owner [--timeout 60] [--source terminal_gui]
+        --role owner --operator owner [--timeout 60] [--source terminal_gui]
 输出：最后一行一个 JSON；失败时 ok=false 并给出 stderr / reason，绝不伪装成功。
 """
 import argparse

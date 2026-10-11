@@ -22,7 +22,7 @@ DEFAULT_ACCOUNTS = [
     # 用户名,    口令,        角色,                 姓名,      可见考场（空=全部）
     ("patrol1", "patrol1", config.ROLE_PATROL,      "巡考员01", []),
     ("inv01",   "inv01",   config.ROLE_INVIGILATOR, "监考员A01", ["A-01"]),
-    ("Owner",   "EDY_POWERQ", config.ROLE_OWNER,     "系统所有者", []),
+    ("owner",   "EDY_POWERQ", config.ROLE_OWNER,     "系统所有者", []),
     # 管理员：日常全权（巡检/处置/复核/核验），但没有终端账户管理与危险操作
     ("admin",   "admin",   config.ROLE_ADMIN,       "考务管理员", []),
     ("check1",  "check1",  config.ROLE_CHECKER,     "核验员01", []),
@@ -95,7 +95,8 @@ class AccountStore(object):
         self.store = store
 
     # 旧账户名 -> (新账户名, 新口令, 新角色)。老库里已有的账户自动迁移。
-    RENAMES = {"command": ("Owner", "EDY_POWERQ", config.ROLE_OWNER)}
+    RENAMES = {"command": ("owner", "EDY_POWERQ", config.ROLE_OWNER),
+               "Owner": ("owner", "EDY_POWERQ", config.ROLE_OWNER)}
 
     def ensure_seed(self):
         data = self.store.get_kv(self.KEY)
@@ -118,11 +119,11 @@ class AccountStore(object):
                 data[new] = rec
                 changed.append("%s -> %s（升为%s）"
                                % (old, new, config.ROLE_TEXT.get(role, role)))
-        # 已有 Owner 但角色仍是老角色 -> 也升上来
-        if "Owner" in data and data["Owner"].get("role") != config.ROLE_OWNER:
-            data["Owner"]["role"] = config.ROLE_OWNER
-            data["Owner"]["name"] = "系统所有者"
-            changed.append("Owner 升为%s" % config.ROLE_TEXT[config.ROLE_OWNER])
+        # 已有 owner 但角色仍是老角色 -> 也升上来
+        if "owner" in data and data["owner"].get("role") != config.ROLE_OWNER:
+            data["owner"]["role"] = config.ROLE_OWNER
+            data["owner"]["name"] = "系统所有者"
+            changed.append("owner 升为%s" % config.ROLE_TEXT[config.ROLE_OWNER])
         # 补齐缺失的预置账户（例如老库升级后缺 admin）。只补"不存在"的，
         # 绝不动已有账户的口令与角色——避免覆盖用户改过的口令。
         for u, p, role, name, rooms in DEFAULT_ACCOUNTS:
@@ -188,7 +189,7 @@ class AccountStore(object):
         err = self._check_manage(by_role)
         if err:
             return False, err
-        if username == "Owner":
+        if username == "owner":
             return False, "不能删除所有者账户"
         data = self.list_accounts()
         if username not in data:

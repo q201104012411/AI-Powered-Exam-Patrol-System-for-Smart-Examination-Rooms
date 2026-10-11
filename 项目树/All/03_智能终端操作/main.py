@@ -66,7 +66,7 @@ def main(argv=None):
     print("\n[1/9] 终端登录与权限最小化")
     inv = accounts.authenticate("inv01", "inv01")
     patrol = accounts.authenticate("patrol1", "patrol1")
-    cmd = accounts.authenticate("Owner", "EDY_POWERQ")
+    cmd = accounts.authenticate("owner", "EDY_POWERQ")
     check("监考员登录", inv is not None and inv.role == config.ROLE_INVIGILATOR)
     check("巡考员登录", patrol is not None and patrol.role == config.ROLE_PATROL)
     check("监考员不能复核（避免自己判自己）", not inv.can("review"))
@@ -86,30 +86,30 @@ def main(argv=None):
                               by_role=adm.role)[0])
     check("管理员改他人口令被拒",
           not accounts.reset_password("check1", "x", by_role=adm.role)[0])
-    # Owner 已提升为最高权限账户
-    check("Owner 是最高权限角色",
+    # owner 已提升为最高权限账户
+    check("owner 是最高权限角色",
           cmd is not None and cmd.role == config.ROLE_OWNER
           and config.ROLE_LEVEL[cmd.role] == max(config.ROLE_LEVEL.values()),
           "%s（等级 %s）" % (config.ROLE_TEXT.get(cmd.role, "-"), config.ROLE_LEVEL.get(cmd.role)))
-    check("Owner 可以复核", cmd.can("review"))
-    check("Owner 可以管理终端账户", cmd.can("manage"))
-    check("Owner 可见全部考场", cmd.room_filter() is None)
+    check("owner 可以复核", cmd.can("review"))
+    check("owner 可以管理终端账户", cmd.can("manage"))
+    check("owner 可见全部考场", cmd.room_filter() is None)
     check("巡考员不能管理终端账户", not patrol.can("manage"))
     check("监考员不能管理终端账户", not inv.can("manage"))
     ok_acct, _m = accounts.create("tmp_acct", "Passw0rd!", config.ROLE_CHECKER, "临时核验员",
                                   by_role=cmd.role)
-    check("Owner 可新建终端账户", ok_acct, _m)
-    check("Owner 不能新建同级账户",
+    check("owner 可新建终端账户", ok_acct, _m)
+    check("owner 不能新建同级账户",
           not accounts.create("tmp_o", "Passw0rd!", config.ROLE_OWNER,
                               by_role=cmd.role)[0])
     check("非所有者新建账户被拒",
           not accounts.create("tmp_x", "Passw0rd!", config.ROLE_CHECKER,
                               by_role=patrol.role)[0])
-    check("Owner 可重置他人口令",
+    check("owner 可重置他人口令",
           accounts.reset_password("tmp_acct", "New1234", by_role=cmd.role)[0])
-    check("Owner 可删除终端账户", accounts.delete("tmp_acct", by_role=cmd.role)[0])
-    check("Owner 账户不可删除",
-          not accounts.delete("Owner", by_role=cmd.role)[0])
+    check("owner 可删除终端账户", accounts.delete("tmp_acct", by_role=cmd.role)[0])
+    check("owner 账户不可删除",
+          not accounts.delete("owner", by_role=cmd.role)[0])
     check("监考员可见范围仅 A-01", inv.room_filter() == ["A-01"],
           str(inv.room_filter()))
     check("巡考员可见全部考场", patrol.room_filter() is None)

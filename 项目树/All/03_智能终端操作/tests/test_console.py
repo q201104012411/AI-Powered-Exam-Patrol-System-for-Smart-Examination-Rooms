@@ -244,7 +244,7 @@ class TestConsoleAudit(ConsoleBase):
     def test_refused_attempt_is_logged(self):
         """被拒绝的尝试也要留痕：那是有人在试探，比成功执行更值得看"""
         store, cb = self._bridge_with_store()
-        r = cb.execute("echo NOPE", mode="cmd", role=config.ROLE_OWNER, operator="Owner")
+        r = cb.execute("echo NOPE", mode="cmd", role=config.ROLE_OWNER, operator="owner")
         self.assertFalse(r["ok"])
         self.assertIn("命令控制台", self._actions(store))
 
@@ -260,7 +260,7 @@ class TestConsoleAudit(ConsoleBase):
 
     def test_audit_chain_still_valid_after_logging(self):
         store, cb = self._bridge_with_store()
-        cb.execute("echo A", role=config.ROLE_OWNER, operator="Owner")
+        cb.execute("echo A", role=config.ROLE_OWNER, operator="owner")
         cb.execute("echo B", role=config.ROLE_PATROL, operator="patrol1")
         ok, msg, n = store.verify_chain()
         self.assertTrue(ok, msg)
@@ -286,7 +286,7 @@ class TestCmdBridge(ConsoleBase):
     def test_owner_runs_harmless_command_and_gets_tier_full(self):
         console.set_console(True)
         r = self.bridge.execute("echo CMD_BRIDGE_OK", mode="cmd",
-                                role=config.ROLE_OWNER, operator="Owner", timeout=60)
+                                role=config.ROLE_OWNER, operator="owner", timeout=60)
         self.assertTrue(r["ok"], r.get("reason") or r.get("stderr"))
         self.assertEqual(r["tier"], "full")
         self.assertEqual(r["exit_code"], 0)
@@ -343,14 +343,14 @@ class TestCmdBridge(ConsoleBase):
 
     def test_empty_command_is_not_executed(self):
         console.set_console(True)
-        r = self.bridge.execute("   ", mode="cmd", role=config.ROLE_OWNER, operator="Owner")
+        r = self.bridge.execute("   ", mode="cmd", role=config.ROLE_OWNER, operator="owner")
         self.assertFalse(r["ok"])
         self.assertIsNone(r["exit_code"])
 
     def test_owner_python_mode_runs_code(self):
         console.set_console(True)
         r = self.bridge.execute("print('PY_OK_%d' % (1 + 1))", mode="python",
-                                role=config.ROLE_OWNER, operator="Owner", timeout=60)
+                                role=config.ROLE_OWNER, operator="owner", timeout=60)
         self.assertTrue(r["ok"], r.get("reason") or r.get("stderr"))
         self.assertEqual(r["tier"], "full")
         self.assertIn("PY_OK_2", r["stdout"])
@@ -379,7 +379,7 @@ class TestCmdBridge(ConsoleBase):
         console.set_console(True)
         before = snapshot()
         self.bridge.execute("echo TOUCH_CHECK", mode="cmd", role=config.ROLE_OWNER,
-                            operator="Owner")
+                            operator="owner")
         self.assertEqual(snapshot(), before, "01 目录被写入了新文件或被改动")
 
 

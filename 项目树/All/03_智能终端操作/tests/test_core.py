@@ -50,7 +50,7 @@ class Base(unittest.TestCase):
         self.rev = review_mod.Reviewer(self.store, hub=self.hub)
         self.patrol = self.accounts.authenticate("patrol1", "patrol1")
         self.inv = self.accounts.authenticate("inv01", "inv01")
-        self.cmd = self.accounts.authenticate("Owner", "EDY_POWERQ")
+        self.cmd = self.accounts.authenticate("owner", "EDY_POWERQ")
         self.checker = self.accounts.authenticate("check1", "check1")
 
 
@@ -112,7 +112,7 @@ class TestAccess(Base):
         self.assertIsNone(self.accounts.authenticate("nobody", "x"))
 
     def test_owner_is_highest_privilege(self):
-        """Owner = 最高权限：可复核 + 可管终端账户 + 全部考场"""
+        """owner = 最高权限：可复核 + 可管终端账户 + 全部考场"""
         self.assertEqual(self.cmd.role, config.ROLE_OWNER)
         self.assertEqual(config.ROLE_LEVEL[self.cmd.role],
                          max(config.ROLE_LEVEL.values()))
@@ -140,12 +140,12 @@ class TestAccess(Base):
     def test_owner_cannot_create_peer_or_delete_self(self):
         self.assertFalse(self.accounts.create("u_owner2", "Passw0rd!", config.ROLE_OWNER,
                                               by_role=self.cmd.role)[0])
-        self.assertFalse(self.accounts.delete("Owner", by_role=self.cmd.role)[0])
-        self.assertFalse(self.accounts.reset_password("Owner", "x",
+        self.assertFalse(self.accounts.delete("owner", by_role=self.cmd.role)[0])
+        self.assertFalse(self.accounts.reset_password("owner", "x",
                                                       by_role=self.cmd.role)[0])
 
     def test_legacy_command_account_migrates_to_owner(self):
-        """老库里的 command 账户应自动迁移成 Owner 并升为所有者角色"""
+        """老库里的 command 账户应自动迁移成 owner 并升为所有者角色"""
         s2 = storage.Store(db_path=os.path.join(_TMP, "legacy_%s.db" % uuid.uuid4().hex[:6]))
         s2.set_kv("accounts", {"command": {"pwd": access.hash_pwd("command"),
                                            "role": config.ROLE_COMMANDER,
@@ -153,10 +153,10 @@ class TestAccess(Base):
         acc2 = access.AccountStore(s2)
         acc2.ensure_seed()
         names = acc2.list_accounts()
-        self.assertIn("Owner", names)
+        self.assertIn("owner", names)
         self.assertNotIn("command", names)
-        self.assertEqual(names["Owner"]["role"], config.ROLE_OWNER)
-        self.assertIsNotNone(acc2.authenticate("Owner", "EDY_POWERQ"))
+        self.assertEqual(names["owner"]["role"], config.ROLE_OWNER)
+        self.assertIsNotNone(acc2.authenticate("owner", "EDY_POWERQ"))
         self.assertIsNone(acc2.authenticate("command", "command"))
 
     def test_admin_role_daily_full_but_no_manage(self):
@@ -180,7 +180,7 @@ class TestAccess(Base):
     def test_missing_seed_accounts_are_backfilled(self):
         """老库升级：缺失的预置账户（如 admin）会被补齐，且不动已有口令"""
         s2 = storage.Store(db_path=os.path.join(_TMP, "old_%s.db" % uuid.uuid4().hex[:6]))
-        s2.set_kv("accounts", {"Owner": {"pwd": access.hash_pwd("MyOwnPwd!"),
+        s2.set_kv("accounts", {"owner": {"pwd": access.hash_pwd("MyOwnPwd!"),
                                          "role": config.ROLE_OWNER,
                                          "name": "系统所有者", "rooms": []}})
         acc2 = access.AccountStore(s2)
@@ -189,7 +189,7 @@ class TestAccess(Base):
         self.assertIn("admin", names)                       # 补齐
         self.assertIsNotNone(acc2.authenticate("admin", "admin"))
         # 已有账户的口令不能被覆盖
-        self.assertIsNotNone(acc2.authenticate("Owner", "MyOwnPwd!"))
+        self.assertIsNotNone(acc2.authenticate("owner", "MyOwnPwd!"))
 
     def test_role_matrix(self):
         self.assertTrue(self.patrol.can("review"))
