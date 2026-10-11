@@ -44,16 +44,25 @@ class PersonDetector(object):
         self.hog = cv2.HOGDescriptor()
         self.hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
 
-    def detect(self, frame, win_stride=(8, 8), padding=(16, 16), scale=1.05):
-        """返回检测框列表 [(x, y, w, h), ...]"""
+    def detect(self, frame, win_stride=(8, 8), padding=(16, 16), scale=1.05,
+               margin_ratio=0.12):
+        """返回检测框列表 [(x, y, w, h), ...]，默认外扩 12% 以框住整个人"""
         # 缩小分辨率以提升速度
         small = cv2.resize(frame, None, fx=0.5, fy=0.5)
         rects, _ = self.hog.detectMultiScale(small, winStride=win_stride,
                                              padding=padding, scale=scale)
-        # 映射回原图坐标
+        fh, fw = frame.shape[:2]
         out = []
         for (x, y, w, h) in rects:
-            out.append((x * 2, y * 2, w * 2, h * 2))
+            # 映射回原图坐标并外扩
+            x, y, w, h = x * 2, y * 2, w * 2, h * 2
+            mw = int(w * margin_ratio)
+            mh = int(h * margin_ratio)
+            x = max(0, x - mw)
+            y = max(0, y - mh)
+            w = min(fw - x, w + mw * 2)
+            h = min(fh - y, h + mh * 2)
+            out.append((x, y, w, h))
         return out
 
     @staticmethod
@@ -104,15 +113,20 @@ class PersonDetector(object):
         return "正常姿态"
 
     def draw(self, frame, boundary_ratio=0.5):
-        """在帧上绘制检测框和越界线，返回（标记后的帧，越界数量）"""
+        """在帧上绘制检测框和越界线，返回（标记后的帧，越界数量，行为列表）"""
         fh, fw = frame.shape[:2]
         rects = self.detect(frame)
         violation = 0
+        behaviors = []
         for r in rects:
             bad = self.is_out_of_bounds(frame, r, boundary_ratio=boundary_ratio)
             color = (0, 0, 255) if bad else (0, 255, 0)
+            action = self.action_of(frame, r, boundary_ratio=boundary_ratio)
             if bad:
                 violation += 1
+                behaviors.append("越界")
+            elif action in ("起立/站立", "前倾/趴桌", "靠左", "靠右"):
+                behaviors.append(action)
             x, y, w, h = r
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
         line_y = int(fh * boundary_ratio)
@@ -135,4 +149,4 @@ class PersonDetector(object):
         # 越界线标签
         draw.text((10, line_y - 26), "越界线", font=font, fill=(255, 165, 0))
         frame = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-        return frame, violation
+        return frame, violation, behaviors

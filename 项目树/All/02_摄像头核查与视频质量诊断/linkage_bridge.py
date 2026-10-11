@@ -54,3 +54,35 @@ def report_check(device, check_result, operator="02_patrol"):
             traceback.print_exc()
 
     threading.Thread(target=_push, daemon=True).start()
+
+
+def report_behavior(device_code, behavior, consecutive_frames,
+                    room_id="", seat_no="", operator="02_ai_monitor"):
+    """
+    把 02 实时监控 AI 识别到的多次异常行为上报到 03 智能终端。
+    由智能终端做分级展示、强制确认、复核留痕。
+    """
+    code_map = {
+        "越界": "PERSON_OUT_OF_BOUNDS",
+        "起立/站立": "PERSON_STANDING",
+        "前倾/趴桌": "PERSON_LEANING",
+        "靠左": "PERSON_LEFT_EDGE",
+        "靠右": "PERSON_RIGHT_EDGE",
+    }
+    alert_code = code_map.get(behavior, "PERSON_BEHAVIOR_ABNORMAL")
+    detail = "AI 实时监控连续 %d 帧识别到「%s」，请智能终端复核处置。" % (
+        consecutive_frames, behavior)
+
+    def _push():
+        try:
+            _linkage().raise_alert(
+                code=alert_code,
+                device_code=device_code,
+                room_id=room_id,
+                seat_no=seat_no,
+                detail=detail,
+                operator=operator)
+        except Exception:
+            traceback.print_exc()
+
+    threading.Thread(target=_push, daemon=True).start()

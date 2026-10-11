@@ -745,6 +745,43 @@ class App(object):
             self.refresh_mon()
 
     # ---------------- 实时监控（多摄像头，owner/admin 可见） ----------------
+    # -- 以下类用于 02 实时监控 AI 行为连续帧计数与上报 --
+
+
+class _BehaviorTracker(object):
+    """连续异常行为计数器：达到阈值且冷却完成后才向 03 发告警"""
+    THRESHOLD = 30          # 连续 30 帧（约 1 秒）视为一次有效异常
+    COOLDOWN_SEC = 30       # 同类型行为 30 秒内只报一次
+
+    def __init__(self):
+        # key: (code, behavior) -> {"count": int, "last_alert": float}
+        self._state = {}
+
+    def update(self, code, behaviors):
+        now = time.time()
+        seen = set()
+        triggered = []
+        for b in behaviors:
+            key = (code, b)
+            seen.add(key)
+            s = self._state.get(key)
+            if s is None:
+                s = {"count": 0, "last_alert": 0}
+                self._state[key] = s
+            s["count"] += 1
+            if s["count"] >= self.THRESHOLD \
+                    and (now - s["last_alert"]) > self.COOLDOWN_SEC:
+                s["last_alert"] = now
+                triggered.append(b)
+        # 当前帧没出现的异常行为，计数清零
+        for key, s in list(self._state.items()):
+            if key[0] == code and key not in seen:
+                s["count"] = 0
+        return triggered
+
+
+class App(object):
+
     def _mon_tab(self):
         f = self.t_mon
         ttk.Label(f, text="实时监控（基于设备台账取流地址，多摄像头同时播放）",
@@ -775,6 +812,7 @@ class App(object):
 
         self._person_detector = None
         self._ai_error_file = config.DATA_ROOT / "ai_detect_error.txt"
+        self._behavior_tracker = _BehaviorTracker()
 
         self.mon_grid = ttk.Frame(f)
         self.mon_grid.pack(fill="both", expand=True)
@@ -909,8 +947,27 @@ class App(object):
                         except Exception:
                             pass
                 if self._person_detector is not None:
-                    frame, viol = self._person_detector.draw(frame)
-                    self.mon_status.config(text="AI检测中，越界：%d" % viol)
+                    frame, viol, behaviors = self._person_detector.draw(frame)
+                    status_text = "AI检测中，越界：%d" % viol
+                    if behaviors:
+                        status_text += "，行为：%s" % "、".join(set(behaviors))
+                    self.mon_status.config(text=status_text)
+                    # 多次异常行为上报 03 智能终端
+                    alerts = self._behavior_tracker.update(code, behaviors)
+                    if alerts:
+                        dev = self._dev_by_code(code)
+                        for b in alerts:
+                            try:
+                                import linkage_bridge
+                                linkage_bridge.report_behavior(
+                                    device_code=code,
+                                    behavior=b,
+                                    consecutive_frames=self._behavior_tracker.THRESHOLD,
+                                    room_id=dev.room_id if dev else "",
+                                    seat_no="",
+                                    operator=self.user.username if self.user else "02_ai")
+                            except Exception:
+                                pass
             h = lbl.winfo_height()
             w = lbl.winfo_width()
             if h < 50:
