@@ -34,9 +34,11 @@ if not defined FLAG if exist "%H%data\hide_cmd.on" set "FLAG=%H%data\hide_cmd.on
 
 if defined FLAG (
     REM 零黑窗口：本窗口立刻退出，界面用 pythonw 起来（要改回来双击「切换命令行窗口.bat」）
-    set "PYW=%PY:python.exe=pythonw.exe%"
-    if /i "%PYW%"=="%PY%" set "PYW=pythonw.exe"
-    if not exist "%PYW%" set "PYW=pythonw.exe"
+    for %%P in ("%PY%") do set "PYDIR=%%~dpP"
+    set "PYW=%PYDIR%pythonw.exe"
+    if not exist "%PYW%" (
+        for /f "delims=" %%w in ('where pythonw.exe 2^>nul') do set "PYW=%%w"
+    )
     if exist "%PYW%" (
         start "" "%PYW%" "%H%gui.py"
         exit /b 0
