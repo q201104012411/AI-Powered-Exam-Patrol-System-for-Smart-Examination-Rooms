@@ -126,6 +126,9 @@ class TerminalApp(object):
         self._build_verify_tab()
         self._build_ops_tab()
 
+        # 常驻 AI 对话面板：放在 4 个标签页下方，切换界面始终可见
+        self._build_ai_panel(self.root)
+
         self.status = ttk.Label(self.root, text="就绪", foreground="#666")
         self.status.pack(fill="x", padx=12, pady=(0, 6))
         self.refresh_all()
@@ -146,10 +149,10 @@ class TerminalApp(object):
         self.alerts_hint = ttk.Label(bar, text="", foreground="#c07000")
         self.alerts_hint.pack(side="right", padx=10)
 
-        cols = ("level", "time", "code", "room", "seat", "candidate", "status", "review")
+        cols = ("id", "level", "time", "code", "room", "seat", "candidate", "status", "review")
         self.tree = ttk.Treeview(f, columns=cols, show="headings", height=16)
-        for c, t, w in (("level", "级别", 80), ("time", "时间", 140), ("code", "告警码", 130),
-                        ("room", "考场", 70), ("seat", "座位", 60),
+        for c, t, w in (("id", "编号", 70), ("level", "级别", 80), ("time", "时间", 140),
+                        ("code", "告警码", 130), ("room", "考场", 70), ("seat", "座位", 60),
                         ("candidate", "考生(默认脱敏)", 150), ("status", "状态", 80),
                         ("review", "复核结论", 100)):
             self.tree.heading(c, text=t)
@@ -623,6 +626,165 @@ class TerminalApp(object):
                 pass
         threading.Thread(target=work, daemon=True).start()
 
+    # ---------- 常驻 AI 对话面板（Notebook 下方，跨标签可见） ----------
+    def _build_ai_panel(self, parent):
+        import ai_assistant
+
+        self.ai_chat = ai_assistant.AIChat()
+        self.ai_free_var = tk.BooleanVar(value=False)
+        self.ai_busy = False
+
+        frame = ttk.LabelFrame(parent, text="🤖 AI 助手（本地 ollama）", padding=6)
+        frame.pack(fill="x", padx=10, pady=(0, 6))
+
+        allowed = console.can_ai_chat(self.session.role)
+        if not allowed:
+            ttk.Label(frame, text="AI 对话未授权：需所有者开启命令控制台总开关并勾选「允许非所有者使用 AI 对话」。",
+                      foreground="#888").pack(anchor="w")
+            return
+
+        top = ttk.Frame(frame)
+        top.pack(fill="x")
+        ttk.Label(top, text="模型：").pack(side="left")
+        self.ai_model_var = tk.StringVar(value=ai_assistant.DEFAULT_MODEL)
+        self.ai_model_box = ttk.Combobox(
+            top, textvariable=self.ai_model_var, width=30,
+            values=(ai_assistant.DEFAULT_MODEL,))
+        self.ai_model_box.pack(side="left")
+        ttk.Button(top, text="🔄", width=3,
+                   command=self._ai_refresh_models).pack(side="left", padx=(2, 8))
+        mode_text = "自由对话" if self.ai_free_var.get() else "智能终端助手"
+        self.ai_mode_label = ttk.Label(top, text="模式：%s" % mode_text,
+                                       foreground="#1f56b8")
+        self.ai_mode_label.pack(side="left", padx=(12, 0))
+
+        self.ai_out = tk.Text(frame, height=6, wrap="word", font=MONO,
+                              background="#0f172a", foreground="#e2e8f0")
+        self.ai_out.pack(fill="x", pady=(4, 0))
+        self.ai_out.tag_config("ai_user", foreground="#60a5fa")
+        self.ai_out.tag_config("ai_bot", foreground="#34d399")
+        self.ai_out.tag_config("ai_err", foreground="#fca5a5")
+        self.ai_out.tag_config("ai_dim", foreground="#64748b")
+        self.ai_out.insert("end", "🤖 你好，我是智能终端 AI 助手。输入 EDY_POWERQ 可切换自由对话模式。\n")
+        self.ai_out.config(state="disabled")
+
+        bar = ttk.Frame(frame)
+        bar.pack(fill="x", pady=(4, 0))
+        self.ai_input = tk.Text(bar, height=2, wrap="word", font=FONT)
+        self.ai_input.pack(side="left", fill="x", expand=True)
+        self.ai_input.bind("<Return>", lambda e: (self._ai_send(), "break")[1])
+        self.ai_send_btn = ttk.Button(bar, text="发送", command=self._ai_send)
+        self.ai_send_btn.pack(side="left", padx=(6, 0))
+
+    def _ai_refresh_models(self):
+        import ai_assistant
+
+        def work():
+            try:
+                names = ai_assistant.list_models()
+            except Exception:
+                return
+
+            def apply():
+                if not self.ai_model_box.winfo_exists():
+                    return
+                try:
+                    cur = self.ai_model_var.get().strip()
+                    vals = tuple(names)
+                    if cur and cur not in names:
+                        vals = (cur,) + vals
+                    self.ai_model_box.config(values=vals)
+                    if not cur and names:
+                        self.ai_model_var.set(names[0])
+                except tk.TclError:
+                    pass
+            try:
+                self.root.after(0, apply)
+            except (tk.TclError, RuntimeError):
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ai_send(self):
+        if self.ai_busy:
+            self._ai_append_out("⚠ 上一条 AI 请求还未完成，请稍候再试。", tag="ai_err")
+            return
+        text = self.ai_input.get("1.0", "end").strip()
+        if not text:
+            return
+        import ai_assistant
+        model = self.ai_model_var.get().strip() or ai_assistant.DEFAULT_MODEL
+        if self.ai_chat.model != model:
+            self.ai_chat = ai_assistant.AIChat(model=model)
+
+        if text == "EDY_POWERQ":
+            self._ai_toggle_free_mode()
+            self.ai_input.delete("1.0", "end")
+            return
+
+        self.ai_busy = True
+        self.ai_send_btn.config(state="disabled")
+        self._ai_append_out("🧑 你：%s" % text, tag="ai_user")
+        self._ai_append_out("🤖 AI 正在思考，请稍候…", tag="ai_dim")
+        self.ai_input.delete("1.0", "end")
+
+        free_mode = bool(self.ai_free_var.get())
+
+        def work():
+            try:
+                ok, reply, transport = self.ai_chat.ask(
+                    text, operator=self.session.username,
+                    tier=("full" if self.session.role == config.ROLE_OWNER else "ai"),
+                    source="terminal_panel", timeout=120, free_mode=free_mode)
+            except Exception as e:
+                ok, reply, transport = False, "AI 调用异常：%s" % e, ""
+
+            def apply():
+                self.ai_busy = False
+                self.ai_send_btn.config(state="normal")
+                self._ai_remove_thinking()
+                line = "%s：%s" % ("🤖 AI" if ok else "⚠ AI 调用失败", reply)
+                self._ai_append_out(line, tag=("ai_bot" if ok else "ai_err"))
+            try:
+                self.root.after(0, apply)
+            except (tk.TclError, RuntimeError):
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ai_toggle_free_mode(self):
+        on = not self.ai_free_var.get()
+        self.ai_free_var.set(on)
+        self.ai_mode_label.config(text="模式：%s" % ("自由对话" if on else "智能终端助手"))
+        self._ai_append_out("🤖 %s" % ("已进入自由对话模式，提示词限制已关闭。"
+                                       if on else "已退出自由对话模式，恢复智能终端助手提示词。"),
+                            tag="ai_bot")
+
+    def _ai_append_out(self, text, tag=None):
+        try:
+            self.ai_out.config(state="normal")
+            if tag:
+                self.ai_out.insert("end", text.rstrip() + "\n", tag)
+            else:
+                self.ai_out.insert("end", text.rstrip() + "\n")
+            self.ai_out.see("end")
+            self.ai_out.config(state="disabled")
+        except tk.TclError:
+            pass
+
+    def _ai_remove_thinking(self):
+        try:
+            self.ai_out.config(state="normal")
+            txt = self.ai_out.get("1.0", "end")
+            lines = txt.split("\n")
+            for i in range(len(lines) - 1, -1, -1):
+                if "正在思考，请稍候" in lines[i]:
+                    start = "%d.0" % (i + 1)
+                    end = "%d.end+1c" % (i + 1)
+                    self.ai_out.delete(start, end)
+                    break
+            self.ai_out.config(state="disabled")
+        except Exception:
+            pass
+
     # ---------- 终端账户管理（所有者） ----------
     def _show_accounts(self):
         try:
@@ -787,7 +949,7 @@ class TerminalApp(object):
             if self.session.masked() and a.candidate_id:
                 cid = models._mask_id(a.candidate_id)
             self.tree.insert("", "end", iid=a.alert_id, tags=(tag,),
-                             values=(a.level_name(), a.created_at, a.code,
+                             values=(a.alert_id, a.level_name(), a.created_at, a.code,
                                      a.room_id or "—", a.seat_no or "—", cid,
                                      self._st_text(a.status),
                                      config.REVIEW_CONCLUSIONS.get(a.review_conclusion, "—")))
