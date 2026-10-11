@@ -54,7 +54,7 @@ python 网页操作面板\server\启动后端.bat      :: 浏览器访问 http:/
 ├── README.md            本文件
 ├── data\                ★ 运行数据（数据库/特征索引/参考照/抓拍/日志/密钥）
 ├── 网页操作面板\         网页端 + 本地化前端库 + Excel 模板
-├── tests\               126 项测试
+├── tests\               186 项测试
 ├── 文档\                 设计文档、程序结构.txt
 ├── 工具\                 Word 项目书生成脚本、模型下载、镜像测速
 ├── 资源\                 buffalo_l.zip 模型包、Python 安装包
@@ -78,9 +78,10 @@ python 网页操作面板\server\启动后端.bat      :: 浏览器访问 http:/
 | `enroll.py` | 命令行：建档 / 状态 / 路径体检 / 参考照体检 / 数据迁移 / 清理 / 校验链路 / 时钟 |
 | `pathcheck.py` / `pick_python.py` | 运行路径体检／挑出"装了依赖"的 Python（所有 .bat 都调它） |
 | `main.py` / `gui.py` | 自检与回归（12 场景）／tkinter 图形界面 |
-| `data\` | 运行数据：`exam.db`、`face_index.enc`、`audit.log`、`ref_photos\`、`captures\`、`logs\`、`.jwt_secret`、`init_admin_password.txt`、两个开关标记文件 |
+| `cmd_console.py` | **命令控制台**：分级权限（所有者完整 / 管理员仅 ollama）、ollama 严格白名单、子进程隔离与超时、每次执行（含被拒）写入审计链 |
+| `data\` | 运行数据：`exam.db`、`face_index.enc`、`audit.log`、`ref_photos\`、`captures\`、`logs\`、`.jwt_secret`、`init_admin_password.txt`、命令控制台开关标记等 |
 | `网页操作面板\` | 网页端：考生管理、用户管理、同意登记、运行状态、**所有者设置**；`vendor\` 为本地化前端库 |
-| `tests\` | 单元测试与网页端集成测试（126 项） |
+| `tests\` | 单元测试与集成测试（**186 项**）：核心 / 网页端 / GUI / 命令控制台 |
 
 ---
 
@@ -569,7 +570,7 @@ A：它是旧版的明文报名库，已迁移进 SQLite（身份证号转为加
 ## 十三、测试
 
 ```bat
-python -m unittest discover -s tests -t .      :: 单元 + 网页端集成，共 126 项
+python -m unittest discover -s tests -t .      :: 单元 + 网页端 + GUI + 命令控制台，共 186 项
 python main.py                                 :: 真实模型端到端自检（12 场景）
 python enroll.py status                        :: 索引/合规/审计链状态一览
 python enroll.py check-twins                   :: 撞脸/双胞胎体检

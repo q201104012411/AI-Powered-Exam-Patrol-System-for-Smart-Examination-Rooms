@@ -85,3 +85,7 @@ desktop.ini
 # 测试会在这里生成 web_*.db、初始密码_*.txt 等，绝不能入库
 tests/_tmp/
 _tmp/
+
+# --- 11. 工具产物（非项目内容）---
+# DSH 沙箱 ACL 修复工具生成的备份与报告，曾被误提交，已移除并在此忽略
+_acl_recovery/
