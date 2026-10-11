@@ -108,7 +108,7 @@ class App(object):
 
         ttk.Label(box, text="账户与网页版（http://127.0.0.1:5010/）是同一份",
                   foreground="#999", font=("Microsoft YaHei", 9)).pack(pady=(16, 0))
-        ttk.Label(box, text="默认：owner / EDY_POWERQ（所有者）　teacher1 / teacher1（管理员）",
+        ttk.Label(box, text="默认账户：owner（所有者）、teacher1（管理员）　口令由系统管理员掌握，不在界面显示",
                   foreground="#999", font=("Microsoft YaHei", 9)).pack()
         self.root.bind("<Return>", lambda _e: self._do_login())
         e_u.focus_set()
@@ -284,7 +284,7 @@ class App(object):
         f = ttk.Frame(win, padding=14)
         f.pack(fill="both", expand=True)
         fields = [("code", "设备编码*"), ("name", "设备名称"), ("room_id", "考场*"),
-                  ("site", "考点"), ("position", "安装位置*"), ("url", "取流地址"),
+                  ("site", "考点"), ("url", "取流地址"),
                   ("resolution", "分辨率"), ("fov_deg", "视场角(度)"),
                   ("pan_deg", "水平角(度)"), ("tilt_deg", "俯仰角(度)"),
                   ("session", "场次")]
@@ -318,7 +318,6 @@ class App(object):
             d = models.Device(code=vars_["code"].get().strip(), name=vars_["name"].get().strip(),
                               room_id=vars_["room_id"].get().strip(),
                               site=vars_["site"].get().strip(),
-                              position=vars_["position"].get().strip(),
                               url=vars_["url"].get().strip(),
                               resolution=vars_["resolution"].get().strip() or "1920x1080",
                               fov_deg=fov, pan_deg=pan, tilt_deg=tilt,

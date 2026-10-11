@@ -51,14 +51,12 @@ class Device(object):
         self.extra = dict(extra or {})
 
     def ledger_problems(self):
-        """台账核对：编码/考场/位置/角度参数是否齐全"""
+        """台账核对：编码/考场/角度参数是否齐全"""
         problems = []
         if not self.code:
             problems.append("缺少设备编码")
         if not self.room_id:
             problems.append("未绑定考场")
-        if not self.position:
-            problems.append("缺少安装位置")
         if self.fov_deg <= 0:
             problems.append("缺少/非法视场角")
         return problems
