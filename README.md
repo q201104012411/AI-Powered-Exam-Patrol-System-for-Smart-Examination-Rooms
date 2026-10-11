@@ -2,8 +2,6 @@
 
 **AI-Powered Exam Patrol System for Smart Examination Rooms** — The smart examination room is equipped with an AI-powered exam patrol system.
 
-> 定位：面向区域教育考试机构（省 / 市 / 区县级考试院）的可落地、可验收、可运维的智能考场 AI 巡考系统建设方案。
-
 ## 一、目录结构
 
 ```
