@@ -1602,7 +1602,7 @@ class FaceVerifyGUI:
         operator = (self.user or {}).get("username", "")
         self._ai_busy = True
         self.console_run_btn.config(state="disabled")
-        self.console_meta.config(text="AI 思考中…（%s）" % model)
+        self.console_meta.config(text="AI 思考中…（%s，本地 4B 模型约需数秒到数十秒）" % model)
         self._ai_append_out("🧑 你：%s" % text, tag="ai_user")
         try:                                # 发出去就清空输入框，像正常聊天软件一样
             self.console_input.delete("1.0", "end")
@@ -1657,7 +1657,11 @@ class FaceVerifyGUI:
                 return default
 
         lines.append("设备编号：%s" % _get(self.device_var))
-        lines.append("当前考生：%s" % _get(self.candidate_var, "未选择"))
+        cid = _get(self.candidate_var, "未选择")
+        cname = ""
+        if cid and cid != "未选择" and cid in self.candidates:
+            cname = (self.candidates[cid].get("name") or "").strip()
+        lines.append("当前考生：%s%s" % (cid, "（姓名：%s）" % cname if cname else ""))
         lines.append("核验模式：%s" % ("1:1 入场核验" if _get(self.mode_var) == "1:1"
                                        else "1:N 考场抽查"))
         for label, name in ((self.consent_label, "同意状态"),

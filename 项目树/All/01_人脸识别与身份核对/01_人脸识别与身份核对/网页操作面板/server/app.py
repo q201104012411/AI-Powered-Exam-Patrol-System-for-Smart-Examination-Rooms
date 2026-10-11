@@ -394,10 +394,25 @@ def _web_snapshot():
     lines.append("大考模式：%s ｜ 严格模式：%s"
                  % ("开启" if accounts.major_exam_enabled() else "关闭",
                     "开启" if accounts.strict_mode_enabled() else "关闭"))
-    try:                            # 最近操作：操作员"正在干什么"的最直接证据
-        recent = ActionLogger().query(limit=8)
+    try:
+        recent = ActionLogger().query(limit=6)
         if recent:
             lines.append("最近操作（新→旧）：\n" + "\n".join(recent))
+    except Exception:
+        pass
+    try:                            # 最近核验记录：带结果与原因码，AI 可据此判断"刚发生了什么"
+        audit = AuditLogger()
+        recs = audit.query(limit=5)
+        if recs:
+            lines.append("最近核验/操作记录（新→旧）：")
+            for r in recs:
+                ts = r.get("timestamp", "") or ""
+                cand = r.get("candidate_id") or r.get("device_id") or "-"
+                res = r.get("result", "")
+                rc = r.get("reason_code", "")
+                reason = (r.get("reason") or "")[:80]
+                lines.append("  [%s] 考生/设备：%s 结果：%s 原因码：%s %s"
+                             % (ts, cand, res, rc, reason))
     except Exception:
         pass
     return "\n".join(lines)

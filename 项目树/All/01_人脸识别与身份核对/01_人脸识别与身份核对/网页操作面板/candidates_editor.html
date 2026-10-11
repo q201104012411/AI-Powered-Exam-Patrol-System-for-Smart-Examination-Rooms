@@ -1005,7 +1005,7 @@ async function sendAiChat() {
   btn.disabled = true;
   ta.value = "";
   aiAppendBubble("user", message);
-  const thinking = aiAppendBubble("thinking", "思考中…（本地模型可能需要几十秒）");
+  const thinking = aiAppendBubble("thinking", "思考中…（本地 4B 模型可能需要数秒到几十秒）");
 
   try {
     const r = await api("/ai/chat", {
