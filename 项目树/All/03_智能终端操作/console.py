@@ -48,7 +48,8 @@ TIER_TEXT = {
 CONSOLE_DEFAULT_TIMEOUT = 60
 CONSOLE_MAX_TIMEOUT = 600
 
-MODE_TEXT = {"cmd": "系统命令", "python": "Python 代码", "ollama": "AI 辅助(ollama)"}
+MODE_TEXT = {"cmd": "系统命令", "python": "Python 代码", "ollama": "AI 辅助(ollama)",
+             "ai": "AI 对话"}
 MODE_BY_TEXT = dict((v, k) for k, v in MODE_TEXT.items())
 
 # 提示文案集中在这里，界面与将来的调用点共用，避免各处说法不一
@@ -109,6 +110,27 @@ def set_console_admin(allow):
                   "已收回管理员的 AI 辅助判断权限")
 
 
+def ai_chat_allowed():
+    """所有者是否已授权非所有者角色使用 AI 多轮对话（默认关闭）。所有者始终可用。"""
+    return os.path.exists(str(config.AI_CHAT_FLAG))
+
+
+def set_ai_chat(allow):
+    """所有者设置：是否授权管理员/巡考员等使用 AI 对话。返回 (ok, msg)"""
+    try:
+        flag = str(config.AI_CHAT_FLAG)
+        os.makedirs(os.path.dirname(flag), exist_ok=True)
+        if allow:
+            with open(flag, "w", encoding="utf-8") as f:
+                f.write("1\n")
+        elif os.path.exists(flag):
+            os.remove(flag)
+    except OSError as e:
+        return False, str(e)
+    return True, ("已授权管理员/巡考员使用 AI 对话（需总开关开启）" if allow else
+                  "已收回非所有者角色的 AI 对话权限")
+
+
 def console_tier(role):
     """
     当前角色的命令控制台层级 —— 本端**唯一**的权限判定入口（界面与桥接都调这里）。
@@ -129,45 +151,71 @@ def console_tier(role):
     return CONSOLE_TIER_NONE
 
 
+def can_ai_chat(role):
+    """
+    当前角色能否使用「AI 对话」模式。
+    规则：总开关开启，且（所有者 或 已知非所有者角色且已授权 AI 对话）。
+    """
+    if not console_enabled():
+        return False
+    if role == config.ROLE_OWNER:
+        return True
+    # 只给系统中已定义的角色；未知/空角色即使授权开关开着也不放行
+    if role not in config.ROLE_ACTIONS:
+        return False
+    return ai_chat_allowed()
+
+
 def console_modes(role):
     """该角色可选的可执行类型（界面用它决定选择框里放什么、要不要禁用）"""
+    modes = []
     tier = console_tier(role)
     if tier == CONSOLE_TIER_FULL:
-        return ["cmd", "python"]
-    if tier == CONSOLE_TIER_OLLAMA:
-        return ["ollama"]
-    return []
+        modes = ["cmd", "python"]
+    elif tier == CONSOLE_TIER_OLLAMA:
+        modes = ["ollama"]
+    if can_ai_chat(role):
+        modes.append("ai")
+    return modes
 
 
 def console_status(role):
     """界面用的状态快照（含提示文案），界面不自己拼权限规则"""
     tier = console_tier(role)
+    ai_chat = can_ai_chat(role)
     return {
         "enabled": console_enabled(),
         "admin_allowed": console_admin_allowed(),
+        "ai_chat_allowed": ai_chat_allowed(),
+        "ai_chat": ai_chat,
         "tier": tier,
         "tier_text": TIER_TEXT[tier],
-        "can_run": tier != CONSOLE_TIER_NONE,
+        "can_run": tier != CONSOLE_TIER_NONE or ai_chat,
         "can_full": tier == CONSOLE_TIER_FULL,
+        "can_ai_chat": ai_chat,
         "modes": console_modes(role),
         "role": role,
         "role_text": config.ROLE_TEXT.get(role, role),
         "default_timeout": CONSOLE_DEFAULT_TIMEOUT,
         "max_timeout": CONSOLE_MAX_TIMEOUT,
-        "hint": _hint(role, tier),
+        "hint": _hint(role, tier, ai_chat),
     }
 
 
-def _hint(role, tier):
+def _hint(role, tier, ai_chat=False):
     if tier == CONSOLE_TIER_FULL:
-        return "已开启：所有者可执行系统命令与 Python 代码"
+        return "已开启：所有者可执行系统命令 / Python 代码 / AI 对话"
     if tier == CONSOLE_TIER_OLLAMA:
+        if ai_chat:
+            return "已开启：管理员可执行 ollama 单次辅助，并已授权 AI 对话"
         return "已开启：管理员仅可执行 `ollama run <模型> [提示词]` 做 AI 辅助判断"
+    if ai_chat:
+        return "已开启：当前角色已获授权使用 AI 对话"
     if console_enabled():
         return "总开关已开启；当前角色（%s）无命令控制台权限" % config.ROLE_TEXT.get(role, role)
-    if console_admin_allowed():
-        return "关闭（默认）· 管理员的 AI 辅助授权已保留，但总开关关闭时一律不生效"
-    return "关闭（默认）· 开启后所有者可执行任意命令，管理员需另行授权且仅限 ollama"
+    if console_admin_allowed() or ai_chat_allowed():
+        return "关闭（默认）· 授权设置已保留，但总开关关闭时一律不生效"
+    return "关闭（默认）· 开启后所有者可执行任意命令，管理员/巡考员需另行授权"
 
 
 def _mirror_flag(path, present):
@@ -200,4 +248,5 @@ def bridge_home():
     os.makedirs(home, exist_ok=True)
     _mirror_flag(os.path.join(home, "cmd_console.on"), console_enabled())
     _mirror_flag(os.path.join(home, "cmd_console_admin.on"), console_admin_allowed())
+    # AI 对话授权不需要镜像到 01 的 cmd_bridge_home：03 端本地直接调 ollama，不经过 01 侧判定
     return home

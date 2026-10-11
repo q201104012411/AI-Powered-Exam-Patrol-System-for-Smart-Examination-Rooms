@@ -265,6 +265,7 @@ class TerminalApp(object):
         self.admin_chk = None      # 非所有者时不创建；重建界面后必须清掉旧引用
         self.console_on = None
         self.console_admin = None
+        self.ai_chat_chk = None
         if self.session.can("manage"):
             self.console_on = tk.BooleanVar(value=console.console_enabled())
             ttk.Checkbutton(cbar, text="命令控制台", variable=self.console_on,
@@ -274,6 +275,11 @@ class TerminalApp(object):
                 cbar, text="允许管理员使用 AI 辅助判断（仅 ollama）",
                 variable=self.console_admin, command=self._toggle_console_admin)
             self.admin_chk.pack(side="left", padx=6)
+            self.ai_chat_on = tk.BooleanVar(value=console.ai_chat_allowed())
+            self.ai_chat_chk = ttk.Checkbutton(
+                cbar, text="允许非所有者使用 AI 对话（需总开关开启）",
+                variable=self.ai_chat_on, command=self._toggle_ai_chat)
+            self.ai_chat_chk.pack(side="left", padx=6)
         self.console_btn = ttk.Button(cbar, text="⌨ 命令控制台", command=self._open_console)
         self.console_hint = ttk.Label(cbar, text="", foreground="#666")
         self.console_hint.pack(side="left", padx=8)
@@ -337,6 +343,18 @@ class TerminalApp(object):
         self._refresh_console_ui()
         messagebox.showinfo("已设置", msg)
 
+    def _toggle_ai_chat(self):
+        """所有者开关：授权非所有者角色（管理员/巡考员等）使用 AI 多轮对话"""
+        allow = self.ai_chat_on.get()
+        ok, msg = console.set_ai_chat(allow)
+        if not ok:
+            self.ai_chat_on.set(console.ai_chat_allowed())
+            messagebox.showerror("设置失败", msg)
+            return
+        self.store.log("AI 对话授权", "授权" if allow else "收回", self.session.username)
+        self._refresh_console_ui()
+        messagebox.showinfo("已设置", msg)
+
     def _refresh_console_ui(self):
         """
         按"当前角色 + 开关状态"刷新入口按钮与提示。
@@ -349,6 +367,8 @@ class TerminalApp(object):
             if self.admin_chk is not None:
                 # 总开关关闭时授权无从生效，把复选框置灰，免得误解为"授权了就能用"
                 self.admin_chk.config(state=("normal" if st["enabled"] else "disabled"))
+            if self.ai_chat_chk is not None:
+                self.ai_chat_chk.config(state=("normal" if st["enabled"] else "disabled"))
             if st["can_run"]:
                 self.console_btn.pack(side="left", padx=6)
             else:
@@ -359,15 +379,18 @@ class TerminalApp(object):
             pass        # 界面正在销毁（切换账号 / 关窗）时的竞态，忽略即可
 
     def _open_console(self):
-        """打开命令控制台窗口（类型、命令、超时、执行、输出）"""
+        """打开命令控制台窗口（类型、命令、超时、执行、输出；新增 AI 对话模式）"""
         tier = console.console_tier(self.session.role)
-        if tier == console.CONSOLE_TIER_NONE:
+        ai_chat_ok = console.can_ai_chat(self.session.role)
+        if tier == console.CONSOLE_TIER_NONE and not ai_chat_ok:
             messagebox.showerror("权限不足",
                                  "命令控制台未开启，或当前角色（%s）不在允许范围内。"
                                  % config.ROLE_TEXT.get(self.session.role, self.session.role))
             return
         modes = console.console_modes(self.session.role)
         available, why = self.cmd_bridge.available()
+
+        import ai_assistant
 
         win = tk.Toplevel(self.root)
         win.title("命令控制台 · %s" % console.TIER_TEXT.get(tier, tier))
@@ -379,9 +402,10 @@ class TerminalApp(object):
         ttk.Label(head, text=console.TIER_TEXT.get(tier, tier), font=FONT_B).pack(anchor="w")
         ttk.Label(head, text=console.RISK_HINT, foreground="#c07000", wraplength=880,
                   justify="left").pack(anchor="w", pady=(2, 0))
-        ttk.Label(head, text=("桥接状态：" + ("✅ 可用" if available else "⚠ " + why)),
-                  foreground=("#0a7d28" if available else "#c00000"), wraplength=880,
-                  justify="left").pack(anchor="w", pady=(2, 0))
+        if tier != console.CONSOLE_TIER_NONE:
+            ttk.Label(head, text=("桥接状态：" + ("✅ 可用" if available else "⚠ " + why)),
+                      foreground=("#0a7d28" if available else "#c00000"), wraplength=880,
+                      justify="left").pack(anchor="w", pady=(2, 0))
 
         g = ttk.Frame(win, padding=(12, 6))
         g.pack(fill="x")
@@ -391,16 +415,26 @@ class TerminalApp(object):
                              values=[console.MODE_TEXT[m] for m in modes])
         combo.grid(row=0, column=1, sticky="w")
         if tier != console.CONSOLE_TIER_FULL:
-            # 管理员只能走 ollama：选择框禁用，避免"看起来能选系统命令"的误解
+            # 非所有者时选择框禁用，避免"看起来能选系统命令"的误解；
+            # AI 对话模式已通过 console_modes 控制可选值。
             combo.config(state="disabled")
-        ttk.Label(g, text="超时（秒）：").grid(row=0, column=2, sticky="e", padx=(12, 0))
-        to_var = tk.StringVar(value=str(console.CONSOLE_DEFAULT_TIMEOUT))
-        ttk.Entry(g, textvariable=to_var, width=8).grid(row=0, column=3, sticky="w")
-        ttk.Label(g, text="最长 %d 秒" % console.CONSOLE_MAX_TIMEOUT, foreground="#888"
-                  ).grid(row=0, column=4, sticky="w", padx=(6, 0))
 
-        ttk.Label(win, text="命令 / 代码（所有者：系统命令或 Python 代码；"
-                            "管理员：`ollama run <模型> [提示词]`）",
+        ttk.Label(g, text="模型：").grid(row=0, column=2, sticky="e", padx=(12, 0))
+        ai_model_var = tk.StringVar(value=ai_assistant.DEFAULT_MODEL)
+        ai_model_box = ttk.Combobox(g, textvariable=ai_model_var, width=30,
+                                    values=(ai_assistant.DEFAULT_MODEL,))
+        ai_model_box.grid(row=0, column=3, sticky="w")
+        ttk.Button(g, text="🔄", width=3,
+                   command=lambda: self._ai_refresh_models_popup(ai_model_box)).grid(row=0, column=4, padx=(2, 0))
+
+        ttk.Label(g, text="超时（秒）：").grid(row=0, column=5, sticky="e", padx=(12, 0))
+        to_var = tk.StringVar(value=str(console.CONSOLE_DEFAULT_TIMEOUT))
+        ttk.Entry(g, textvariable=to_var, width=8).grid(row=0, column=6, sticky="w")
+        ttk.Label(g, text="最长 %d 秒" % console.CONSOLE_MAX_TIMEOUT, foreground="#888"
+                  ).grid(row=0, column=7, sticky="w", padx=(6, 0))
+
+        ttk.Label(win, text="命令 / 代码 / AI 消息（所有者：系统命令或 Python 代码；"
+                            "管理员：ollama run；授权角色：AI 对话；输入 EDY_POWERQ 切换自由对话）",
                   foreground="#333").pack(anchor="w", padx=12, pady=(4, 2))
         src = tk.Text(win, height=8, wrap="word", font=MONO)
         src.pack(fill="x", padx=12)
@@ -408,15 +442,63 @@ class TerminalApp(object):
         bar.pack(fill="x")
         run_btn = ttk.Button(bar, text="▶ 执行", command=lambda: run())
         run_btn.pack(side="left")
+        ttk.Button(bar, text="清空输出", command=lambda: set_out("（已清空）")).pack(side="left", padx=6)
         ttk.Label(bar, text="执行目录：%s（子进程与本程序同用户身份，无额外降权隔离）"
                             % config.CMD_CONSOLE_DIR, foreground="#888").pack(side="left", padx=8)
         out = tk.Text(win, height=18, wrap="word", font=MONO, state="normal")
         out.pack(fill="both", expand=True, padx=12, pady=(0, 10))
 
+        # AI 对话状态
+        ai_chat = ai_assistant.AIChat(model=ai_model_var.get())
+        ai_free_var = tk.BooleanVar(value=False)
+        ai_busy = [False]
+
+        def set_out(text):
+            out.config(state="normal")
+            out.delete("1.0", "end")
+            out.insert("end", text)
+            out.see("end")
+            out.config(state="disabled")
+
+        def append_out(text):
+            out.config(state="normal")
+            if out.get("1.0", "end").strip() in ("（尚未执行）", "（已清空）"):
+                out.delete("1.0", "end")
+            out.insert("end", text.rstrip() + "\n")
+            out.see("end")
+            out.config(state="disabled")
+
+        def remove_thinking():
+            out.config(state="normal")
+            text = out.get("1.0", "end")
+            lines = text.split("\n")
+            for i in range(len(lines) - 1, -1, -1):
+                if "正在思考，请稍候" in lines[i]:
+                    start = "%d.0" % (i + 1)
+                    end = "%d.end+1c" % (i + 1)
+                    out.delete(start, end)
+                    break
+            out.config(state="disabled")
+
+        def sync_to_main(text):
+            try:
+                box = getattr(self, "ops_right", None)
+                if box and box.winfo_exists():
+                    box.insert("end", text + "\n")
+                    box.see("end")
+            except Exception:
+                pass
+
+        def ai_toggle_free():
+            on = not ai_free_var.get()
+            ai_free_var.set(on)
+            append_out("🤖 %s" % ("已进入自由对话模式，提示词限制已关闭。"
+                                   if on else "已退出自由对话模式，恢复智能终端助手提示词。"))
+
         def run():
             code = src.get("1.0", "end").strip()
             if not code:
-                messagebox.showinfo("提示", "请输入命令或代码", parent=win)
+                messagebox.showinfo("提示", "请输入命令、代码或 AI 消息", parent=win)
                 return
             try:
                 timeout = int(float(to_var.get() or console.CONSOLE_DEFAULT_TIMEOUT))
@@ -425,6 +507,57 @@ class TerminalApp(object):
                 return
             timeout = max(1, min(timeout, console.CONSOLE_MAX_TIMEOUT))
             mode = console.MODE_BY_TEXT.get(mode_var.get(), "cmd")
+
+            # ---------- AI 对话模式 ----------
+            if mode == "ai":
+                text = code
+                if text == "EDY_POWERQ":
+                    ai_toggle_free()
+                    src.delete("1.0", "end")
+                    return
+                if ai_busy[0]:
+                    append_out("⚠ 上一条 AI 请求还未完成，请稍候再试。")
+                    return
+                nonlocal ai_chat
+                model_want = ai_model_var.get().strip() or ai_assistant.DEFAULT_MODEL
+                if ai_chat.model != model_want:
+                    ai_chat = ai_assistant.AIChat(model=model_want)
+                ai_busy[0] = True
+                run_btn.config(state="disabled")
+                append_out("🧑 你：%s" % text)
+                append_out("🤖 AI 正在思考，请稍候…")
+                src.delete("1.0", "end")
+
+                def ai_worker():
+                    try:
+                        ok, reply, transport = ai_chat.ask(
+                            text, operator=self.session.username,
+                            tier=("full" if tier == console.CONSOLE_TIER_FULL else "ai"),
+                            source="terminal_gui", timeout=timeout,
+                            free_mode=bool(ai_free_var.get()))
+                    except Exception as e:
+                        ok, reply, transport = False, "AI 调用异常：%s" % e, ""
+
+                    def ai_apply():
+                        try:
+                            if not win.winfo_exists():
+                                return
+                        except tk.TclError:
+                            return
+                        ai_busy[0] = False
+                        remove_thinking()
+                        line = "%s：%s" % ("🤖 AI" if ok else "⚠ AI 调用失败", reply)
+                        append_out(line)
+                        sync_to_main(line)
+                        run_btn.config(state="normal")
+                    try:
+                        win.after(0, ai_apply)
+                    except tk.TclError:
+                        pass
+                threading.Thread(target=ai_worker, daemon=True).start()
+                return
+
+            # ---------- 命令 / Python / ollama 单次 ----------
             run_btn.config(state="disabled")
             out.delete("1.0", "end")
             out.insert("end", "执行中…（最长 %d 秒，超时会连带结束子进程树）\n" % timeout)
@@ -455,14 +588,40 @@ class TerminalApp(object):
                 try:
                     win.after(0, lambda: done(r))
                 except (tk.TclError, RuntimeError):
-                    # 窗口已关闭（TclError），或主循环已经退出（RuntimeError：
-                    # "main thread is not in main loop"，例如执行期间用户关掉了程序）。
-                    # 两种情况下都没有界面可更新，丢弃结果即可，不能让工作线程抛栈。
                     pass
 
             threading.Thread(target=work, daemon=True).start()
 
         src.focus_set()
+
+    def _ai_refresh_models_popup(self, box):
+        """给命令控制台弹窗里的模型下拉框刷新模型列表"""
+        import ai_assistant
+
+        def work():
+            try:
+                names = ai_assistant.list_models()
+            except Exception:
+                return
+
+            def apply():
+                try:
+                    if not box.winfo_exists():
+                        return
+                    cur = box.get().strip()
+                    vals = tuple(names)
+                    if cur and cur not in names:
+                        vals = (cur,) + vals
+                    box.config(values=vals)
+                    if not cur and names:
+                        box.set(names[0])
+                except tk.TclError:
+                    pass
+            try:
+                self.root.after(0, apply)
+            except (tk.TclError, RuntimeError):
+                pass
+        threading.Thread(target=work, daemon=True).start()
 
     # ---------- 终端账户管理（所有者） ----------
     def _show_accounts(self):

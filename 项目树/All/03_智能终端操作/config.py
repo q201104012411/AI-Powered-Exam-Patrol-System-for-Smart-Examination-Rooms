@@ -46,10 +46,14 @@ HIDE_CMD_FLAG = DATA_ROOT / "hide_cmd.on"
 #   CONSOLE_FLAG       总开关（只有所有者能拨）。关闭时**所有角色**（含已授权管理员）一律无权限
 #   CONSOLE_ADMIN_FLAG 所有者对管理员的单独授权：只放行 `ollama run <模型> [提示词]`，
 #                      且以总开关开启为前提
-# 为什么拆成两把开关：所有者可能想"临时关掉全部执行入口"却保留对管理员的授权意图，
-# 两件事各由一把开关表达；判定入口只有 console.console_tier() 一处。
+#   AI_CHAT_FLAG       所有者对非所有者角色（管理员/巡考员等）的 AI 多轮对话授权。
+#                      开启后管理员/巡考员也能在命令控制台里使用「AI 对话」模式；
+#                      所有者不受此开关限制，始终可用。
+# 为什么拆成三把开关：所有者可能想"临时关掉全部执行入口"却保留授权意图，
+# 三件事各由一把开关表达；判定入口只有 console.console_tier() / can_ai_chat() 两处。
 CONSOLE_FLAG = DATA_ROOT / "cmd_console.on"
 CONSOLE_ADMIN_FLAG = DATA_ROOT / "cmd_console_admin.on"
+AI_CHAT_FLAG = DATA_ROOT / "ai_chat.on"
 
 # ---------------- 终端类型（《智能终端.md》第一节） ----------------
 TERMINAL_TYPES = {

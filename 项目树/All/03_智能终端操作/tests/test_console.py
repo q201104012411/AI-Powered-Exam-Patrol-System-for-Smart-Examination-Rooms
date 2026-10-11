@@ -80,8 +80,10 @@ class ConsoleBase(unittest.TestCase):
         os.makedirs(str(config.DATA_ROOT), exist_ok=True)
         console.set_console(False)
         console.set_console_admin(False)
+        console.set_ai_chat(False)
         self.addCleanup(console.set_console, False)
         self.addCleanup(console.set_console_admin, False)
+        self.addCleanup(console.set_ai_chat, False)
 
     @staticmethod
     def all_roles():
@@ -106,8 +108,10 @@ class TestConsoleSwitch(ConsoleBase):
         self.assertTrue(ok, msg)
         self.assertTrue(console.console_enabled())
         self.assertEqual(console.console_tier(config.ROLE_OWNER), "full")
-        self.assertEqual(console.console_modes(config.ROLE_OWNER), ["cmd", "python"])
+        # 所有者始终自带 AI 对话权限
+        self.assertEqual(console.console_modes(config.ROLE_OWNER), ["cmd", "python", "ai"])
         self.assertTrue(console.console_status(config.ROLE_OWNER)["can_full"])
+        self.assertTrue(console.can_ai_chat(config.ROLE_OWNER))
 
     def test_master_on_alone_gives_others_nothing(self):
         console.set_console(True)
@@ -133,6 +137,7 @@ class TestConsoleSwitch(ConsoleBase):
             for allow in (False, True):
                 console.set_console(master)
                 console.set_console_admin(allow)
+                console.set_ai_chat(False)          # 不影响 full/ollama/none 判定
                 for r in self.all_roles():
                     if r == config.ROLE_OWNER:
                         continue
@@ -156,21 +161,55 @@ class TestConsoleSwitch(ConsoleBase):
     def test_unknown_or_empty_role_is_none(self):
         console.set_console(True)
         console.set_console_admin(True)
+        console.set_ai_chat(True)
         for r in ("", None, "superuser"):
             self.assertEqual(console.console_tier(r), "none")
+            self.assertFalse(console.can_ai_chat(r))
+
+    def test_ai_chat_authorization(self):
+        """非所有者角色默认不能 AI 对话；所有者授权后才可，且总开关关闭时失效"""
+        console.set_console(True)
+        self.assertFalse(console.ai_chat_allowed())
+        self.assertTrue(console.can_ai_chat(config.ROLE_OWNER))
+        self.assertFalse(console.can_ai_chat(config.ROLE_ADMIN))
+        self.assertFalse(console.can_ai_chat(config.ROLE_PATROL))
+        self.assertEqual(console.console_modes(config.ROLE_PATROL), [])
+
+        ok, msg = console.set_ai_chat(True)
+        self.assertTrue(ok, msg)
+        self.assertTrue(console.ai_chat_allowed())
+        self.assertTrue(console.can_ai_chat(config.ROLE_ADMIN))
+        self.assertTrue(console.can_ai_chat(config.ROLE_PATROL))
+        self.assertEqual(console.console_modes(config.ROLE_PATROL), ["ai"])
+        # 管理员需要单独授权 ollama；这里只开了 AI 对话，所以只有 ai
+        self.assertEqual(console.console_modes(config.ROLE_ADMIN), ["ai"])
+        console.set_console_admin(True)
+        self.assertEqual(console.console_modes(config.ROLE_ADMIN), ["ollama", "ai"])
+
+        # 总开关关闭时 AI 对话授权保留但不生效
+        console.set_console(False)
+        self.assertTrue(console.ai_chat_allowed())
+        self.assertFalse(console.can_ai_chat(config.ROLE_PATROL))
+        console.set_console(True)
+        console.set_ai_chat(False)
 
     def test_switches_are_marker_files(self):
         """与 01 同一套语义：标记文件存在=开启，删除=关闭"""
         self.assertFalse(os.path.exists(str(config.CONSOLE_FLAG)))
         self.assertFalse(os.path.exists(str(config.CONSOLE_ADMIN_FLAG)))
+        self.assertFalse(os.path.exists(str(config.AI_CHAT_FLAG)))
         console.set_console_admin(True)
         self.assertTrue(os.path.exists(str(config.CONSOLE_ADMIN_FLAG)))
+        console.set_ai_chat(True)
+        self.assertTrue(os.path.exists(str(config.AI_CHAT_FLAG)))
         console.set_console(True)
         self.assertTrue(os.path.exists(str(config.CONSOLE_FLAG)))
         console.set_console(False)
         console.set_console_admin(False)
+        console.set_ai_chat(False)
         self.assertFalse(os.path.exists(str(config.CONSOLE_FLAG)))
         self.assertFalse(os.path.exists(str(config.CONSOLE_ADMIN_FLAG)))
+        self.assertFalse(os.path.exists(str(config.AI_CHAT_FLAG)))
 
     def test_bridge_home_mirrors_switch_state(self):
         """01 侧读的是它自己数据根下的标记文件，镜像必须与开关一致（含关闭方向）"""
