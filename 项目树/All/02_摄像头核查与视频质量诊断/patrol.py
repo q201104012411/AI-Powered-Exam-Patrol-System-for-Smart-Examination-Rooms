@@ -118,6 +118,12 @@ class PatrolRunner(object):
                        % (device.code, config.PATROLS.get(policy, {}).get("name", policy),
                           "正常" if ck.ok else "异常", len(defects)),
                        operator or "system")
+        # 异常结果实时上报 03 智能终端
+        try:
+            import linkage_bridge
+            linkage_bridge.report_check(device, ck, operator=operator or "system")
+        except Exception:
+            pass
         return ck
 
     # ---------------- 批量巡检 ----------------

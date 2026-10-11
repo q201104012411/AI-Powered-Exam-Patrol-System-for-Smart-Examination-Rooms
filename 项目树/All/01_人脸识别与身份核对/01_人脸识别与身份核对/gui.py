@@ -2519,6 +2519,13 @@ class FaceVerifyGUI:
         self.action_log.log("核验完成", "考生=%s 结果=%s 原因码=%s 相似度=%s"
                             % (rec["candidate_id"], rec["result"], rec.get("reason_code"), rec.get("score")))
 
+        # 核验异常实时上报 03 智能终端
+        try:
+            import linkage_bridge
+            linkage_bridge.report_verify_result(rec, operator=rec.get("operator", "01_verify"))
+        except Exception:
+            pass
+
         # 需要人工复验的情形：当场提示走复验流程（双人见证）
         if rec.get("required_witness") and not (rec.get("witness") or "").strip():
             messagebox.showwarning(
