@@ -66,7 +66,7 @@ class AlertHub(object):
         return None
 
     # ---------- 确认（红色预警强制确认） ----------
-    def ack(self, alert_id, operator):
+    def ack(self, alert_id, operator, reason=""):
         a = self.store.get_alert(alert_id)
         if a is None:
             return False, "告警不存在"
@@ -76,7 +76,10 @@ class AlertHub(object):
         a.acked_by = operator
         a.acked_at = models.now_ts()
         self.store.save_alert(a)
-        self.store.log("告警确认", "%s %s" % (a.code, alert_id), operator)
+        detail = "%s %s" % (a.code, alert_id)
+        if reason:
+            detail += " 理由：%s" % reason[:120]
+        self.store.log("告警确认", detail, operator)
         return True, "已确认（%s）" % a.level_name()
 
     # ---------- 优先展示顺序（红在前，其次超时） ----------

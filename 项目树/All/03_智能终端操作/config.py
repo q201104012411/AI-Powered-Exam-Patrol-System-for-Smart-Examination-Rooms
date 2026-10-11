@@ -90,6 +90,20 @@ ALERT_CODE_LEVEL = {
     "CLOCK_DRIFT": LEVEL_ORANGE,    # 时钟偏差
 }
 
+# 告警码 -> 中文含义（界面显示用）
+ALERT_CODE_TEXT = {
+    "MULTI_FACE": "多人同框",
+    "NO_INVIGILATOR": "监考缺位",
+    "PHONE_DETECTED": "手机/作弊器材",
+    "SIGNAL_ABNORMAL": "无线信号异常",
+    "FACE_MISMATCH": "人脸不符",
+    "LOOK_DOWN": "长时间低头",
+    "TURN_HEAD": "频繁转头",
+    "VIDEO_BLUR": "视频模糊",
+    "OFFLINE": "设备离线",
+    "CLOCK_DRIFT": "时钟偏差",
+}
+
 # ---------------- 复核结论（第二节第 2 条） ----------------
 REVIEW_CONFIRMED = "confirmed"      # 成立
 REVIEW_REJECTED = "rejected"        # 不成立

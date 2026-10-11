@@ -185,6 +185,20 @@ class ReviewRecord(object):
             "created_at": self.created_at, "closed_loop": self.closed_loop,
         }
 
+    @classmethod
+    def from_row(cls, row):
+        import json
+        return cls(
+            alert_id=row.get("alert_id", ""),
+            conclusion=row.get("conclusion", config.REVIEW_CONFIRMED),
+            reason=row.get("reason", ""),
+            operator=row.get("operator", ""),
+            witness=row.get("witness", ""),
+            attachments=json.loads(row.get("attachments", "[]") or "[]"),
+            review_id=row.get("review_id"),
+            created_at=row.get("created_at"),
+        )
+
 
 def canonical(obj):
     return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

@@ -117,14 +117,17 @@ class TerminalApp(object):
         self.tab_alerts = ttk.Frame(nb, padding=8)
         self.tab_review = ttk.Frame(nb, padding=8)
         self.tab_verify = ttk.Frame(nb, padding=8)
+        self.tab_monitor = ttk.Frame(nb, padding=8)
         self.tab_ops = ttk.Frame(nb, padding=8)
         nb.add(self.tab_alerts, text="  告警处置  ")
         nb.add(self.tab_review, text="  复核留痕  ")
         nb.add(self.tab_verify, text="  手持核验  ")
+        nb.add(self.tab_monitor, text="  监控查看  ")
         nb.add(self.tab_ops, text="  运行状态与管控  ")
         self._build_alerts_tab()
         self._build_review_tab()
         self._build_verify_tab()
+        self._build_monitor_tab()
         self._build_ops_tab()
 
         # 常驻 AI 对话面板：放在 4 个标签页下方，切换界面始终可见
@@ -173,34 +176,48 @@ class TerminalApp(object):
         f = self.tab_review
         ttk.Label(f, text="复核留痕（结论 / 理由 / 见证人 / 附件）",
                   font=FONT_B).pack(anchor="w")
+        bar = ttk.Frame(f)
+        bar.pack(fill="x", pady=(0, 6))
+        ttk.Button(bar, text="🔄 刷新", command=self.refresh_reviews).pack(side="left")
+
         grid = ttk.Frame(f)
         grid.pack(fill="x", pady=6)
         ttk.Label(grid, text="告警 ID：").grid(row=0, column=0, sticky="e", pady=3)
         self.rv_alert = tk.StringVar()
-        ttk.Entry(grid, textvariable=self.rv_alert, width=26).grid(row=0, column=1, sticky="w")
-        ttk.Label(grid, text="结论：").grid(row=0, column=2, sticky="e", padx=(12, 0))
+        self.rv_alert_box = ttk.Combobox(grid, textvariable=self.rv_alert, width=26,
+                                         state="readonly")
+        self.rv_alert_box.grid(row=0, column=1, sticky="w")
+        self.rv_alert_box.bind("<<ComboboxSelected>>", self._rv_alert_changed)
+        ttk.Button(grid, text="🔄 同步", command=self._rv_sync_alert).grid(row=0, column=2, padx=6)
+        ttk.Label(grid, text="结论：").grid(row=0, column=3, sticky="e", padx=(12, 0))
         self.rv_conc = tk.StringVar(value=config.REVIEW_CONFIRMED)
         ttk.Combobox(grid, textvariable=self.rv_conc, state="readonly", width=12,
-                     values=list(config.REVIEW_CONCLUSIONS.keys())).grid(row=0, column=3, sticky="w")
-        ttk.Label(grid, text="见证人：").grid(row=1, column=0, sticky="e", pady=3)
+                     values=list(config.REVIEW_CONCLUSIONS.keys())).grid(row=0, column=4, sticky="w")
+        ttk.Label(grid, text="考生编号：").grid(row=1, column=0, sticky="e", pady=3)
+        self.rv_cand = tk.StringVar()
+        ttk.Entry(grid, textvariable=self.rv_cand, width=26,
+                  state="readonly").grid(row=1, column=1, sticky="w")
+        ttk.Label(grid, text="见证人：").grid(row=1, column=2, sticky="e", padx=(12, 0))
         self.rv_wit = tk.StringVar()
-        ttk.Entry(grid, textvariable=self.rv_wit, width=26).grid(row=1, column=1, sticky="w")
-        ttk.Label(grid, text="附件：").grid(row=1, column=2, sticky="e", padx=(12, 0))
+        ttk.Entry(grid, textvariable=self.rv_wit, width=26).grid(row=1, column=3, sticky="w")
+        ttk.Label(grid, text="附件：").grid(row=1, column=4, sticky="e", padx=(12, 0))
         self.rv_att = tk.StringVar()
-        ttk.Entry(grid, textvariable=self.rv_att, width=22).grid(row=1, column=3, sticky="w")
-        ttk.Button(grid, text="选择…", command=self._pick_attach).grid(row=1, column=4, padx=4)
+        ttk.Entry(grid, textvariable=self.rv_att, width=22).grid(row=1, column=5, sticky="w")
+        ttk.Button(grid, text="选择…", command=self._pick_attach).grid(row=1, column=6, padx=4)
         ttk.Label(f, text="复核理由（必填）：").pack(anchor="w", pady=(6, 0))
         self.rv_reason = tk.Text(f, height=4, wrap="word", font=FONT)
         self.rv_reason.pack(fill="x")
         rbar = ttk.Frame(f)
         rbar.pack(fill="x", pady=6)
         ttk.Button(rbar, text="提交复核", command=self._submit_review).pack(side="left")
+        ttk.Button(rbar, text="修改选中复核", command=self._rv_edit_selected).pack(side="left", padx=6)
         ttk.Button(rbar, text="误报统计（算法迭代闭环）",
                    command=self._fp_stats).pack(side="left", padx=8)
-        ttk.Label(f, text="复核记录", font=FONT_B).pack(anchor="w", pady=(8, 2))
+        ttk.Label(f, text="复核记录（双击可修改，需填写修改理由）", font=FONT_B).pack(anchor="w", pady=(8, 2))
         self.rv_list = tk.Text(f, height=12, wrap="word", font=MONO)
         self.rv_list.pack(fill="both", expand=True)
         self.rv_list.tag_config("fp", foreground="#c07000")
+        self.rv_list.bind("<Double-Button-1>", lambda _e: self._rv_edit_selected())
 
     # ---------- 手持核验 ----------
     def _build_verify_tab(self):
@@ -226,9 +243,84 @@ class TerminalApp(object):
                                                              sticky="w", pady=(6, 0))
         ttk.Button(g, text="选择…", command=self._pick_image).grid(row=1, column=4, padx=4,
                                                                    pady=(6, 0))
+        ttk.Button(f, text="🔄 刷新桥接状态", command=self.refresh_verify).pack(anchor="w", pady=(8, 0))
         ttk.Button(f, text="开始核验", command=self._do_verify).pack(anchor="w", pady=8)
         self.v_out = tk.Text(f, height=16, wrap="word", font=MONO)
         self.v_out.pack(fill="both", expand=True)
+
+    def refresh_verify(self):
+        """刷新手持核验页的桥接状态"""
+        ok, why = self.face.available()
+        self.v_out.delete("1.0", "end")
+        self.v_out.insert("end", "桥接状态：%s\n%s\n" % (
+            "✅ 可用" if ok else "⚠ " + why, why if not ok else ""))
+
+    # ---------- 监控查看 ----------
+    def _build_monitor_tab(self):
+        f = self.tab_monitor
+        ttk.Label(f, text="各考场实时态势与最近审计", font=FONT_B).pack(anchor="w")
+        bar = ttk.Frame(f)
+        bar.pack(fill="x", pady=(4, 6))
+        ttk.Button(bar, text="🔄 刷新", command=self.refresh_monitor).pack(side="left")
+
+        cols = ttk.Frame(f)
+        cols.pack(fill="both", expand=True)
+        left = ttk.LabelFrame(cols, text="考场监控概览", padding=6)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        right = ttk.LabelFrame(cols, text="最近审计 / 操作", padding=6)
+        right.grid(row=0, column=1, sticky="nsew")
+        cols.columnconfigure(0, weight=1)
+        cols.columnconfigure(1, weight=1)
+
+        self.monitor_tree = ttk.Treeview(
+            left, columns=("room", "latest", "code", "status", "pending", "reviewed"),
+            show="headings", height=12)
+        for col, w, txt in (("room", 100, "考场"),
+                            ("latest", 160, "最新告警时间"),
+                            ("code", 220, "最新告警"),
+                            ("status", 80, "状态"),
+                            ("pending", 70, "待处置"),
+                            ("reviewed", 70, "已复核")):
+            self.monitor_tree.heading(col, text=txt)
+            self.monitor_tree.column(col, width=w, anchor="center")
+        self.monitor_tree.pack(fill="both", expand=True)
+
+        self.monitor_log = tk.Text(right, height=18, wrap="word", font=MONO)
+        self.monitor_log.pack(fill="both", expand=True)
+
+    def refresh_monitor(self):
+        """刷新监控查看页：按考场聚合最新告警与审计"""
+        try:
+            alerts = self.store.list_alerts(limit=1000)
+            by_room = {}
+            for a in alerts:
+                rid = a.room_id or "未分配考场"
+                by_room.setdefault(rid, []).append(a)
+            for i in self.monitor_tree.get_children():
+                self.monitor_tree.delete(i)
+            for rid, lst in sorted(by_room.items()):
+                lst.sort(key=lambda x: x.created_epoch or 0, reverse=True)
+                latest = lst[0]
+                pending = sum(1 for a in lst if a.status == models.ST_PENDING)
+                reviewed = sum(1 for a in lst if a.status == models.ST_REVIEWED)
+                code_text = config.ALERT_CODE_TEXT.get(latest.code, latest.code)
+                self.monitor_tree.insert("", "end", values=(
+                    rid, latest.created_at,
+                    "%s（%s）" % (latest.code, code_text),
+                    self._st_text(latest.status), pending, reviewed))
+        except Exception as e:
+            self.monitor_log.delete("1.0", "end")
+            self.monitor_log.insert("end", "刷新监控失败：%s\n" % e)
+            return
+
+        try:
+            self.monitor_log.delete("1.0", "end")
+            for r in self.store.audit_rows(limit=40):
+                self.monitor_log.insert("end", "%s  %s  %s  %s\n" % (
+                    r.get("ts"), r.get("action"), r.get("operator") or "-",
+                    r.get("detail") or ""))
+        except Exception:
+            pass
 
     # ---------- 运行状态与管控 ----------
     def _build_ops_tab(self):
@@ -249,44 +341,47 @@ class TerminalApp(object):
 
         bar = ttk.Frame(f)
         bar.pack(fill="x", pady=6)
-        ttk.Button(bar, text="刷新状态", command=self.refresh_ops).pack(side="left")
-        ttk.Button(bar, text="写一次稳定性心跳", command=self._soak).pack(side="left", padx=6)
-        ttk.Button(bar, text="校验审计链", command=self._chain).pack(side="left", padx=6)
+        ttk.Button(bar, text="🔄 刷新状态", command=self.refresh_ops).pack(side="left")
+        ttk.Button(bar, text="📝 写一次稳定性心跳", command=self._soak).pack(side="left", padx=6)
+        ttk.Button(bar, text="🔗 校验审计链", command=self._chain).pack(side="left", padx=6)
         # 终端账户管理：只有具备 manage 动作的角色（所有者）才看得到
         if self.session.can("manage"):
             ttk.Button(bar, text="👥 终端账户", command=self._show_accounts
                        ).pack(side="left", padx=6)
             ttk.Button(bar, text="🗑 清空本地数据", command=self._wipe_all
                        ).pack(side="left", padx=6)
-            self.hide_cmd = tk.BooleanVar(value=os.path.exists(str(config.HIDE_CMD_FLAG)))
-            ttk.Checkbutton(bar, text="隐藏命令行窗口（下次启动生效）",
-                            variable=self.hide_cmd,
-                            command=self._toggle_hide_cmd).pack(side="left", padx=6)
 
-        # 命令控制台单独一行：它默认关闭且属于高风险能力，混在普通按钮里容易被误点。
-        # 两个复选框只有所有者（manage 动作）才有；执行按钮则按"当前角色是否拿得到层级"显示。
-        cbar = ttk.Frame(f)
-        cbar.pack(fill="x", pady=(2, 0))
+        # 权限控制台：把所有改变权限/配置的开关集中在一个带标题的框里，避免误点
+        perm_frame = ttk.LabelFrame(f, text=" 权限控制台（仅所有者可见）", padding=8)
+        perm_frame.pack(fill="x", pady=(4, 0))
+        pbar = ttk.Frame(perm_frame)
+        pbar.pack(fill="x")
         self.admin_chk = None      # 非所有者时不创建；重建界面后必须清掉旧引用
         self.console_on = None
         self.console_admin = None
         self.ai_chat_chk = None
+        self.hide_cmd = tk.BooleanVar(value=os.path.exists(str(config.HIDE_CMD_FLAG)))
         if self.session.can("manage"):
             self.console_on = tk.BooleanVar(value=console.console_enabled())
-            ttk.Checkbutton(cbar, text="命令控制台", variable=self.console_on,
+            ttk.Checkbutton(pbar, text="☐ 命令控制台总开关",
+                            variable=self.console_on,
                             command=self._toggle_console).pack(side="left")
             self.console_admin = tk.BooleanVar(value=console.console_admin_allowed())
             self.admin_chk = ttk.Checkbutton(
-                cbar, text="允许管理员使用 AI 辅助判断（仅 ollama）",
+                pbar, text="☐ 授权管理员 ollama",
                 variable=self.console_admin, command=self._toggle_console_admin)
-            self.admin_chk.pack(side="left", padx=6)
+            self.admin_chk.pack(side="left", padx=12)
             self.ai_chat_on = tk.BooleanVar(value=console.ai_chat_allowed())
             self.ai_chat_chk = ttk.Checkbutton(
-                cbar, text="允许非所有者使用 AI 对话（需总开关开启）",
+                pbar, text="☐ 允许非所有者 AI 对话",
                 variable=self.ai_chat_on, command=self._toggle_ai_chat)
-            self.ai_chat_chk.pack(side="left", padx=6)
-        self.console_btn = ttk.Button(cbar, text="⌨ 命令控制台", command=self._open_console)
-        self.console_hint = ttk.Label(cbar, text="", foreground="#666")
+            self.ai_chat_chk.pack(side="left", padx=12)
+            ttk.Checkbutton(pbar, text="☐ 隐藏命令行窗口（下次启动生效）",
+                            variable=self.hide_cmd,
+                            command=self._toggle_hide_cmd).pack(side="left", padx=12)
+        self.console_btn = ttk.Button(pbar, text="🖥 打开命令控制台",
+                                      command=self._open_console)
+        self.console_hint = ttk.Label(pbar, text="", foreground="#666")
         self.console_hint.pack(side="left", padx=8)
         self._refresh_console_ui()
 
@@ -1123,6 +1218,7 @@ class TerminalApp(object):
     def refresh_all(self):
         self.refresh_alerts()
         self.refresh_reviews()
+        self.refresh_monitor()
         self.refresh_ops()
 
     def refresh_alerts(self):
@@ -1145,8 +1241,10 @@ class TerminalApp(object):
             cid = a.candidate_id or "—"
             if self.session.masked() and a.candidate_id:
                 cid = models._mask_id(a.candidate_id)
+            code_text = config.ALERT_CODE_TEXT.get(a.code, a.code)
             self.tree.insert("", "end", iid=a.alert_id, tags=(tag,),
-                             values=(a.alert_id, a.level_name(), a.created_at, a.code,
+                             values=(a.alert_id, a.level_name(), a.created_at,
+                                     "%s（%s）" % (a.code, code_text),
                                      a.room_id or "—", a.seat_no or "—", cid,
                                      self._st_text(a.status),
                                      config.REVIEW_CONCLUSIONS.get(a.review_conclusion, "—")))
@@ -1195,7 +1293,16 @@ class TerminalApp(object):
         a = self._selected()
         if a is None:
             return
-        ok, msg = self.hub.ack(a.alert_id, self.session.username)
+        if not messagebox.askyesno("确认告警",
+                                   "确定要确认告警 %s 吗？\n确认后才可复核。" % a.alert_id):
+            return
+        reason = ""
+        if a.level == config.LEVEL_RED:
+            reason = self._ask_text("红色预警确认", "红色预警必须填写确认理由：")
+            if reason is None or not reason.strip():
+                messagebox.showwarning("已取消", "红色预警确认必须填写理由。")
+                return
+        ok, msg = self.hub.ack(a.alert_id, self.session.username, reason=reason)
         self.status.config(text=msg)
         self.refresh_alerts()
 
@@ -1239,14 +1346,26 @@ class TerminalApp(object):
         self.refresh_ops()
 
     def refresh_reviews(self):
+        # 同步复核页告警 ID 下拉框（显示所有待复核/未复核的告警）
+        try:
+            alerts = self.store.list_alerts(limit=500)
+            ids = [a.alert_id for a in alerts if a.status != models.ST_REVIEWED]
+            self.rv_alert_box.config(values=ids)
+        except Exception:
+            pass
+
         self.rv_list.delete("1.0", "end")
         for r in self.reviewer.review_rows(limit=60):
             line = "%s  %s  %s  %s  理由：%s\n" % (
-                r["created_at"], r["alert_id"], r["operator"],
+                r["created_at"], r["review_id"], r["operator"],
                 config.REVIEW_CONCLUSIONS.get(r["conclusion"], r["conclusion"]),
                 (r["reason"] or "")[:60])
-            self.rv_list.insert("end", line,
-                                "fp" if r.get("closed_loop") else "")
+            tag = r["review_id"]
+            tags = [tag]
+            if r.get("closed_loop"):
+                tags.append("fp")
+            self.rv_list.insert("end", line, tuple(tags))
+            self.rv_list.tag_config(tag, foreground="#000")
 
     def _pick_attach(self):
         p = filedialog.askopenfilename(title="选择复核附件")
@@ -1276,6 +1395,92 @@ class TerminalApp(object):
                         % (r["code"], r["total"], r["false_positive"], r["fp_rate"] * 100)
                         for r in rows)
         messagebox.showinfo("误报统计（算法迭代闭环）", txt)
+
+    def _rv_sync_alert(self):
+        """手动同步复核页告警下拉框（选中告警页那行时也可用它）"""
+        self.refresh_reviews()
+        self.status.config(text="复核页告警列表已刷新")
+
+    def _rv_alert_changed(self, _event=None):
+        """告警 ID 下拉框变化时，自动带出考生编号"""
+        aid = self.rv_alert.get().strip()
+        if not aid:
+            self.rv_cand.set("")
+            return
+        a = self.store.get_alert(aid)
+        if a is None:
+            self.rv_cand.set("")
+            return
+        self.rv_cand.set(a.candidate_id or "（未关联考生）")
+
+    def _rv_edit_selected(self):
+        """双击复核记录：修改复核结论/理由/见证人/附件，必须填写修改理由"""
+        try:
+            idx = self.rv_list.index("insert")
+            line = self.rv_list.index("%s linestart" % idx)
+            tags = self.rv_list.tag_names(line)
+            review_id = None
+            for t in tags:
+                if t.startswith("RV"):
+                    review_id = t
+                    break
+        except Exception:
+            review_id = None
+        if not review_id:
+            messagebox.showinfo("提示", "请先在复核记录列表中双击一条记录")
+            return
+        rec = self.store.get_review(review_id)
+        if rec is None:
+            messagebox.showerror("错误", "复核记录不存在")
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("修改复核记录")
+        dlg.geometry("460x380")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        f = ttk.Frame(dlg, padding=14)
+        f.pack(fill="both", expand=True)
+
+        ttk.Label(f, text="复核结论：").grid(row=0, column=0, sticky="e", pady=4)
+        conc_v = tk.StringVar(value=rec.conclusion)
+        ttk.Combobox(f, textvariable=conc_v, state="readonly", width=20,
+                     values=list(config.REVIEW_CONCLUSIONS.keys())).grid(row=0, column=1, sticky="w")
+        ttk.Label(f, text="见证人：").grid(row=1, column=0, sticky="e", pady=4)
+        wit_v = tk.StringVar(value=rec.witness or "")
+        ttk.Entry(f, textvariable=wit_v, width=28).grid(row=1, column=1, sticky="w")
+        ttk.Label(f, text="附件路径（可选）：").grid(row=2, column=0, sticky="e", pady=4)
+        att_v = tk.StringVar()
+        ttk.Entry(f, textvariable=att_v, width=28).grid(row=2, column=1, sticky="w")
+        ttk.Button(f, text="选择…",
+                   command=lambda: att_v.set(filedialog.askopenfilename(title="选择复核附件") or "")).grid(row=2, column=2)
+        ttk.Label(f, text="复核理由：").grid(row=3, column=0, sticky="ne", pady=4)
+        reason_tx = tk.Text(f, height=4, width=36, wrap="word")
+        reason_tx.grid(row=3, column=1, columnspan=2, sticky="w")
+        reason_tx.insert("1.0", rec.reason or "")
+        ttk.Label(f, text="修改理由（必填）：").grid(row=4, column=0, sticky="ne", pady=4)
+        edit_tx = tk.Text(f, height=3, width=36, wrap="word")
+        edit_tx.grid(row=4, column=1, columnspan=2, sticky="w")
+        em = ttk.Label(f, text="", foreground="#c00")
+        em.grid(row=5, column=0, columnspan=3)
+
+        def save():
+            att = [att_v.get().strip()] if att_v.get().strip() else []
+            ok, m = self.reviewer.edit_review(
+                review_id, conc_v.get(), reason_tx.get("1.0", "end").strip(),
+                self.session, witness=wit_v.get().strip(), attachments=att,
+                edit_reason=edit_tx.get("1.0", "end").strip())
+            if not ok:
+                em.config(text=m)
+                return
+            dlg.destroy()
+            self.status.config(text="复核记录已修改：%s" % review_id)
+            self.refresh_all()
+
+        bbar = ttk.Frame(f)
+        bbar.grid(row=6, column=0, columnspan=3, pady=10)
+        ttk.Button(bbar, text="保存", command=save).pack(side="left", padx=6)
+        ttk.Button(bbar, text="取消", command=dlg.destroy).pack(side="left", padx=6)
 
     def _pick_image(self):
         p = filedialog.askopenfilename(title="选择核验图片",

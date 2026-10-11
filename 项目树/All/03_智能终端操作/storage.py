@@ -121,6 +121,14 @@ class Store(object):
                              (int(limit),)).fetchall()
         return [dict(r) for r in rows]
 
+    def get_review(self, review_id):
+        with self._lock, self._conn() as c:
+            r = c.execute("SELECT * FROM reviews WHERE review_id=?", (review_id,)).fetchone()
+        if r is None:
+            return None
+        import models
+        return models.ReviewRecord.from_row(dict(r))
+
     def false_positive_stats(self):
         """误报闭环统计：按告警码汇总，供算法迭代使用"""
         with self._lock, self._conn() as c:

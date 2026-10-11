@@ -130,3 +130,58 @@ class Reviewer(object):
 
     def review_rows(self, limit=200):
         return self.store.list_reviews(limit=limit)
+
+    def edit_review(self, review_id, conclusion, reason, session, witness=None,
+                    attachments=None, edit_reason=""):
+        """
+        修改已有复核记录：保留原记录 review_id，覆盖结论/理由/见证人/附件，
+        同时同步回告警表。需要提供修改理由并留痕。
+        """
+        session.require("review")
+        if conclusion not in config.REVIEW_CONCLUSIONS:
+            return False, "复核结论不合法：%s" % conclusion
+        if not (reason or "").strip():
+            return False, "必须填写复核理由"
+        if not (edit_reason or "").strip():
+            return False, "必须填写修改理由"
+
+        rec = self.store.get_review(review_id)
+        if rec is None:
+            return False, "复核记录不存在"
+
+        a = self.store.get_alert(rec.alert_id)
+        if a is None:
+            return False, "关联告警不存在"
+        rooms = session.room_filter()
+        if rooms is not None and (a.room_id or "") not in rooms:
+            return False, "无权处置该考场告警"
+
+        # 附件留档
+        saved = []
+        for p in (attachments or []):
+            ok, res = self.attach(p)
+            if not ok:
+                return False, "附件留档失败：%s" % res
+            saved.append(res)
+
+        rec.conclusion = conclusion
+        rec.reason = reason
+        rec.operator = session.username
+        if witness is not None:
+            rec.witness = witness
+        rec.attachments = saved or rec.attachments
+        self.store.save_review(rec)
+
+        a.review_conclusion = conclusion
+        a.review_reason = reason
+        a.review_by = session.username
+        a.attachments = rec.attachments
+        a.false_positive = 1 if conclusion == config.REVIEW_FALSE_POSITIVE else 0
+        self.store.save_alert(a)
+
+        self.store.log("复核修改",
+                       "%s 结论=%s 修改理由=%s 修改人=%s 附件=%d"
+                       % (a.code, config.REVIEW_CONCLUSIONS[conclusion],
+                          edit_reason[:40], session.username, len(rec.attachments)),
+                       session.username)
+        return True, rec.review_id
