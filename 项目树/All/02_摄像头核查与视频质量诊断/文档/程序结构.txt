@@ -1,0 +1,79 @@
+摄像头核查与视频质量诊断 · 程序结构
+============================================================
+对应《摄像头核查与视频质量诊断.md》。本目录是核查软件实现。
+
+【入口】
+  启动核查界面.bat  -> gui.py（先登录，再进 4 页签：台账/巡检/工单/报告）
+  启动核查网页版.bat -> 网页核查面板\server\app.py（端口 5010）
+  停止核查网页版.bat / 切换命令行窗口.bat（隐藏/显示黑窗口）
+  运行自检与测试.bat -> 单元测试(97) + 端到端自检(108)
+  main.py           -> 自检；默认临时数据目录，--real 用真实目录
+
+【模块】
+  config.py    路径、缺陷目录(DEFECTS)、质量阈值(QUALITY)、基准阈值(BASELINE)、
+               冻结帧(FROZEN)、录像(RECORDING)、音频(AUDIO)、三级巡检(PATROLS)、
+               关键指标(KPI)、巡考联动降权(CREDIBILITY)、
+               隐藏命令行窗口标记(HIDE_CMD_FLAG)、ensure_stdio(pythonw 无 stdout 兜底)
+  web_accounts.py 【账户与权限，桌面端与网页端共用这一份】
+               口令 PBKDF2-HMAC-SHA256(120000轮, pbkdf2$salt$dk) 存 kv 键 web.accounts；
+               权限矩阵 CAN（owner/admin 逐项）+ can() + Session.can()；
+               账户增删改（越级防护）：不能建同级/更高、不能删 owner、
+               不能删自己、至少留一个；隐藏 cmd 标记读写 set_hidden_cmd()
+  models.py    Device(台账校验)/Defect/CheckResult/WorkOrder + canonical/chain_hash
+  storage.py   SQLite：devices/checks/workorders/baselines/audit(哈希链)/kv
+               提供 online_rate / defect_stats / workorder_summary / verify_chain
+  diagnose.py  【核心】无参考质量评价 + 基准图比对 + 多算法融合
+               sharpness/exposure/contrast/color_cast/stripe_ratio/noise_level/
+               blockiness(原生分辨率,行列同相位)/local_uniform_ratio/edge_density/
+               frame_delta/translation_offset(相位相关)/texture_loss_ratio
+               Diagnoser.diagnose() -> (defects, metrics)，_fuse() 做抑制
+  probe.py     心跳判定、带超时的取流探测、录像段连续性、时间偏差、音频电平
+  baseline.py  基准图采集/回读/现场抓帧/抓帧留档（set_baseline_at 只更新该列，
+               避免整行覆盖把 last_heartbeat 抹掉 —— 曾导致"刚心跳过却判离线"）
+  patrol.py    三级巡检 run()、单机位 check_device()、排期判定(daily_due/
+               preexam_window/before_session_window)、KPI、可信度降权
+  workorder.py 工单闭环 open->dispatched->rectified->closed，
+               复核不通过打回；整改必须附整改后截图
+  report.py    逐机位/逐考场报告、KPI 报告、验收证据清单、导出
+  gui.py       tkinter 界面：登录页直接建在主窗口内，登录后原地切主界面；
+               受控操作先 Session.can() 判权限（_guard/_need），越权明确提示；
+               所有者专属：删除机位、终端账户管理、审计链、隐藏 cmd 开关
+  main.py      端到端自检（合成缺陷图 + 合成台账/录像/时间/音频 + 账户权限）
+
+【数据流】
+  取流 ---> diagnose.diagnose(帧, 基准图, 基准指标)
+              |-- 无参考质量：模糊/曝光/对比/偏色/条纹/噪声/块效应
+              |-- 基准比对：纹理丢失率->遮挡；相位相关->视角偏移；覆盖率->盲区
+              |-- _fuse() 多算法融合抑制
+              v
+        Defect[] + metrics --> CheckResult --> SQLite(checks) + 审计链
+                                     |
+                                     +--> 异常自动建工单 --> 派单/整改/复核
+                                     +--> 缺陷统计 / KPI / 报告
+  心跳/录像/时间/音频 --> probe.* --> 同样进 Defect[]
+  巡考联动：credibility_factor(机位) -> 告警分数 ×0.5/0.8/1.0
+
+【三级巡检】
+  daily   每 30 分钟   全部考点   -> 在线率、质量异常清单
+  preexam 考前 7 天    全部考场   -> 逐考场报告、整改工单
+  before  开考前 30 分 本场机位   -> 自检确认、异常即时报修
+
+【关键指标（不可造假：无样本一律"未达标/样本不足"）】
+  在线率≥99% / 发现时延≤300s / 覆盖完整性100% / 考前完成率100% / 时钟偏差≤1s
+
+【账户与权限（桌面端与网页端共用同一份）】
+  存储：SQLite kv 表，键 web.accounts（口令只存 pbkdf2$salt$dk，不回显明文）
+  角色：owner 所有者 / admin 管理员（web_accounts.ROLE_LEVEL: 3 / 2）
+  权限矩阵（web_accounts.CAN，唯一判定表，两端都走它）：
+    view / device_add / baseline_capture / inspect_upload / patrol_run /
+    workorder_operate / report_export / change_own_pwd           -> owner + admin
+    device_delete / account_manage / audit_view / hide_cmd_toggle -> 仅 owner
+  越权防护：can_manage(by,target) 要求等级严格大于目标（不能建同级、不能删 owner、
+            不能删自己、至少保留一个账户）；管理员重置 owner 口令会被拒
+  隐藏命令行窗口：owner 勾选框 / 切换命令行窗口.bat -> 写删 data\hide_cmd.on，
+            .bat 启动器检测到标记就改用 pythonw.exe（零黑窗口）
+
+【范围外（需现场/采购）】
+  真实摄像头与录像平台适配、NTP 授时源、音频采集、
+  几何级盲区建模、装摄像头与调角度
+============================================================

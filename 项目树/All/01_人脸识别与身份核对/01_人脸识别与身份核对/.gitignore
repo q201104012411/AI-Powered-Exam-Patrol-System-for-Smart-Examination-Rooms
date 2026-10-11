@@ -1,0 +1,35 @@
+# 忽略清单：这些内容不应进入版本库/提交包
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 运行期数据（含个人信息与生物特征，绝不入库）
+data/
+logs/
+
+# 历史备份（含旧版明文身份证号，绝对不能提交）
+备份/
+
+# 大文件（模型包、安装包）
+资源/
+*.zip
+*.exe
+*.onnx
+
+# 测试临时产物
+tests/_tmp/
+tests/_last_run.txt
+tests/_main_run.txt
+
+# 密钥与口令
+*.db
+*.db-wal
+*.db-shm
+*.enc
+*.key
+.jwt_secret
+初始密码.txt
+init_admin_password.txt
+
+# 数据目录指针（各机器不同，不入库）
+exam_home.txt

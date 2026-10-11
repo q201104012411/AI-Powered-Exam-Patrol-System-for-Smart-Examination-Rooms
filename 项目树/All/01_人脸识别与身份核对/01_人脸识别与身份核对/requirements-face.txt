@@ -1,0 +1,14 @@
+# 人脸核验端依赖（Python 3.11 / 3.12）
+# 安装：pip install -r requirements-face.txt
+numpy
+opencv-python
+insightface
+onnxruntime          # 有 NVIDIA 显卡可改装 onnxruntime-gpu
+pillow               # 可选：图片格式转换
+
+# 说明：
+# - 模型 buffalo_l.zip 解压后放至 %USERPROFILE%\.insightface\models\buffalo_l
+#   （insightface 会自动在该目录查找，无需改代码）
+# - 本端不依赖 flask/bcrypt/jwt，那些属于网页操作面板（见 网页操作面板/server/requirements.txt）
+# - 加密索引默认使用 Windows DPAPI（系统自带，无需额外依赖）；
+#   若需跨平台，可额外安装 cryptography（Fernet 后端）

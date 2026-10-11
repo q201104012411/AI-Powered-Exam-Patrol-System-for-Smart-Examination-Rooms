@@ -1,0 +1,78 @@
+# ============================================================
+# 根级忽略清单
+# 目的：保证仓库体积小、可快速推送，并避免提交个人信息 / 生物特征
+# ============================================================
+
+# --- 1. 超大安装包（GitHub 单文件硬限制 100MB，超过必被拒绝）---
+# 大模型本地部署/OllmaSetup.exe 约 1.5GB，是导致推送失败的元凶
+# 只忽略该 exe，保留同目录下的说明文档
+大模型本地部署/*.exe
+*.exe
+*.msi
+*.iso
+*.dmg
+
+# --- 2. 模型包与压缩包 ---
+*.zip
+*.7z
+*.rar
+*.tar
+*.gz
+*.onnx
+*.pt
+*.pth
+*.weights
+*.h5
+*.pb
+*.tflite
+
+# --- 3. 运行期数据：含考生个人信息与生物特征，绝不入库 ---
+data/
+logs/
+captures/
+attachments/
+reports/
+baselines/
+
+# --- 4. 历史备份：含旧版明文身份证号，绝对不能提交 ---
+备份/
+*_备份/
+*备份_*/
+
+# --- 5. 密钥、口令与数据库 ---
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.enc
+*.key
+*.pem
+.jwt_secret
+初始密码.txt
+init_admin_password.txt
+exam_home.txt
+
+# --- 6. Python 缓存与构建产物 ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+
+# --- 7. 日志与临时文件 ---
+*.log
+*.log.*
+*.bak
+*.tmp
+*~
+
+# --- 8. 编辑器 / 系统文件 ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store

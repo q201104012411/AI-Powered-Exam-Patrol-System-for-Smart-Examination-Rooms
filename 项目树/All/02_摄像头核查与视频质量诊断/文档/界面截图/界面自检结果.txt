@@ -1,0 +1,18 @@
+登录页已构建：登录按钮=False 用户名框=True
+错误口令提示：'登录失败：用户名或口令错误'
+截图 C:\Users\Lenovo\AppData\Local\Temp\gui_probe\shots3\01_登录页_错误口令.png  尺寸=576x499  窗口=576x499
+登录后窗口标题：摄像头核查与视频质量诊断　｜　owner（所有者）
+当前会话：owner（所有者）
+owner 可删机位=True 可管账户=True 可看审计=True 可切隐藏cmd=True
+截图 C:\Users\Lenovo\AppData\Local\Temp\gui_probe\shots3\02_主界面_所有者.png  尺寸=1196x819  窗口=1196x819
+截图 C:\Users\Lenovo\AppData\Local\Temp\gui_probe\shots3\03_终端账户管理.png  尺寸=716x479  窗口=716x479
+账户管理窗口标题：终端账户管理　｜　当前用户：owner（所有者）
+截图 C:\Users\Lenovo\AppData\Local\Temp\gui_probe\shots3\04_审计链.png  尺寸=916x599  窗口=916x599
+审计窗口标题：审计链　｜　owner（所有者）
+管理员窗口标题：摄像头核查与视频质量诊断　｜　teacher1（管理员）
+admin 可删机位=False 可管账户=False 可看审计=False 可切隐藏cmd=False
+管理员界面受限按钮：
+    👥 终端账户（仅所有者） -> state=disabled
+    🔐 审计链（仅所有者） -> state=disabled
+    🗑 删除机位（仅所有者） -> state=disabled
+截图 C:\Users\Lenovo\AppData\Local\Temp\gui_probe\shots3\05_主界面_管理员.png  尺寸=1196x819  窗口=1196x819

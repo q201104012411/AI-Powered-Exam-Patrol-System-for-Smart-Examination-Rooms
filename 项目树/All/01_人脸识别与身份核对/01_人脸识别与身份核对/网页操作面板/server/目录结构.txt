@@ -1,0 +1,23 @@
+01_人脸识别与身份核对\
+├── server\                       ← 网页后端（Flask）
+│   ├── app.py                    # 接口：登录/考生管理/用户管理/同意登记/运行状态
+│   ├── auth.py                   # JWT（无硬编码密钥）+ 每请求回查账户状态
+│   ├── db.py                     # 用户表、登录日志、随机初始口令（--reset-admin）
+│   ├── requirements.txt          # 网页端依赖
+│   ├── 启动后端.bat              # 一键启动（自动找 Python、自动补依赖）
+│   ├── 安装必要条件.bat          # 安装人脸端 + 网页端 + openpyxl
+│   ├── 默认账户说明.txt          # 初始口令说明（随机生成，改密后自动删除）
+│   ├── 初始密码.txt              # 首次运行自动生成（勿提交，已加入 .gitignore）
+│   ├── .jwt_secret               # 本机 JWT 密钥（自动生成，勿提交）
+│   └── exam.db                   # 数据库：与核验端**共用**的唯一数据源
+├── candidates_editor.html        # 前端（登录 / 考生管理 / 用户管理；身份证号仅显示掩码）
+├── 打开网页.bat                  # 打开 http://127.0.0.1:5000/
+└── Excel模板\
+    ├── candidates_template.xlsx  # 导入模板（含 consent_status 与填写说明页）
+    ├── make_template.py          # 模板生成脚本
+    └── Run.bat                   # 一键生成模板
+
+说明：
+  · 数据库路径由 config.DB_PATH 决定（默认指向 server\exam.db），核验端与网页端读写同一份，
+    不再出现"网页改了名单、核验端看不到"的双数据源问题。
+  · 身份证号在库中只存 加盐哈希 + 掩码，接口不下发明文。

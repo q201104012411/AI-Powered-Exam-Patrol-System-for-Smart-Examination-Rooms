@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>摄像头核查与视频质量诊断</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; font-family:"Microsoft YaHei","PingFang SC",sans-serif; background:#f5f7fa; color:#1f2937; font-size:14px; }
+  button { font-family:inherit; font-size:13px; padding:6px 14px; border:1px solid #2d6cdf; background:#2d6cdf;
+           color:#fff; border-radius:6px; cursor:pointer; }
+  button:hover { background:#245ab8; }
+  button.ghost { background:#fff; color:#2d6cdf; }
+  button.ghost:hover { background:#eef4ff; }
+  button.danger { background:#c0392b; border-color:#c0392b; }
+  button.success { background:#0a7d28; border-color:#0a7d28; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  input, select { font-family:inherit; font-size:13px; padding:6px 10px; border:1px solid #d0d7de;
+                  border-radius:6px; }
+  .login-wrap { min-height:100vh; display:flex; align-items:center; justify-content:center; }
+  .login-box { background:#fff; padding:34px 38px; border-radius:12px; box-shadow:0 8px 30px rgba(0,0,0,.08);
+               width:360px; }
+  .login-box h2 { margin:0 0 6px; font-size:19px; }
+  .login-box .sub { color:#6b7280; font-size:13px; margin-bottom:20px; }
+  .login-box label { display:block; font-size:13px; color:#374151; margin:10px 0 4px; }
+  .login-box input { width:100%; }
+  .login-box button { width:100%; margin-top:18px; padding:10px; }
+  .err { color:#c0392b; font-size:13px; min-height:18px; margin-top:8px; }
+  #app { display:none; }
+  .top { background:#fff; border-bottom:1px solid #e5e7eb; padding:12px 22px; display:flex;
+         align-items:center; gap:14px; }
+  .top h1 { font-size:17px; margin:0; }
+  .top .spacer { flex:1; }
+  .tag { font-size:12px; padding:2px 10px; border-radius:10px; background:#eef4ff; color:#2d6cdf; }
+  .tag.owner { background:#fff3d6; color:#a06b00; }
+  .tag.admin { background:#e6f7ea; color:#0a7d28; }
+  main { padding:18px 22px 60px; }
+  .tabs { display:flex; gap:6px; margin-bottom:16px; flex-wrap:wrap; }
+  .tabs .tab { padding:8px 18px; border-radius:8px 8px 0 0; background:#e9edf3; cursor:pointer;
+               font-size:13px; }
+  .tabs .tab.on { background:#fff; color:#2d6cdf; font-weight:bold; box-shadow:0 -2px 0 #2d6cdf inset; }
+  .panel { background:#fff; border-radius:10px; padding:18px; box-shadow:0 2px 10px rgba(0,0,0,.04); }
+  .panel h3 { margin:0 0 12px; font-size:15px; }
+  .bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:7px 9px; border-bottom:1px solid #eef1f5; }
+  th { background:#f8fafc; color:#475569; font-weight:600; position:sticky; top:0; }
+  tbody tr:hover { background:#f8fbff; }
+  tr.bad td { background:#ffecec; }
+  tr.warn td { background:#fff9e8; }
+  .scroll { max-height:460px; overflow:auto; border:1px solid #eef1f5; border-radius:8px; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:12px; margin-bottom:16px; }
+  .kpi { background:#f8fafc; border:1px solid #e8edf3; border-radius:10px; padding:12px 14px; }
+  .kpi .k { font-size:12px; color:#64748b; }
+  .kpi .v { font-size:20px; font-weight:bold; margin:6px 0 2px; }
+  .kpi .t { font-size:12px; color:#94a3b8; }
+  .kpi.ok .v { color:#0a7d28; }
+  .kpi.no .v { color:#c0392b; }
+  pre.rep { background:#f8fafc; border:1px solid #e8edf3; border-radius:8px; padding:14px;
+            max-height:520px; overflow:auto; font-family:Consolas,monospace; font-size:12px;
+            white-space:pre-wrap; }
+  .modal-bg { display:none; position:fixed; inset:0; background:rgba(15,23,42,.45); z-index:50;
+              align-items:center; justify-content:center; }
+  .modal-bg.show { display:flex; }
+  .modal { background:#fff; border-radius:12px; padding:22px 24px; width:520px; max-width:94vw;
+           max-height:88vh; overflow:auto; }
+  .modal h3 { margin:0 0 14px; font-size:16px; }
+  .modal .row { display:flex; gap:10px; align-items:center; margin:8px 0; }
+  .modal .row label { width:88px; text-align:right; color:#475569; font-size:13px; }
+  .modal .row input, .modal .row select { flex:1; }
+  .actions { display:flex; gap:8px; justify-content:flex-end; margin-top:18px; }
+  .status-bar { position:fixed; bottom:0; left:0; right:0; background:#1f2937; color:#e5e7eb;
+                padding:6px 18px; font-size:12px; display:none; justify-content:space-between; }
+  .status-bar.show { display:flex; }
+  .dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:#4ade80; margin-right:6px; }
+  .hint { color:#8a5a00; font-size:12px; }
+  .mono { font-family:Consolas,monospace; font-size:12px; }
+</style>
+</head>
+<body>
+
+<div class="login-wrap" id="loginPage">
+  <div class="login-box">
+    <h2>摄像头核查与视频质量诊断</h2>
+    <div class="sub">在线状态 · 图像质量 · 视野完整性 · 录像 · 时钟 · 音频</div>
+    <label>用户名</label>
+    <input id="loginUser" placeholder="请输入用户名" autocomplete="username">
+    <label>密码</label>
+    <input id="loginPwd" type="password" placeholder="请输入密码" autocomplete="current-password">
+    <button onclick="doLogin()">登 录</button>
+    <div class="err" id="loginErr"></div>
+    <div style="margin-top:14px;font-size:12px;color:#9ca3af;text-align:center;line-height:1.7;">
+      首次使用请联系系统所有者获取账户
+    </div>
+  </div>
+</div>
+
+<div id="app">
+  <div class="top">
+    <h1>摄像头核查与视频质量诊断</h1>
+    <span class="tag" id="curRole">—</span>
+    <span style="color:#6b7280;font-size:13px;" id="curUser"></span>
+    <span class="spacer"></span>
+    <button class="ghost" onclick="showChangePwd()">🔑 修改口令</button>
+    <button class="ghost" onclick="switchAccount()">🔄 切换账号</button>
+    <button class="ghost" onclick="doLogout()">🚪 退出</button>
+  </div>
+  <main>
+    <div class="tabs">
+      <div class="tab on" data-tab="dev" onclick="showTab('dev')">📷 设备台账</div>
+      <div class="tab" data-tab="chk" onclick="showTab('chk')">🔍 巡检核查</div>
+      <div class="tab" data-tab="wo" onclick="showTab('wo')">🛠 整改工单</div>
+      <div class="tab" data-tab="rep" onclick="showTab('rep')">📊 报告与指标</div>
+      <div class="tab" id="tabAudit" data-tab="aud" onclick="showTab('aud')" style="display:none;">🔐 审计</div>
+      <div class="tab" id="tabAcct" data-tab="acct" onclick="showTab('acct')" style="display:none;">👥 终端账户</div>
+    </div>
+
+    <!-- 设备台账 -->
+    <div class="panel" id="p-dev">
+      <h3>设备台账（编码 / 考场对应 / 安装位置 / 角度参数 / 基准图）</h3>
+      <div class="bar">
+        <button onclick="editDevice()">＋ 新增机位</button>
+        <button class="ghost" onclick="loadDevices()">🔄 刷新</button>
+        <a href="/api/templates/devices.csv" style="font-size:13px;color:#2d6cdf;">⬇ 台账模板</a>
+        <span class="hint" id="devHint"></span>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead><tr>
+            <th>设备编码</th><th>考场</th><th>考点</th><th>安装位置</th><th>分辨率</th>
+            <th>视场角</th><th>取流地址</th><th>基准图</th><th>心跳</th><th>最近核查</th><th>操作</th>
+          </tr></thead>
+          <tbody id="devBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 巡检核查 -->
+    <div class="panel" id="p-chk" style="display:none;">
+      <h3>三级巡检与逐机位缺陷</h3>
+      <div class="bar">
+        <button onclick="runPatrol('daily')">▶ 日常自动巡检</button>
+        <button class="ghost" onclick="runPatrol('preexam')">考前专项核查</button>
+        <button class="ghost" onclick="runPatrol('before')">考前一小时自检</button>
+        <button class="ghost" onclick="loadChecks()">🔄 刷新</button>
+        <label style="font-size:13px;color:#475569;">
+          <input type="checkbox" id="onlyBad" onchange="loadChecks()"> 只看异常
+        </label>
+        <span class="hint" id="chkHint"></span>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>时间</th><th>机位</th><th>考场</th><th>策略</th><th>在线</th>
+            <th>缺陷</th><th></th></tr></thead>
+          <tbody id="chkBody"></tbody>
+        </table>
+      </div>
+      <h3 style="margin-top:18px;">实测指标</h3>
+      <pre class="rep mono" id="chkDetail">在上表选一行查看该次核查的全部实测指标</pre>
+    </div>
+
+    <!-- 整改工单 -->
+    <div class="panel" id="p-wo" style="display:none;">
+      <h3>整改闭环：发现 → 派单 → 整改 → 复核</h3>
+      <div class="bar">
+        <button class="ghost" onclick="loadOrders()">🔄 刷新</button>
+        <span class="hint" id="woHint"></span>
+      </div>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>工单号</th><th>机位</th><th>考场</th><th>缺陷</th><th>级别</th>
+            <th>状态</th><th>责任人</th><th>整改前</th><th>整改后</th><th>操作</th></tr></thead>
+          <tbody id="woBody"></tbody>
+        </table>
+      </div>
+      <p style="color:#64748b;font-size:12px;margin-top:10px;">
+        说明：整改**必须上传整改后截图**才能提交；复核不通过会打回继续整改（不是点一下就闭环）。
+      </p>
+    </div>
+
+    <!-- 报告与指标 -->
+    <div class="panel" id="p-rep" style="display:none;">
+      <h3>关键指标</h3>
+      <div class="kpis" id="kpiBox"></div>
+      <h3>核查报告</h3>
+      <div class="bar">
+        <button class="ghost" onclick="loadReport()">🔄 生成报告</button>
+        <button onclick="exportReport()">💾 导出到服务器</button>
+        <button class="ghost" onclick="downloadReport()">⬇ 下载报告</button>
+      </div>
+      <pre class="rep" id="repBox">点「生成报告」查看完整核查报告</pre>
+    </div>
+
+    <!-- 审计 -->
+    <div class="panel" id="p-aud" style="display:none;">
+      <h3>审计链（哈希链，仅所有者）</h3>
+      <div class="bar"><button class="ghost" onclick="loadAudit()">🔄 校验并刷新</button>
+        <span id="audMsg" style="font-size:13px;"></span></div>
+      <div class="scroll"><table>
+        <thead><tr><th>#</th><th>时间</th><th>动作</th><th>详情</th><th>操作人</th></tr></thead>
+        <tbody id="audBody"></tbody></table></div>
+    </div>
+
+    <!-- 终端账户（仅所有者；与桌面界面 gui.py 共用同一份 web.accounts） -->
+    <div class="panel" id="p-acct" style="display:none;">
+      <h3>终端账户管理（仅所有者）</h3>
+      <p style="color:#64748b;font-size:12px;">
+        账户与桌面界面（<b>启动核查界面.bat</b>）共用同一份：存在本机库的 kv 键 <b>web.accounts</b>，
+        口令只存 PBKDF2 加盐哈希、不回显。规则：不能新建与自己同级或更高的账户；不能删除所有者；
+        不能删除自己；至少保留一个可用账户。
+      </p>
+      <div class="bar">
+        <button onclick="showNewAccount()">＋ 新建账户</button>
+        <button class="ghost" onclick="loadAccounts()">🔄 刷新</button>
+        <label style="font-size:13px;color:#475569;margin-left:12px;">
+          <input type="checkbox" id="hideCmdBox" onchange="setHiddenCmd(this.checked)">
+          隐藏命令行窗口（下次启动生效）
+        </label>
+        <span class="hint" id="acctHint"></span>
+      </div>
+      <div class="scroll"><table>
+        <thead><tr><th>用户名</th><th>角色</th><th>名称</th><th>备注</th><th>操作</th></tr></thead>
+        <tbody id="acctBody"></tbody></table></div>
+    </div>
+  </main>
+</div>
+
+<div class="modal-bg" id="modalBg">
+  <div class="modal" id="modal"></div>
+</div>
+<div class="status-bar" id="statusBar">
+  <span><span class="dot"></span><span id="statusText">就绪</span></span>
+  <span id="statusTime"></span>
+</div>
+
+<script>
+const API = "";
+let token = localStorage.getItem("cam_token") || "";
+let currentUser = null;
+let DEVICES = [], CHECKS = [], ORDERS = [];
+
+function setStatus(t) {
+  document.getElementById("statusText").textContent = t;
+  document.getElementById("statusBar").classList.add("show");
+}
+
+async function api(path, opts = {}) {
+  opts.headers = Object.assign({}, opts.headers || {});
+  if (token) opts.headers["Authorization"] = "Bearer " + token;
+  if (opts.body && !(opts.body instanceof FormData)) {
+    opts.headers["Content-Type"] = "application/json";
+    if (typeof opts.body !== "string") opts.body = JSON.stringify(opts.body);
+  }
+  const res = await fetch(API + path, opts);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+  return data;
+}
+
+// ---------------- 登录 ----------------
+async function doLogin() {
+  const u = document.getElementById("loginUser").value.trim();
+  const p = document.getElementById("loginPwd").value;
+  document.getElementById("loginErr").textContent = "";
+  try {
+    const d = await api("/api/login", { method: "POST", body: { username: u, password: p } });
+    token = d.token;
+    localStorage.setItem("cam_token", token);
+    currentUser = d.user;
+    enterApp();
+  } catch (e) {
+    document.getElementById("loginErr").textContent = e.message;
+  }
+}
+
+function doLogout() {
+  if (!confirm("确定退出登录？")) return;
+  logoutLocal();
+}
+
+function switchAccount() {
+  if (!confirm("确定切换账号？将返回登录页。")) return;
+  logoutLocal();
+  setTimeout(() => {
+    const u = document.getElementById("loginUser");
+    if (u) { u.value = ""; u.focus(); }
+    const p = document.getElementById("loginPwd");
+    if (p) p.value = "";
+  }, 50);
+}
+
+function logoutLocal() {
+  token = "";
+  currentUser = null;
+  localStorage.removeItem("cam_token");
+  document.getElementById("app").style.display = "none";
+  document.getElementById("loginPage").style.display = "flex";
+}
+
+function enterApp() {
+  document.getElementById("loginPage").style.display = "none";
+  document.getElementById("app").style.display = "block";
+  document.getElementById("curUser").textContent =
+    currentUser.name + "（" + currentUser.username + "）";
+  const r = document.getElementById("curRole");
+  r.textContent = currentUser.role_text;
+  r.className = "tag " + currentUser.role;
+  // 所有者专属页签（后端接口同样会再拦一次，这里只是别让按钮白点）
+  const canManage = !!currentUser.can_manage_accounts;
+  document.getElementById("tabAudit").style.display = canManage ? "" : "none";
+  document.getElementById("tabAcct").style.display = canManage ? "" : "none";
+  setStatus("已登录：" + currentUser.role_text);
+  loadDevices();
+}
+
+// ---------------- 页签 ----------------
+function showTab(name) {
+  ["dev", "chk", "wo", "rep", "aud", "acct"].forEach(t => {
+    document.getElementById("p-" + t).style.display = (t === name) ? "" : "none";
+  });
+  document.querySelectorAll(".tab").forEach(el => {
+    el.classList.toggle("on", el.dataset.tab === name);
+  });
+  if (name === "dev") loadDevices();
+  if (name === "chk") loadChecks();
+  if (name === "wo") loadOrders();
+  if (name === "rep") { loadKpi(); }
+  if (name === "aud") loadAudit();
+  if (name === "acct") loadAccounts();
+}
+
+// ---------------- 设备台账 ----------------
+async function loadDevices() {
+  try {
+    const d = await api("/api/devices");
+    DEVICES = d.devices;
+    const tb = document.getElementById("devBody");
+    tb.innerHTML = DEVICES.map(x => `
+      <tr class="${x.ledger_problems.length ? "warn" : ""}">
+        <td><b>${x.code}</b></td>
+        <td>${x.room_id || "—"}</td>
+        <td>${x.site || "—"}</td>
+        <td>${x.position || "—"}</td>
+        <td>${x.resolution}</td>
+        <td>${x.fov_deg}°</td>
+        <td class="mono">${x.url || "—"}</td>
+        <td>${x.has_baseline ? "✅ " + x.baseline_at : "⚠ <b>缺</b>"}</td>
+        <td>${x.heartbeat_ok ? "✅ " + x.heartbeat : "❌ " + x.heartbeat}</td>
+        <td>${x.last_check ? (x.last_check.ok ? "正常" : "异常：" +
+              x.last_check.defects.map(y => y.name).join("、")) : "未核查"}</td>
+        <td style="white-space:nowrap;">
+          <button class="ghost" onclick="uploadBaseline('${x.device_id}')">采基准图</button>
+          <button class="ghost" onclick="inspectDevice('${x.device_id}')">现场抽查</button>
+          <button class="ghost" onclick="editDevice('${x.device_id}')">编辑</button>
+          ${currentUser.can_manage_accounts ?
+            `<button class="danger" onclick="delDevice('${x.device_id}','${x.code}')">删</button>` :
+            `<button class="danger" disabled title="权限不足：删除机位仅所有者可用">删</button>`}
+        </td>
+      </tr>`).join("") ||
+      `<tr><td colspan="11" style="color:#94a3b8;">尚无登记机位，点「＋ 新增机位」开始</td></tr>`;
+    const noBase = DEVICES.filter(x => !x.has_baseline).length;
+    document.getElementById("devHint").textContent =
+      `共 ${DEVICES.length} 台，其中 ${noBase} 台尚未采集基准图（缺基准则无法做遮挡/视角偏移核查）`;
+  } catch (e) { setStatus("加载机位失败：" + e.message); }
+}
+
+function editDevice(id) {
+  const d = id ? DEVICES.find(x => x.device_id === id) : {};
+  document.getElementById("modal").innerHTML = `
+    <h3>${id ? "编辑机位" : "新增机位"}</h3>
+    <div class="row"><label>设备编码*</label><input id="f_code" value="${d.code || ""}"></div>
+    <div class="row"><label>设备名称</label><input id="f_name" value="${d.name || ""}"></div>
+    <div class="row"><label>考场*</label><input id="f_room" value="${d.room_id || ""}"></div>
+    <div class="row"><label>考点</label><input id="f_site" value="${d.site || ""}"></div>
+    <div class="row"><label>安装位置*</label><input id="f_pos" value="${d.position || ""}"></div>
+    <div class="row"><label>取流地址</label><input id="f_url" value="${d.url || ""}"
+        placeholder="rtsp://... 或 0（本机摄像头）"></div>
+    <div class="row"><label>分辨率</label><input id="f_res" value="${d.resolution || "1920x1080"}"></div>
+    <div class="row"><label>视场角(度)*</label><input id="f_fov" value="${d.fov_deg || 90}"></div>
+    <div class="row"><label>水平角(度)</label><input id="f_pan" value="${d.pan_deg || 0}"></div>
+    <div class="row"><label>俯仰角(度)</label><input id="f_tilt" value="${d.tilt_deg || 0}"></div>
+    <div class="row"><label>场次</label><input id="f_sess" value="${d.session || ""}"></div>
+    <div class="row"><label>拾音器</label>
+      <input type="checkbox" id="f_audio" ${d.has_audio ? "checked" : ""} style="flex:0;"></div>
+    <div class="actions">
+      <button class="ghost" onclick="closeModal()">取消</button>
+      <button onclick="saveDevice('${d.device_id || ""}')">保存</button>
+    </div>`;
+  document.getElementById("modalBg").classList.add("show");
+}
+
+async function saveDevice(id) {
+  const body = {
+    code: document.getElementById("f_code").value.trim(),
+    name: document.getElementById("f_name").value.trim(),
+    room_id: document.getElementById("f_room").value.trim(),
+    site: document.getElementById("f_site").value.trim(),
+    position: document.getElementById("f_pos").value.trim(),
+    url: document.getElementById("f_url").value.trim(),
+    resolution: document.getElementById("f_res").value.trim(),
+    fov_deg: document.getElementById("f_fov").value,
+    pan_deg: document.getElementById("f_pan").value,
+    tilt_deg: document.getElementById("f_tilt").value,
+    session: document.getElementById("f_sess").value.trim(),
+    has_audio: document.getElementById("f_audio").checked
+  };
+  if (!body.code) { alert("设备编码必填"); return; }
+  try {
+    const r = await api("/api/devices", { method: "POST", body });
+    closeModal(); setStatus(r.message); loadDevices();
+  } catch (e) { alert("保存失败：" + e.message); }
+}
+
+async function delDevice(id, code) {
+  if (!confirm(`确定删除机位 ${code}？`)) return;
+  try {
+    const r = await api("/api/devices/" + id, { method: "DELETE" });
+    setStatus(r.message); loadDevices();
+  } catch (e) { alert("删除失败：" + e.message); }
+}
+
+function uploadBaseline(id) {
+  const inp = document.createElement("input");
+  inp.type = "file"; inp.accept = "image/*";
+  inp.onchange = async () => {
+    const f = inp.files[0];
+    if (!f) return;
+    if (!confirm(`用「${f.name}」作为该机位的基准图？\n基准图用于后续遮挡与视角偏移比对，请用部署完成后的现场画面。`)) return;
+    const fd = new FormData(); fd.append("file", f);
+    setStatus("正在上传并采集基准图…");
+    try {
+      const r = await api(`/api/devices/${id}/baseline`, { method: "POST", body: fd });
+      alert(r.message); setStatus(r.message); loadDevices();
+    } catch (e) { alert("采集失败：" + e.message); }
+  };
+  inp.click();
+}
+
+// 现场画面抽查（上传一张现场画面做诊断；无摄像头时可用）
+function inspectDevice(id) {
+  const inp = document.createElement("input");
+  inp.type = "file"; inp.accept = "image/*";
+  inp.onchange = async () => {
+    const f = inp.files[0];
+    if (!f) return;
+    const fd = new FormData(); fd.append("file", f);
+    setStatus("正在诊断上传的现场画面…");
+    try {
+      const r = await api(`/api/devices/${id}/inspect`, { method: "POST", body: fd });
+      let msg = r.message + "\n\n";
+      msg += "基准图：" + (r.baseline_used ? "已比对" : "未比对（" + r.baseline_note + "）") + "\n";
+      msg += "说明：本次只做图像质量与视野完整性；在线状态/录像/时钟/音频需要实时链路与录像平台数据，单张上传图给不出结论。\n\n";
+      if (r.defects.length) {
+        msg += "缺陷：\n" + r.defects.map(d => `· ${d.name}（${d.severity}）：${d.detail}`).join("\n");
+      } else { msg += "未发现缺陷。"; }
+      alert(msg);
+      setStatus(r.message);
+      loadDevices();
+    } catch (e) { alert("抽查失败：" + e.message); }
+  };
+  inp.click();
+}
+
+// ---------------- 巡检 ----------------
+async function runPatrol(policy) {
+  const names = { daily: "日常自动巡检", preexam: "考前专项核查", before: "考前一小时自检" };
+  if (!confirm(`确定执行「${names[policy]}」？\n将对已登记机位逐台核查，异常会自动生成整改工单。`)) return;
+  setStatus("正在执行" + names[policy] + "…");
+  try {
+    const r = await api("/api/patrol", { method: "POST", body: { policy } });
+    setStatus(r.message);
+    document.getElementById("chkHint").textContent = r.message +
+      (r.orders && r.orders.length ? `　已建工单 ${r.orders.length} 张` : "");
+    showTab("chk"); loadChecks();
+  } catch (e) { alert("巡检失败：" + e.message); setStatus("巡检失败"); }
+}
+
+async function loadChecks() {
+  const only = document.getElementById("onlyBad").checked ? "1" : "0";
+  try {
+    const d = await api("/api/checks?only_bad=" + only);
+    CHECKS = d.checks;
+    const tb = document.getElementById("chkBody");
+    tb.innerHTML = CHECKS.map(c => {
+      const sev = c.defects.some(x => x.severity === "fail") ? "bad" :
+                  (c.defects.length ? "warn" : "");
+      return `<tr class="${sev}">
+        <td>${c.ts}</td><td><b>${c.device_code}</b></td><td>${c.room_id || "—"}</td>
+        <td>${c.policy_text}</td><td>${c.online ? "是" : "❌ 否"}</td>
+        <td>${c.defects.length ? c.defects.map(x =>
+             `${x.name}<span style="color:#94a3b8;">(${x.severity})</span>`).join("、") : "正常"}</td>
+        <td><button class="ghost" onclick="showCheck('${c.check_id}')">指标</button></td>
+      </tr>`;
+    }).join("") || `<tr><td colspan="7" style="color:#94a3b8;">暂无核查记录，点上方按钮跑一轮巡检</td></tr>`;
+  } catch (e) { setStatus("加载核查记录失败：" + e.message); }
+}
+
+function showCheck(id) {
+  const c = CHECKS.find(x => x.check_id === id);
+  if (!c) return;
+  const keys = ["sharpness","mean_luma","contrast","color_cast","stripe_ratio","noise",
+                "blockiness","uniform_ratio","edge_density","texture_loss","shift_px",
+                "angle_deg","time_drift_sec","frame_delta","baseline_missing_reason"];
+  const lines = [`${c.ts}　${c.device_code}　${c.policy_text}　${c.ok ? "正常" : "异常"}`];
+  c.defects.forEach(d => lines.push(`· ${d.name}（${d.severity}）：${d.detail}`));
+  lines.push("");
+  lines.push("实测指标：");
+  keys.forEach(k => {
+    if (c.metrics[k] !== undefined && c.metrics[k] !== null) {
+      lines.push(`  ${k} = ${typeof c.metrics[k] === "number"
+        ? Math.round(c.metrics[k] * 10000) / 10000 : c.metrics[k]}`);
+    }
+  });
+  if (c.metrics.recording) lines.push("  录像：" + c.metrics.recording.reason);
+  if (c.metrics.heartbeat) lines.push("  心跳：" + c.metrics.heartbeat);
+  if (c.metrics.audio) lines.push("  音频：" + c.metrics.audio.reason);
+  document.getElementById("chkDetail").textContent = lines.join("\n");
+}
+
+// ---------------- 工单 ----------------
+async function loadOrders() {
+  try {
+    const d = await api("/api/orders");
+    ORDERS = d.orders;
+    const st = d.stats;
+    document.getElementById("woHint").textContent =
+      `共 ${st.total} 单，已闭环 ${st.closed}，未闭环 ${st.pending}` +
+      (st.oldest_pending ? `　最久未闭环：${st.oldest_pending.device}（${st.oldest_pending.status}）` : "");
+    document.getElementById("woBody").innerHTML = ORDERS.map(o => `
+      <tr class="${o.severity === "fail" ? "bad" : "warn"}">
+        <td class="mono">${o.order_id}</td>
+        <td><b>${o.device_code}</b></td>
+        <td>${o.room_id || "—"}</td>
+        <td>${o.code_names.join("、")}</td>
+        <td>${o.severity}</td>
+        <td><b>${o.status_text}</b></td>
+        <td>${o.assigned_to || "—"}</td>
+        <td class="mono">${o.before_path || "—"}</td>
+        <td class="mono">${o.after_path || "—"}</td>
+        <td style="white-space:nowrap;">
+          ${o.status === "open" ? `<button class="ghost" onclick="dispatchOrder('${o.order_id}')">派单</button>` : ""}
+          ${(o.status === "dispatched" || o.status === "open")
+            ? `<button class="ghost" onclick="rectifyOrder('${o.order_id}')">提交整改</button>` : ""}
+          ${o.status === "rectified"
+            ? `<button class="success" onclick="reviewOrder('${o.order_id}',true)">复核通过</button>
+               <button class="danger" onclick="reviewOrder('${o.order_id}',false)">打回</button>` : ""}
+          ${o.status === "closed" ? `<span style="color:#0a7d28;">✔ 已闭环</span>` : ""}
+        </td>
+      </tr>`).join("") ||
+      `<tr><td colspan="10" style="color:#94a3b8;">暂无工单（巡检发现异常会自动生成）</td></tr>`;
+  } catch (e) { setStatus("加载工单失败：" + e.message); }
+}
+
+async function dispatchOrder(id) {
+  const who = prompt("整改责任人：");
+  if (!who) return;
+  try {
+    const r = await api(`/api/orders/${id}/dispatch`, { method: "POST", body: { assigned_to: who } });
+    setStatus(r.message); loadOrders();
+  } catch (e) { alert("派单失败：" + e.message); }
+}
+
+function rectifyOrder(id) {
+  const inp = document.createElement("input");
+  inp.type = "file"; inp.accept = "image/*,video/mp4";
+  inp.onchange = async () => {
+    const f = inp.files[0];
+    if (!f) return;
+    const note = prompt("整改说明（可留空）：") || "";
+    const fd = new FormData(); fd.append("file", f); fd.append("note", note);
+    setStatus("正在提交整改…");
+    try {
+      const r = await api(`/api/orders/${id}/rectify`, { method: "POST", body: fd });
+      alert(r.message); setStatus(r.message); loadOrders();
+    } catch (e) { alert("提交失败：" + e.message); }
+  };
+  inp.click();
+}
+
+async function reviewOrder(id, ok) {
+  const note = prompt(ok ? "复核意见（可留空）：" : "不通过原因（必填）：") || "";
+  if (!ok && !note) { alert("打回必须填写原因"); return; }
+  try {
+    const r = await api(`/api/orders/${id}/review`, { method: "POST", body: { ok, note } });
+    alert(r.message); setStatus(r.message); loadOrders();
+  } catch (e) { alert("复核失败：" + e.message); }
+}
+
+// ---------------- 报告与指标 ----------------
+async function loadKpi() {
+  try {
+    const k = await api("/api/kpi");
+    const items = [
+      ["摄像机在线率", k["在线率"], v => v === null ? "—" : (v * 100).toFixed(2) + "%",
+       "≥ " + (k["在线率"].target * 100) + "%"],
+      ["故障自动发现时延", k["故障发现时延"],
+       v => v === null ? "无样本" : v.toFixed(1) + " 秒", "≤ " + k["故障发现时延"].target_sec + " 秒"],
+      ["覆盖完整性核查", k["覆盖完整性"], v => v === null ? "—" : (v * 100).toFixed(2) + "%",
+       "100%（已采基准 " + k["覆盖完整性"].baseline_devices + "/" + k["覆盖完整性"].devices + " 台）"],
+      ["考前核查完成率", k["考前核查完成率"], v => v === null ? "—" : (v * 100).toFixed(2) + "%",
+       "已核查 " + k["考前核查完成率"].checked + "/" + k["考前核查完成率"].devices + " 台"],
+      ["时钟一致性偏差", k["时钟一致性"],
+       v => v === null ? "无样本" : v.toFixed(3) + " 秒", "≤ " + k["时钟一致性"].target_sec + " 秒"]
+    ];
+    document.getElementById("kpiBox").innerHTML = items.map(([name, obj, fmt, tgt]) => {
+      let raw = null;
+      if (name === "摄像机在线率") raw = obj.value;
+      else if (name === "故障自动发现时延") raw = obj.max_sec;
+      else if (name === "覆盖完整性核查") raw = obj.value;
+      else if (name === "考前核查完成率") raw = obj.value;
+      else raw = obj.max_drift_sec;
+      return `<div class="kpi ${obj.pass ? "ok" : "no"}">
+        <div class="k">${name}</div>
+        <div class="v">${fmt(raw)}</div>
+        <div class="t">要求 ${tgt}　${obj.pass ? "达标" : "未达标/样本不足"}</div>
+      </div>`;
+    }).join("");
+  } catch (e) { setStatus("加载指标失败：" + e.message); }
+}
+
+async function loadReport() {
+  try {
+    const d = await api("/api/report");
+    document.getElementById("repBox").textContent = d.report;
+    setStatus("报告已生成");
+  } catch (e) { setStatus("生成报告失败：" + e.message); }
+}
+
+async function exportReport() {
+  try {
+    const r = await api("/api/report/export", { method: "POST" });
+    alert(r.message + "\n\n" + r.path);
+    setStatus(r.message);
+  } catch (e) { alert("导出失败：" + e.message); }
+}
+
+function downloadReport() {
+  const txt = document.getElementById("repBox").textContent;
+  const blob = new Blob([txt], { type: "text/markdown;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "核查报告_" + new Date().toISOString().slice(0, 19).replace(/[:T]/g, "") + ".md";
+  a.click();
+}
+
+// ---------------- 审计 / 口令 ----------------
+async function loadAudit() {
+  try {
+    const d = await api("/api/audit");
+    document.getElementById("audMsg").innerHTML = d.chain_ok
+      ? `<span style="color:#0a7d28;">✅ ${d.message}</span>`
+      : `<span style="color:#c0392b;">❌ ${d.message}</span>`;
+    document.getElementById("audBody").innerHTML = d.rows.map((r, i) => `
+      <tr><td>${r.seq}</td><td>${r.ts}</td><td>${r.action}</td>
+      <td class="mono">${(r.detail || "").slice(0, 90)}</td><td>${r.operator || "—"}</td></tr>`).join("");
+  } catch (e) { setStatus("加载审计失败：" + e.message); }
+}
+
+function showChangePwd() {
+  document.getElementById("modal").innerHTML = `
+    <h3>修改口令</h3>
+    <div class="row"><label>原口令</label><input type="password" id="cp_old"></div>
+    <div class="row"><label>新口令</label><input type="password" id="cp_new"></div>
+    <div class="row"><label>确认新口令</label><input type="password" id="cp_new2"></div>
+    <div class="actions">
+      <button class="ghost" onclick="closeModal()">取消</button>
+      <button onclick="changePwd()">确定</button></div>`;
+  document.getElementById("modalBg").classList.add("show");
+}
+
+async function changePwd() {
+  const o = document.getElementById("cp_old").value;
+  const n = document.getElementById("cp_new").value;
+  const n2 = document.getElementById("cp_new2").value;
+  if (n !== n2) { alert("两次输入的新口令不一致"); return; }
+  try {
+    const r = await api("/api/change-password", { method: "POST",
+      body: { old_password: o, new_password: n } });
+    alert(r.message); closeModal();
+  } catch (e) { alert("修改失败：" + e.message); }
+}
+
+// ---------------- 终端账户（仅所有者，与桌面端同一份 web.accounts） ----------------
+function needOwner() {
+  if (currentUser && currentUser.can_manage_accounts) return true;
+  alert("权限不足：终端账户管理仅所有者可用");
+  return false;
+}
+
+async function loadAccounts() {
+  if (!needOwner()) return;
+  try {
+    const d = await api("/api/accounts");
+    document.getElementById("acctBody").innerHTML = d.accounts.map(a => {
+      const note = [];
+      if (a.username === d.me) note.push("当前登录");
+      if (a.role === "owner") note.push("所有者不可删");
+      const canAct = (a.username !== d.me && a.role !== "owner");
+      return `<tr><td><b>${a.username}</b></td><td>${a.role_text}</td><td>${a.name}</td>
+        <td>${note.join("／") || "—"}</td>
+        <td style="white-space:nowrap;">
+          <button class="ghost" ${canAct ? "" : "disabled"}
+            onclick="showResetPwd('${a.username}')">重置口令</button>
+          <button class="danger" ${canAct ? "" : "disabled"}
+            onclick="delAccount('${a.username}')">删除</button>
+        </td></tr>`;
+    }).join("");
+    await loadHiddenCmd();
+  } catch (e) { setStatus("加载账户失败：" + e.message); }
+}
+
+function showNewAccount() {
+  if (!needOwner()) return;
+  document.getElementById("modal").innerHTML = `
+    <h3>新建账户</h3>
+    <div class="row"><label>用户名*</label><input id="na_user"></div>
+    <div class="row"><label>名称</label><input id="na_name"></div>
+    <div class="row"><label>角色*</label>
+      <select id="na_role" style="flex:1;padding:6px;">
+        <option value="admin">管理员（日常核查/工单/报告）</option>
+      </select></div>
+    <div class="row"><label>口令*</label><input type="password" id="na_pwd"></div>
+    <div class="row"><label>确认口令*</label><input type="password" id="na_pwd2"></div>
+    <p style="color:#64748b;font-size:12px;">
+      只能新建低于自己等级的账户（管理员 admin）；所有者账户不可被新建。</p>
+    <div class="actions">
+      <button class="ghost" onclick="closeModal()">取消</button>
+      <button onclick="createAccount()">确定</button></div>`;
+  document.getElementById("modalBg").classList.add("show");
+}
+
+async function createAccount() {
+  if (!needOwner()) return;
+  const u = document.getElementById("na_user").value.trim();
+  const p = document.getElementById("na_pwd").value;
+  const p2 = document.getElementById("na_pwd2").value;
+  if (!u) { alert("用户名必填"); return; }
+  if (p !== p2) { alert("两次输入的口令不一致"); return; }
+  try {
+    const r = await api("/api/accounts", { method: "POST", body: {
+      username: u, password: p, name: document.getElementById("na_name").value.trim(),
+      role: document.getElementById("na_role").value } });
+    alert(r.message); closeModal(); loadAccounts();
+  } catch (e) { alert("新建失败：" + e.message); }
+}
+
+function showResetPwd(user) {
+  if (!needOwner()) return;
+  document.getElementById("modal").innerHTML = `
+    <h3>重置口令：${user}</h3>
+    <div class="row"><label>新口令*</label><input type="password" id="rp_pwd"></div>
+    <div class="row"><label>确认口令*</label><input type="password" id="rp_pwd2"></div>
+    <div class="actions">
+      <button class="ghost" onclick="closeModal()">取消</button>
+      <button onclick="resetPwd('${user}')">确定</button></div>`;
+  document.getElementById("modalBg").classList.add("show");
+}
+
+async function resetPwd(user) {
+  if (!needOwner()) return;
+  const p = document.getElementById("rp_pwd").value;
+  const p2 = document.getElementById("rp_pwd2").value;
+  if (p !== p2) { alert("两次输入的口令不一致"); return; }
+  try {
+    const r = await api("/api/accounts/" + encodeURIComponent(user) + "/password",
+      { method: "POST", body: { new_password: p } });
+    alert(r.message); closeModal(); loadAccounts();
+  } catch (e) { alert("重置失败：" + e.message); }
+}
+
+async function delAccount(user) {
+  if (!needOwner()) return;
+  if (!confirm(`确定删除账户 ${user}？`)) return;
+  try {
+    const r = await api("/api/accounts/" + encodeURIComponent(user), { method: "DELETE" });
+    alert(r.message); loadAccounts();
+  } catch (e) { alert("删除失败：" + e.message); }
+}
+
+// 隐藏命令行窗口（写/删 data\hide_cmd.on，由 .bat 启动器读取；可能被 EXAM_CAMERA_HOME 改到别处）
+async function loadHiddenCmd() {
+  try {
+    const d = await api("/api/hidden-cmd");
+    document.getElementById("hideCmdBox").checked = !!d.hidden;
+    document.getElementById("acctHint").textContent =
+      d.message + "（标记文件：" + d.flag + "）";
+  } catch (e) { setStatus("读取隐藏 cmd 设置失败：" + e.message); }
+}
+
+async function setHiddenCmd(on) {
+  if (!needOwner()) { loadHiddenCmd(); return; }
+  try {
+    const r = await api("/api/hidden-cmd", { method: "POST", body: { hidden: on } });
+    setStatus(r.message);
+    document.getElementById("acctHint").textContent = r.message;
+  } catch (e) {
+    alert("设置失败：" + e.message);
+    loadHiddenCmd();
+  }
+}
+
+function closeModal() { document.getElementById("modalBg").classList.remove("show"); }
+
+// ---------------- 启动 ----------------
+document.addEventListener("keydown", e => {
+  if (e.key === "Enter" && document.getElementById("loginPage").style.display !== "none") doLogin();
+});
+document.getElementById("modalBg").onclick = e => {
+  if (e.target.id === "modalBg") closeModal();
+};
+(async function init() {
+  if (!token) return;
+  try {
+    currentUser = await api("/api/me");
+    enterApp();
+  } catch (e) { logoutLocal(); }
+})();
+setInterval(() => {
+  document.getElementById("statusTime").textContent = new Date().toLocaleTimeString();
+}, 1000);
+</script>
+</body>
+</html>

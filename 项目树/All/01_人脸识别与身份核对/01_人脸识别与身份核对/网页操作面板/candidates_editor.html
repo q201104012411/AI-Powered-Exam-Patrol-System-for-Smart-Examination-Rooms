@@ -1,0 +1,1204 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>考生报名库管理 · 智能考场</title>
+<!-- Excel 导入导出库：优先加载本地文件（考场内网/教育专网通常访问不了公网 CDN），
+     本地缺失时才回退 CDN。本地路径：网页操作面板\vendor\xlsx.full.min.js -->
+<script src="/vendor/xlsx.full.min.js"
+        onerror="this.onerror=null;var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';document.head.appendChild(s);"></script>
+<style>
+  :root {
+    --primary: #2d6cdf; --primary-dark: #1f56b8;
+    --success: #28a745; --danger: #d9534f; --warning: #ffc107;
+    --gray: #6c757d; --bg: #f0f2f5; --card: #fff;
+    --border: #e4e8ee; --text: #1f2937; --text-light: #6b7280;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "Microsoft YaHei", "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+
+  .login-wrap {
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, #1e293b 0%, #2d6cdf 100%);
+  }
+  .login-box {
+    background: #fff; padding: 36px 32px; border-radius: 14px;
+    width: 380px; box-shadow: 0 20px 60px rgba(0,0,0,.3);
+  }
+  .login-box h2 { font-size: 20px; margin-bottom: 6px; }
+  .login-box .sub { color: var(--text-light); font-size: 13px; margin-bottom: 24px; }
+  .login-box label { display: block; font-size: 13px; margin-bottom: 6px; color: #374151; }
+  .login-box input {
+    width: 100%; padding: 10px 12px; border: 1px solid var(--border);
+    border-radius: 6px; font-size: 14px; margin-bottom: 16px; outline: none;
+  }
+  .login-box input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(45,108,223,.1); }
+  .login-box button {
+    width: 100%; padding: 11px; background: var(--primary); color: #fff;
+    border: none; border-radius: 6px; font-size: 15px; cursor: pointer;
+  }
+  .login-box button:hover { background: var(--primary-dark); }
+  .login-box .err { color: var(--danger); font-size: 13px; margin-top: 12px; min-height: 18px; }
+
+  .app { display: none; min-height: 100vh; }
+  .app.show { display: flex; }
+
+  .sidebar { width: 220px; background: #1e293b; color: #cbd5e1; padding: 20px 0; flex-shrink: 0; }
+  .sidebar .logo {
+    padding: 0 20px 20px; font-size: 16px; font-weight: 600; color: #fff;
+    border-bottom: 1px solid #334155; margin-bottom: 12px;
+  }
+  .sidebar .logo small { display: block; font-size: 11px; color: #94a3b8; font-weight: normal; margin-top: 4px; }
+  .nav-item {
+    padding: 11px 20px; cursor: pointer; font-size: 14px;
+    border-left: 3px solid transparent; transition: .15s;
+  }
+  .nav-item:hover { background: #273549; color: #fff; }
+  .nav-item.active { background: #273549; color: #fff; border-left-color: var(--primary); }
+
+  .main { flex: 1; padding: 24px 28px; overflow-x: auto; padding-bottom: 50px; }
+  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+  .header h1 { font-size: 22px; font-weight: 600; }
+  .header .user-info { font-size: 13px; color: var(--text-light); }
+  .header .user-info b { color: var(--primary); }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 20px; }
+  .stat-card { background: var(--card); padding: 16px 18px; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+  .stat-card .label { font-size: 12px; color: var(--text-light); margin-bottom: 6px; }
+  .stat-card .value { font-size: 24px; font-weight: 600; color: var(--primary); }
+
+  .toolbar {
+    display: flex; flex-wrap: wrap; gap: 10px; background: var(--card);
+    padding: 14px 16px; border-radius: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.06);
+    margin-bottom: 16px; align-items: center;
+  }
+  .toolbar .spacer { flex: 1; }
+
+  button {
+    padding: 8px 16px; border: none; border-radius: 6px;
+    background: var(--primary); color: #fff; cursor: pointer;
+    font-size: 13px; transition: .15s;
+  }
+  button:hover { background: var(--primary-dark); }
+  button.secondary { background: var(--gray); }
+  button.secondary:hover { background: #565e64; }
+  button.success { background: var(--success); }
+  button.success:hover { background: #1e7e34; }
+  button.danger { background: var(--danger); }
+  button.danger:hover { background: #b52b27; }
+  button.ghost { background: transparent; color: var(--primary); border: 1px solid var(--border); }
+  button.ghost:hover { background: #f0f5ff; }
+
+  .search { padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; width: 220px; outline: none; }
+  .search:focus { border-color: var(--primary); }
+
+  .hint {
+    background: #fff8e1; border-left: 4px solid var(--warning);
+    padding: 10px 14px; font-size: 13px; color: #7a5c00; border-radius: 4px; margin-bottom: 16px;
+  }
+  .hint code { background: #fff3cd; padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+
+  /* 口令提示横幅：登录后若仍是初始口令，只做温和提示，不再强制拦截 */
+  .pwd-banner {
+    display: none; align-items: center; gap: 12px; background: #fff8e1;
+    border-left: 4px solid var(--warning); border-radius: 6px;
+    padding: 10px 14px; font-size: 13px; color: #7a5c00; margin-bottom: 16px;
+  }
+  .pwd-banner.show { display: flex; }
+  .pwd-banner .grow { flex: 1; }
+  .pwd-banner button { padding: 5px 12px; font-size: 12px; }
+
+  /* 当前核验模式提示条（大考模式 / 严格模式） */
+  .mode-bar {
+    font-size: 12px; color: #1f3f8f; background: #eef4ff; border-radius: 6px;
+    padding: 8px 12px; margin-bottom: 16px; line-height: 1.8;
+  }
+  .mode-bar b { color: #14296b; }
+  .mode-bar .warn { color: #b45309; font-weight: 600; }
+
+  .table-wrap { background: var(--card); border-radius: 10px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 10px 12px; text-align: left; font-size: 13px; border-bottom: 1px solid var(--border); }
+  th { background: #f8fafc; font-weight: 600; color: #374151; position: sticky; top: 0; z-index: 1; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #f8fbff; }
+  td input {
+    width: 100%; border: 1px solid transparent; background: transparent;
+    padding: 5px 7px; font-size: 13px; border-radius: 4px; outline: none;
+  }
+  td input:focus { border-color: var(--primary); background: #fff; box-shadow: 0 0 0 3px rgba(45,108,223,.1); }
+  .row-num { color: var(--text-light); font-size: 12px; width: 40px; }
+  .empty { text-align: center; padding: 60px 20px; color: var(--text-light); }
+
+  .status-bar {
+    position: fixed; bottom: 0; left: 220px; right: 0;
+    background: #1e293b; color: #cbd5e1; font-size: 12px;
+    padding: 6px 20px; display: flex; justify-content: space-between;
+  }
+  .status-bar .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--success); margin-right: 6px; }
+
+  .modal-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,.5);
+    display: none; align-items: center; justify-content: center; z-index: 100;
+  }
+  .modal-bg.show { display: flex; }
+  .modal {
+    background: #fff; border-radius: 12px; padding: 26px;
+    width: 480px; max-width: 90vw; box-shadow: 0 20px 60px rgba(0,0,0,.2);
+    max-height: 85vh; overflow-y: auto;
+  }
+  .modal h3 { font-size: 17px; margin-bottom: 14px; }
+  .modal p { font-size: 13px; color: var(--text-light); line-height: 1.7; margin-bottom: 8px; }
+  .modal .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+  .modal input, .modal select {
+    width: 100%; padding: 9px 12px; border: 1px solid var(--border);
+    border-radius: 6px; font-size: 14px; margin-bottom: 12px; outline: none;
+  }
+  .modal input:focus, .modal select:focus { border-color: var(--primary); }
+  .modal label { display: block; font-size: 13px; margin-bottom: 5px; color: #374151; }
+  .modal .err { color: var(--danger); font-size: 13px; min-height: 18px; }
+
+  .user-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .user-row:last-child { border-bottom: none; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; }
+  .tag.admin { background: #fee2e2; color: #b91c1c; }
+  .tag.teacher { background: #dbeafe; color: #1e40af; }
+</style>
+</head>
+<body>
+
+<!-- ========== 登录页 ========== -->
+<div class="login-wrap" id="loginPage">
+  <div class="login-box">
+    <h2>智能考场 · AI 巡考平台</h2>
+    <div class="sub">人脸核验 · 考生管理 · 操作留痕</div>
+    <label>用户名</label>
+    <input id="loginUser" placeholder="请输入用户名" autocomplete="username">
+    <label>密码</label>
+    <input id="loginPwd" type="password" placeholder="请输入密码" autocomplete="current-password">
+    <button onclick="doLogin()">登 录</button>
+    <div class="err" id="loginErr"></div>
+    <div style="margin-top:14px;font-size:12px;color:#9ca3af;text-align:center;line-height:1.7;">
+      首次使用请联系系统所有者获取账户<br>
+      所有者可在「操作记录」中新建管理员、重置密码
+    </div>
+  </div>
+</div>
+
+<!-- ========== 主界面 ========== -->
+<div class="app" id="app">
+  <aside class="sidebar">
+    <div class="logo">智能考场<small>AI 巡考平台</small></div>
+    <div class="nav-item active" data-page="candidates">📋 考生管理</div>
+    <div class="nav-item" data-page="users" id="navUsers" onclick="showUsers()">👥 用户管理</div>
+    <div class="nav-item" id="navOwner" style="display:none;" onclick="showOwnerSettings()">⚙ 所有者设置</div>
+    <div class="nav-item" onclick="showRecords()">📋 操作记录</div>
+    <div class="nav-item" onclick="openVerify()">🎥 实时核验</div>
+    <div class="nav-item" onclick="showChangePwd()">🔑 修改密码</div>
+    <div class="nav-item" onclick="switchAccount()">🔄 切换账号</div>
+    <div class="nav-item" onclick="doLogout()">🚪 退出登录</div>
+  </aside>
+
+  <main class="main">
+    <!-- 初始口令提示：温和提示，不拦截（点「去修改」才打开改密弹窗） -->
+    <div class="pwd-banner" id="pwdBanner">
+      <span>🔑 当前账户仍在使用初始口令，<b>建议尽快修改</b>（不修改也可正常使用系统）。</span>
+      <span class="grow"></span>
+      <button onclick="showChangePwd()">去修改</button>
+      <button class="secondary" onclick="hidePwdBanner()">知道了</button>
+    </div>
+
+    <!-- 当前核验模式：文案随所有者开关变化，避免出现「必须身份证」的误导说法 -->
+    <div class="mode-bar" id="modeBar" style="display:none;"></div>
+
+    <div class="header">
+      <h1>考生报名库与实时核验</h1>
+      <div class="user-info">
+        当前用户：<b id="curUser">-</b>
+        <span id="curRole" class="tag teacher" style="margin-left:6px;">-</span>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat-card"><div class="label">总考生数</div><div class="value" id="statTotal">0</div></div>
+      <div class="stat-card"><div class="label">已填身份证</div><div class="value" id="statIdCard">0</div></div>
+      <div class="stat-card"><div class="label">已配参考照</div><div class="value" id="statPhoto">0</div></div>
+      <div class="stat-card"><div class="label">数据完整度</div><div class="value" id="statComplete">0%</div></div>
+    </div>
+
+    <div class="hint">
+      <strong>Excel 表头要求</strong>：第一行必须是
+      <code>candidate_id</code> · <code>name</code> · <code>id_card</code> · <code>ticket_no</code> · <code>seat_no</code> · <code>reference_photo</code>
+    </div>
+
+    <div class="toolbar">
+      <button onclick="document.getElementById('fileInput').click()">📥 导入 Excel</button>
+      <input type="file" id="fileInput" accept=".xlsx,.xls,.csv" style="display:none">
+      <button class="ghost" id="btnRoster" style="display:none;"
+              onclick="document.getElementById('rosterFile').click()">📤 名单导入到库（仅所有者）</button>
+      <input type="file" id="rosterFile" accept=".xlsx,.xlsm,.csv" style="display:none"
+             onchange="importRoster(this)">
+      <button id="btnAddRow" onclick="addRow()">➕ 新增一行</button>
+      <input class="search" id="searchBox" placeholder="搜索姓名 / 身份证 / 准考证..." oninput="render()">
+      <div class="spacer"></div>
+      <button class="success" onclick="saveToServer()" id="btnSave">💾 保存到服务器</button>
+      <button class="secondary" onclick="exportExcel()">📤 导出 Excel</button>
+      <button class="danger" onclick="clearAll()" id="btnClear">🗑 清空</button>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:44px">#</th>
+            <th>考生编号</th>
+            <th>姓名</th>
+            <th>身份证号</th>
+            <th>准考证号</th>
+            <th>座位号</th>
+            <th>参考照路径</th>
+            <th style="width:60px">操作</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <div class="empty" id="emptyTip">
+        <div style="font-size:40px;opacity:.4;">📭</div>
+        <div style="font-size:15px;margin-top:10px;">暂无考生数据</div>
+        <div style="font-size:13px;margin-top:6px;">点击「导入 Excel」或「保存到服务器」开始</div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="status-bar" id="statusBar" style="display:none;">
+  <span><span class="dot"></span><span id="statusText">就绪</span></span>
+  <span id="statusTime"></span>
+</div>
+
+<div class="modal-bg" id="modalBg">
+  <div class="modal" style="width:1000px;max-width:95vw;">
+    <h3 id="modalTitle">标题</h3>
+    <div id="modalBody"></div>
+    <div class="actions" id="modalActions">
+      <button class="secondary" onclick="closeModal()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = "/api";
+const COLUMNS = ["candidate_id", "name", "id_card", "ticket_no", "seat_no", "reference_photo", "consent_status"];
+// 身份证号列语义：留空 = 保持库中原值；填写 = 重新登记（服务端加盐哈希，界面只回显掩码）
+const ID_COL = "id_card";
+
+let rows = [];
+let currentUser = null;
+let currentModes = null;          // 所有者开关状态：{major_exam, strict_mode, identity_*}
+let token = localStorage.getItem("token") || "";
+
+async function api(path, options = {}) {
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  if (token) headers["Authorization"] = "Bearer " + token;
+
+  const res = await fetch(API + path, { ...options, headers });
+  const data = await res.json().catch(() => ({}));
+
+  if (res.status === 401) {
+    logoutLocal();
+    throw new Error(data.error || "登录已过期");
+  }
+  if (!res.ok) throw new Error(data.error || "请求失败");
+  return data;
+}
+
+async function doLogin() {
+  const username = document.getElementById("loginUser").value.trim();
+  const password = document.getElementById("loginPwd").value;
+  const errEl = document.getElementById("loginErr");
+  errEl.textContent = "";
+
+  if (!username || !password) { errEl.textContent = "请输入用户名和密码"; return; }
+
+  try {
+    const data = await api("/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password })
+    });
+    token = data.token;
+    currentUser = data.user;
+    // 两个所有者开关的状态（大考模式 / 严格模式），用于渲染模式提示与核验面板
+    currentModes = data.modes || currentModes;
+    localStorage.setItem("token", token);
+
+    // 首次登录 / 口令被重置后：**不再弹窗强制改密**，直接进入系统并给出温和提示
+    // （must_change_password 仍由 /api/login、/api/me 返回，前端据此显示顶部横幅）
+    enterApp();
+  } catch (e) {
+    errEl.textContent = e.message;
+  }
+}
+
+// ---------------- 初始口令提示（不拦截） ----------------
+function renderPwdHint() {
+  const el = document.getElementById("pwdBanner");
+  if (!el) return;
+  el.classList.toggle("show", !!(currentUser && currentUser.must_change_password));
+}
+
+function hidePwdBanner() {
+  const el = document.getElementById("pwdBanner");
+  if (el) el.classList.remove("show");
+}
+
+// ---------------- 当前核验模式提示条 ----------------
+function renderModeBar() {
+  const el = document.getElementById("modeBar");
+  if (!el) return;
+  if (!currentModes || !currentModes.identity_text) { el.style.display = "none"; return; }
+  const major = !!currentModes.major_exam;
+  const strict = !!currentModes.strict_mode;
+  el.innerHTML =
+    `当前核验模式：<b>${currentModes.identity_title}</b> —— ${currentModes.identity_text.split("：").slice(1).join("：")}<br>` +
+    `身份证：<b>${major ? "必须校验（大考模式已开启）" : "不参与校验（未登记身份证的考生也可核验，以准考证号为准）"}</b><br>` +
+    (strict
+      ? `严格模式：<b>已开启</b>（非现场来源 —— 上传照片 —— 一律拒绝放行）`
+      : `<span class="warn">严格模式：已关闭</span>（允许上传照片核验，审计将如实标注“非现场来源”）`);
+  el.style.display = "";
+}
+
+async function enterApp() {
+  document.getElementById("loginPage").style.display = "none";
+  document.getElementById("app").classList.add("show");
+  document.getElementById("statusBar").style.display = "flex";
+
+  document.getElementById("curUser").textContent = currentUser.display_name + " (" + currentUser.username + ")";
+  const roleEl = document.getElementById("curRole");
+  roleEl.textContent = roleLabel(currentUser.role);
+  roleEl.className = "tag " + currentUser.role;
+
+  const isAdmin = currentUser.role === "admin";
+  const isOwner = currentUser.role === "owner";
+
+  // 账户管理（新建/改密/删除）属"操控"，只归所有者；管理员看不到入口
+  if (!isOwner) {
+    document.getElementById("navUsers").style.display = "none";
+  }
+  // 所有者设置（大考模式 / 严格模式）只归所有者
+  const navOwner = document.getElementById("navOwner");
+  if (navOwner) navOwner.style.display = isOwner ? "" : "none";
+  if (!isAdmin && !isOwner) {
+    document.getElementById("btnClear").style.display = "none";
+    document.getElementById("btnSave").style.display = "none";
+  }
+  // 名单导入：仅所有者
+  const btnRoster = document.getElementById("btnRoster");
+  if (btnRoster) btnRoster.style.display = isOwner ? "" : "none";
+  // 手动添加/编辑考生：受所有者开关控制（默认关闭）；所有者恒可用
+  const canManual = !!(currentUser && currentUser.can_manual_add);
+  if (!isOwner && !canManual) {
+    ["btnSave", "btnClear"].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.style.display = "none";
+    });
+  }
+  const addBtn = document.getElementById("btnAddRow");
+  if (addBtn) {
+    addBtn.disabled = !canManual;
+    addBtn.title = canManual ? "" : "手动添加考生已关闭，请由所有者在所有者设置中开启";
+    if (!canManual) addBtn.textContent = "➕ 新增一行（已关闭）";
+  }
+
+  renderPwdHint();       // 初始口令 -> 顶部温和提示（不拦截）
+  renderModeBar();       // 当前大考模式 / 严格模式
+
+  await loadCandidates();
+}
+
+async function loadCandidates() {
+  try {
+    const list = await api("/candidates");
+    rows = list.map(r => {
+      const obj = {};
+      COLUMNS.forEach(c => obj[c] = "");
+      obj.candidate_id = r.candidate_id || "";
+      obj.name = r.name || "";
+      obj.ticket_no = r.ticket_no || "";
+      obj.seat_no = r.seat_no || "";
+      obj.reference_photo = r.reference_photo || "";
+      obj.consent_status = r.consent_status || "未登记";
+      obj[ID_COL] = "";                       // 明文身份证号不再下发，保持为空
+      obj._masked = r.id_card_masked || "";   // 仅用于界面回显
+      return obj;
+    });
+    render();
+    setStatus(`已加载 ${rows.length} 条考生数据（身份证号仅显示掩码）`);
+  } catch (e) {
+    setStatus("加载失败：" + e.message);
+  }
+}
+
+function render() {
+  const tbody = document.getElementById("tbody");
+  const emptyTip = document.getElementById("emptyTip");
+  const keyword = (document.getElementById("searchBox").value || "").trim().toLowerCase();
+
+  tbody.innerHTML = "";
+  const filtered = rows.map((r, i) => ({ ...r, _idx: i })).filter(r => {
+    if (!keyword) return true;
+    return COLUMNS.some(c => String(r[c] || "").toLowerCase().includes(keyword));
+  });
+
+  if (filtered.length === 0) {
+    emptyTip.style.display = "block";
+    updateStats();
+    return;
+  }
+  emptyTip.style.display = "none";
+
+  filtered.forEach(row => {
+    const tr = document.createElement("tr");
+    const tdIdx = document.createElement("td");
+    tdIdx.className = "row-num";
+    tdIdx.textContent = row._idx + 1;
+    tr.appendChild(tdIdx);
+
+    COLUMNS.forEach(col => {
+      const td = document.createElement("td");
+      const input = document.createElement("input");
+      input.value = row[col] ?? "";
+      if (col === ID_COL) {
+        input.placeholder = row._masked || "未登记（可录入新号）";
+        input.title = "已脱敏存储：留空表示不变更；重新录入完整号码将覆盖登记";
+        input.style.minWidth = "150px";
+      }
+      if (col === "consent_status") {
+        input.title = "可选：未登记 / 已同意 / 已拒绝 / 替代通道";
+      }
+      input.oninput = e => {
+        rows[row._idx][col] = e.target.value.trim();
+        if (col === ID_COL) {
+          rows[row._idx]._dirtyId = e.target.value.trim().length > 0;
+        }
+        updateStats();
+      };
+      td.appendChild(input);
+      tr.appendChild(td);
+    });
+
+    const tdDel = document.createElement("td");
+    const btn = document.createElement("button");
+    btn.textContent = "删";
+    btn.className = "danger";
+    btn.style.cssText = "padding:4px 8px;font-size:12px;";
+    btn.onclick = () => { rows.splice(row._idx, 1); render(); };
+    tdDel.appendChild(btn);
+    tr.appendChild(tdDel);
+
+    tbody.appendChild(tr);
+  });
+
+  updateStats();
+}
+
+function updateStats() {
+  const total = rows.length;
+  const withId = rows.filter(r => (r._masked || "").trim() || (r[ID_COL] || "").trim()).length;
+  const withPhoto = rows.filter(r => (r.reference_photo || "").trim()).length;
+  const withConsent = rows.filter(r => ["已同意", "替代通道"].includes((r.consent_status || "").trim())).length;
+  const filled = rows.reduce((s, r) => s + COLUMNS.filter(c => (r[c] || "").trim()).length, 0);
+  const complete = total === 0 ? 0 : Math.round(filled / (total * COLUMNS.length) * 100);
+
+  document.getElementById("statTotal").textContent = total;
+  document.getElementById("statIdCard").textContent = withId;
+  document.getElementById("statPhoto").textContent = withPhoto;
+  document.getElementById("statComplete").textContent = complete + "%";
+  const ce = document.getElementById("statConsent");
+  if (ce) ce.textContent = withConsent;
+}
+
+function addRow() {
+  const obj = {}; COLUMNS.forEach(c => obj[c] = "");
+  rows.push(obj);
+  render();
+  setStatus("已新增一行");
+}
+
+function clearAll() {
+  if (!confirm("确定清空所有数据？")) return;
+  rows = [];
+  render();
+  setStatus("已清空（需点「保存到服务器」才会生效）");
+}
+
+async function saveToServer() {
+  if (!confirm(`确定保存 ${rows.length} 条数据到服务器？将覆盖原有数据。`)) return;
+
+  try {
+    const res = await api("/candidates", {
+      method: "POST",
+      body: JSON.stringify({ candidates: rows })
+    });
+    setStatus(res.message);
+    alert(res.message);
+  } catch (e) {
+    alert("保存失败：" + e.message);
+  }
+}
+
+document.getElementById("fileInput").addEventListener("change", e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  if (typeof XLSX === "undefined") {
+    alert("Excel 组件未加载。\n请确认 网页操作面板\\vendor\\xlsx.full.min.js 存在，或联网后重试。");
+    e.target.value = "";
+    return;
+  }
+
+  const reader = new FileReader();
+  reader.onload = evt => {
+    try {
+      const wb = XLSX.read(new Uint8Array(evt.target.result), { type: "array" });
+      const json = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: "" });
+      if (json.length === 0) { alert("Excel 无数据"); return; }
+
+      const headers = Object.keys(json[0]);
+      const missing = COLUMNS.filter(c => !headers.includes(c));
+      if (missing.length) { alert("缺少列：" + missing.join(", ")); return; }
+
+      rows = json.map(r => {
+        const o = {}; COLUMNS.forEach(c => o[c] = String(r[c] ?? "").trim());
+        o._masked = ""; o._dirtyId = (o[ID_COL] || "").length > 0;
+        return o;
+      });
+      render();
+      setStatus(`导入 ${rows.length} 条（${file.name}）；身份证号将在保存时加盐哈希`);
+    } catch (err) {
+      alert("读取失败：" + err.message);
+    }
+  };
+  reader.readAsArrayBuffer(file);
+  e.target.value = "";
+});
+
+function exportExcel() {
+  if (rows.length === 0) { alert("没有数据"); return; }
+  if (typeof XLSX === "undefined") {
+    alert("Excel 组件未加载。\n请确认 网页操作面板\\vendor\\xlsx.full.min.js 存在，或联网后重试。");
+    return;
+  }
+  // 导出不含完整身份证号（服务端不下发明文），只导出掩码列
+  const out = rows.map(r => {
+    const o = {};
+    COLUMNS.forEach(c => o[c] = (c === ID_COL) ? "" : (r[c] || ""));
+    o.id_card_masked = r._masked || "";
+    return o;
+  });
+  const ws = XLSX.utils.json_to_sheet(out);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "candidates");
+  XLSX.writeFile(wb, "candidates.xlsx");
+  setStatus(`导出 ${rows.length} 条（不含完整身份证号）`);
+}
+
+function showChangePwd() {
+  document.getElementById("modalTitle").textContent = "修改密码";
+  document.getElementById("modalBody").innerHTML = `
+    <label>旧密码</label><input id="cpOld" type="password">
+    <label>新密码</label><input id="cpNew" type="password" placeholder="≥8位，含大小写字母和数字">
+    <label>确认新密码</label><input id="cpNew2" type="password">
+    <div class="err" id="cpErr"></div>
+  `;
+  document.getElementById("modalActions").innerHTML = `<button onclick="submitChangePwd()">确认</button>`;
+  document.getElementById("modalBg").classList.add("show");
+}
+
+async function submitChangePwd() {
+  const o = document.getElementById("cpOld").value;
+  const n = document.getElementById("cpNew").value;
+  const n2 = document.getElementById("cpNew2").value;
+  const err = document.getElementById("cpErr");
+  err.textContent = "";
+
+  if (n !== n2) { err.textContent = "两次新密码不一致"; return; }
+  try {
+    await api("/change-password", {
+      method: "POST",
+      body: JSON.stringify({ old_password: o, new_password: n })
+    });
+    if (currentUser) currentUser.must_change_password = false;
+    renderPwdHint();                 // 改完把提示横幅收起来
+    alert("密码修改成功");
+    closeModal();
+  } catch (e) { err.textContent = e.message; }
+}
+
+// ---------------- 所有者设置（大考模式 / 严格模式） ----------------
+async function showOwnerSettings() {
+  let m = currentModes;
+  try {
+    m = await api("/owner-settings");        // 拉最新状态（可能是别的窗口改的）
+    currentModes = m;
+  } catch (e) { /* 读不到就用本地缓存 */ }
+  m = m || { major_exam: false, strict_mode: true };
+  document.getElementById("modalTitle").textContent = "所有者设置";
+  document.getElementById("modalBody").innerHTML = `
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+      <input type="checkbox" id="osMajor" style="width:auto;margin:0;" ${m.major_exam ? "checked" : ""}>
+      <b>大考模式（必须使用身份证）</b>
+    </label>
+    <p style="font-size:12px;color:#6b7280;margin:0 0 14px 0;line-height:1.7;">
+      开启后：四要素 = 身份证号 + 准考证号 + 座位号 + 姓名，身份证<b>必填</b>并走库内加盐哈希比对；<br>
+      关闭（默认）：三要素 = 准考证号 + 座位号 + 姓名，身份证<b>不参与校验</b>，以准考证号核验。
+    </p>
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+      <input type="checkbox" id="osStrict" style="width:auto;margin:0;" ${m.strict_mode ? "checked" : ""}>
+      <b>严格模式（关闭后可选本地图片核验）</b>
+    </label>
+    <p style="font-size:12px;color:#6b7280;margin:0 0 6px 0;line-height:1.7;">
+      默认开启：非设备实时抓拍（上传照片）一律拒绝放行；<br>
+      关闭后允许上传照片核验，但审计记录会如实标注“严格模式已关闭、本次为非现场来源”。
+    </p>
+    <div class="err" id="osErr"></div>
+  `;
+  document.getElementById("modalActions").innerHTML = `
+    <button class="secondary" onclick="closeModal()">取消</button>
+    <button onclick="saveOwnerSettings()">保存（立即生效）</button>
+  `;
+  document.getElementById("modalBg").classList.add("show");
+}
+
+async function saveOwnerSettings() {
+  const major = document.getElementById("osMajor").checked;
+  const strict = document.getElementById("osStrict").checked;
+  const err = document.getElementById("osErr");
+  err.textContent = "";
+  try {
+    const res = await api("/owner-settings", {
+      method: "POST",
+      body: JSON.stringify({ major_exam: major, strict_mode: strict })
+    });
+    currentModes = res;
+    renderModeBar();
+    closeModal();
+    setStatus(res.message || "所有者设置已更新");
+  } catch (e) { err.textContent = e.message; }
+}
+
+async function showUsers() {
+  if (currentUser.role !== "admin" && currentUser.role !== "owner") {
+    alert("仅管理员或所有者可访问"); return;
+  }
+
+  try {
+    const users = await api("/users");
+    let html = `<div style="max-height:300px;overflow-y:auto;">`;
+    users.forEach(u => {
+      html += `
+        <div class="user-row">
+          <div>
+            <b>${u.username}</b> (${u.display_name})
+            <span class="tag ${u.role}">${roleLabel(u.role)}</span>
+            ${u.must_change_password ? '<span class="tag" style="background:#fef3c7;color:#92400e;">待改密</span>' : ''}
+          </div>
+          <div>
+            <button class="ghost" style="padding:4px 10px;font-size:12px;" onclick="resetUserPwd(${u.id})">重置密码</button>
+            ${u.id !== currentUser.id ? `<button class="danger" style="padding:4px 10px;font-size:12px;" onclick="deleteUser(${u.id})">删除</button>` : ''}
+          </div>
+        </div>`;
+    });
+    html += `</div>
+      <div style="margin-top:16px;border-top:1px solid #e4e8ee;padding-top:16px;">
+        <h4 style="font-size:14px;margin-bottom:10px;">新建用户</h4>
+        <input id="nuUser" placeholder="用户名">
+        <input id="nuName" placeholder="显示名称">
+        <input id="nuPwd" type="password" placeholder="初始密码（≥8位，含大小写和数字）">
+        <select id="nuRole">
+          <option value="teacher">教师</option>
+          <option value="admin">管理员</option>
+        </select>
+        <div class="err" id="nuErr"></div>
+      </div>
+    `;
+
+    document.getElementById("modalTitle").textContent = "用户管理";
+    document.getElementById("modalBody").innerHTML = html;
+    document.getElementById("modalActions").innerHTML = `
+      <button class="secondary" onclick="closeModal()">关闭</button>
+      <button onclick="createUser()">创建用户</button>
+    `;
+    document.getElementById("modalBg").classList.add("show");
+  } catch (e) { alert(e.message); }
+}
+
+async function createUser() {
+  const username = document.getElementById("nuUser").value.trim();
+  const display_name = document.getElementById("nuName").value.trim();
+  const password = document.getElementById("nuPwd").value;
+  const role = document.getElementById("nuRole").value;
+  const err = document.getElementById("nuErr");
+  err.textContent = "";
+
+  try {
+    const res = await api("/users", {
+      method: "POST",
+      body: JSON.stringify({ username, display_name, password, role })
+    });
+    alert(res.message + "\n该用户首次登录需修改密码。");
+    showUsers();
+  } catch (e) { err.textContent = e.message; }
+}
+
+async function deleteUser(uid) {
+  if (!confirm("确定删除该用户？")) return;
+  try {
+    await api("/users/" + uid, { method: "DELETE" });
+    showUsers();
+  } catch (e) { alert(e.message); }
+}
+
+async function resetUserPwd(uid) {
+  const pwd = prompt("输入新密码（≥8位，含大小写和数字）：");
+  if (!pwd) return;
+  try {
+    const res = await api(`/users/${uid}/reset-password`, {
+      method: "POST",
+      body: JSON.stringify({ new_password: pwd })
+    });
+    alert(res.message);
+  } catch (e) { alert(e.message); }
+}
+
+function roleLabel(r) {
+  return r === "owner" ? "所有者" : (r === "admin" ? "管理员" : "教师");
+}
+
+// 名单导入到库（Excel/CSV，仅所有者；服务端会再校验一次角色）
+async function importRoster(input) {
+  const f = input.files && input.files[0];
+  if (!f) return;
+  if (!confirm(`确定导入名单「${f.name}」？\n将按考生编号新增/覆盖，身份证号加盐哈希存储。`)) {
+    input.value = "";
+    return;
+  }
+  const fd = new FormData();
+  fd.append("file", f);
+  setStatus("正在导入名单…");
+  try {
+    const res = await fetch(API + "/roster-import", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + token },
+      body: fd
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "导入失败");
+    let msg = data.message;
+    if (data.warnings && data.warnings.length) {
+      msg += "\n\n注意：\n" + data.warnings.slice(0, 8).join("\n");
+    }
+    alert(msg);
+    setStatus(data.message);
+    await loadCandidates();
+  } catch (e) {
+    alert("导入失败：" + e.message);
+    setStatus("名单导入失败");
+  }
+  input.value = "";
+}
+
+async function showRecords() {
+  try {
+    const data = await api("/records?limit=300");
+    const rows = data.audit || [];
+    let html = `<div style="max-height:260px;overflow-y:auto;font-family:Consolas,monospace;font-size:12px;">`;
+    if (rows.length === 0) html += `<div style="color:#888;padding:10px;">暂无核验记录</div>`;
+    rows.slice().reverse().forEach(r => {
+      html += `<div style="padding:3px 0;border-bottom:1px solid #f0f2f5;">
+        ${r.timestamp} <b>${r.result}</b> ${r.reason_code} 考生=${r.candidate_id || "-"}
+        操作人=${r.operator || "-"} 见证人=${r.witness || "-"} 分数=${(r.score ?? "-")}
+      </div>`;
+    });
+    html += `</div>`;
+    html += `<h4 style="font-size:13px;margin:14px 0 6px;">界面操作日志</h4>`;
+    html += `<div style="max-height:180px;overflow-y:auto;font-family:Consolas,monospace;font-size:12px;background:#f8fafc;padding:8px;">`;
+    const acts = data.actions || [];
+    if (acts.length === 0) html += `<span style="color:#888;">暂无</span>`;
+    acts.slice().reverse().forEach(a => { html += `<div>${a}</div>`; });
+    html += `</div>`;
+
+    document.getElementById("modalTitle").textContent = "操作记录";
+    document.getElementById("modalBody").innerHTML = html;
+    const canClear = data.can_clear;
+    document.getElementById("modalActions").innerHTML =
+      `<button class="secondary" onclick="closeModal()">关闭</button>` +
+      (canClear
+        ? `<button class="danger" onclick="clearRecords()">🗑 清空日志（所有者）</button>`
+        : `<span style="color:#b00;font-size:12px;align-self:center;">当前角色「${roleLabel(data.role)}」无权清空日志</span>`);
+    document.getElementById("modalBg").classList.add("show");
+  } catch (e) { alert(e.message); }
+}
+
+async function clearRecords() {
+  if (!confirm("确定清空全部核验审计与操作日志？\n清空前会自动备份；该动作本身会被记录。")) return;
+  try {
+    const res = await api("/records/clear", { method: "POST", body: JSON.stringify({}) });
+    alert(`已清空：审计 ${res.removed_audit} 条、操作日志 ${res.removed_actions} 条`);
+    showRecords();
+  } catch (e) { alert(e.message); }
+}
+
+function doLogout() {
+  if (!confirm("确定退出登录？")) return;
+  logoutLocal();
+}
+
+// 切换账号：退出当前账号并回到登录页（保留在页面，不用重开浏览器）
+function switchAccount() {
+  if (!confirm("确定切换账号？将返回登录页。")) return;
+  logoutLocal();
+  setTimeout(() => {
+    const u = document.getElementById("loginUser");
+    if (u) { u.value = ""; u.focus(); }
+    const p = document.getElementById("loginPwd");
+    if (p) p.value = "";
+  }, 50);
+}
+
+function logoutLocal() {
+  token = "";
+  currentUser = null;
+  localStorage.removeItem("token");
+  document.getElementById("app").classList.remove("show");
+  document.getElementById("loginPage").style.display = "flex";
+  document.getElementById("statusBar").style.display = "none";
+}
+
+function closeModal() {
+  stopVerifyCamera();   // 关闭弹窗时释放摄像头并停止自动核验
+  stopAutoVerify();
+  document.getElementById("modalBg").classList.remove("show");
+}
+
+// ---------------- 实时核验（工作人员，与 GUI 同流程） ----------------
+let verifyStream = null;
+let verifyTimer = null;       // 自动核验定时器
+let verifyBusy = false;       // 防止并发提交
+let verifyHistory = [];       // 最近核验结果
+
+function getVMode() {
+  const el = document.querySelector('input[name="vmode"]:checked');
+  return el ? el.value : "1:1";
+}
+
+// 身份要素带入（便利按钮）：只带准考证/座位；身份证明文不可反推，
+// 大考模式下必须人工输入证件原件号码，这里不会替你填（掩码不算明文）。
+function fillVerifyElements() {
+  const cid = (document.getElementById("vcand") || {}).value || "";
+  const r = (rows || []).find(x => x.candidate_id === cid);
+  if (!r) { alert("请先选择考生"); return; }
+  document.getElementById("vTicket").value = r.ticket_no || "";
+  document.getElementById("vSeat").value = r.seat_no || "";
+  if (currentModes && currentModes.major_exam) {
+    document.getElementById("vIdCard").value = "";
+    setStatus("已带入准考证号/座位号；大考模式要求身份证号，请手工输入证件原件明文");
+  } else {
+    setStatus("已带入准考证号/座位号；常规模式身份证不参与校验，可留空");
+  }
+}
+
+// 收集身份要素（仅 1:1 适用；1:N 抽查不比对身份要素）
+function collectVerifyElements(body) {
+  if (getVMode() !== "1:1") return;
+  body.ticket_no = (document.getElementById("vTicket") || {}).value || "";
+  body.seat_no = (document.getElementById("vSeat") || {}).value || "";
+  // 留空 -> 常规模式下身份证不参与校验；大考模式下会被服务端拦截（必须明文）
+  body.id_card = (document.getElementById("vIdCard") || {}).value || "";
+}
+
+// 「选择照片核验」：严格模式开启时给出明确提示，而不是静默失败
+function onVerifyFileClick() {
+  if (currentModes && currentModes.strict_mode) {
+    alert("当前处于严格模式：上传照片属非现场来源，会被拒绝放行。\n\n" +
+          "如确需用照片核验，请由所有者在「⚙ 所有者设置」中关闭「严格模式」；\n" +
+          "关闭后每次核验都会在审计里标注“严格模式已关闭、非现场来源”。");
+    setStatus("严格模式已开启：上传照片核验被拒绝（所有者可关闭严格模式）");
+    return;
+  }
+  document.getElementById("vFile").click();
+}
+
+async function openVerify() {
+  const opts = (rows || []).map(r =>
+    `<option value="${r.candidate_id}">${r.candidate_id} · ${r.name || ""}</option>`).join("");
+  const m = currentModes || { major_exam: false, strict_mode: true,
+                              identity_title: "三要素（常规模式）",
+                              identity_detail: "身份证不参与校验，以准考证号为准。" };
+  const major = !!m.major_exam;
+  const strict = !!m.strict_mode;
+  document.getElementById("modalTitle").textContent = "实时核验（工作人员）";
+  document.getElementById("modalBody").innerHTML = `
+    <div style="display:flex;gap:16px;flex-wrap:wrap;">
+      <div style="flex:1;min-width:300px;">
+        <div style="margin-bottom:8px;display:flex;gap:14px;align-items:center;flex-wrap:wrap;">
+          <label><input type="radio" name="vmode" value="1:1" checked> 1:1 入场核验</label>
+          <label><input type="radio" name="vmode" value="1:N"> 1:N 考场抽查</label>
+          <label id="vAutoLabel" style="color:#2d6cdf;font-weight:bold;">
+            <input type="checkbox" id="vAuto"> 自动核验（每 3 秒，无需点击）
+          </label>
+        </div>
+        <div id="vcandWrap" style="margin-bottom:8px;">考生：<select id="vcand">${opts}</select></div>
+        <div id="velemWrap" style="margin-bottom:8px;font-size:13px;line-height:2;">
+          <div style="color:#1f3f8f;font-size:12px;">身份要素（${m.identity_title}）：${m.identity_detail}</div>
+          <div>
+            准考证号：<input id="vTicket" style="width:130px;padding:4px 8px;border:1px solid #e4e8ee;border-radius:5px;">
+            座位号：<input id="vSeat" style="width:80px;padding:4px 8px;border:1px solid #e4e8ee;border-radius:5px;">
+            身份证号：<input id="vIdCard" placeholder="${major ? "必填（证件原件明文）" : "可留空"}"
+              style="width:190px;padding:4px 8px;border:1px solid #e4e8ee;border-radius:5px;">
+            <button class="ghost" style="padding:4px 10px;font-size:12px;" onclick="fillVerifyElements()">⇩ 按所选考生带入</button>
+          </div>
+        </div>
+        <div style="position:relative;display:inline-block;width:100%;max-width:460px;">
+          <video id="vVideo" autoplay playsinline muted
+                 style="width:100%;background:#111;border-radius:8px;transform:scaleX(-1);"></video>
+          <span id="vFps" style="position:absolute;top:8px;right:12px;color:#7ee787;font-family:Consolas;font-size:12px;background:rgba(0,0,0,.55);padding:2px 8px;border-radius:4px;">摄像头就绪</span>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;">
+          <button id="btnSnap" onclick="snapVerify()">📸 拍照核验</button>
+          <button class="ghost" id="btnAuto" onclick="toggleAutoVerify()">▶ 启动自动核验</button>
+          <button class="ghost" id="btnVerifyFile" onclick="onVerifyFileClick()">📁 选择照片核验</button>
+          <input type="file" id="vFile" accept="image/*" style="display:none" onchange="verifyFromFile(this)">
+          <button class="ghost" onclick="stopVerifyCamera()">关闭摄像头</button>
+        </div>
+        <div id="vFileHint" style="margin-top:6px;color:#888;font-size:12px;">
+          摄像头实时检测与照片文件检测都在此面板；${strict
+            ? "当前<b>严格模式已开启</b>，照片来源非现场，会被拒绝（防翻拍）。"
+            : "当前<b>严格模式已关闭</b>，允许照片文件核验，审计会标注“非现场来源”。"}
+        </div>
+      </div>
+      <div style="flex:1;min-width:280px;">
+        <div style="font-size:13px;color:#666;display:flex;justify-content:space-between;align-items:center;">
+          <span>核验结果</span>
+          <button class="ghost" style="padding:2px 8px;font-size:12px;"
+                  onclick="verifyHistory=[];renderVerifyResult(null)">清空</button>
+        </div>
+        <div id="vResult" style="font-family:Consolas,monospace;font-size:12px;background:#f8fafc;padding:10px;border-radius:6px;height:300px;overflow-y:auto;">尚未核验</div>
+        <div id="vDoc" style="margin-top:8px;"></div>
+      </div>
+    </div>`;
+  document.getElementById("modalActions").innerHTML =
+    `<button class="secondary" onclick="closeModal()">关闭</button>`;
+  document.getElementById("modalBg").classList.add("show");
+  document.querySelectorAll('input[name="vmode"]').forEach(r => r.onchange = () => {
+    const one2one = getVMode() === "1:1";
+    document.getElementById("vcandWrap").style.display = one2one ? "" : "none";
+    document.getElementById("velemWrap").style.display = one2one ? "" : "none";
+  });
+  // 自动核验属高危能力：未授权则禁用勾选（服务端也会强校验）
+  const autoAllowed = !!(currentUser && currentUser.can_auto_verify);
+  const autoLabel = document.getElementById("vAutoLabel");
+  if (autoLabel && !autoAllowed) {
+    autoLabel.style.color = "#999";
+    autoLabel.title = "仅所有者可用；管理员需所有者授权";
+    autoLabel.innerHTML = `<input type="checkbox" id="vAuto" disabled> 自动核验（每 3 秒，需所有者授权）`;
+  }
+  const auto = document.getElementById("vAuto");
+  if (auto) {
+    auto.onchange = onAutoChange;
+    if (!autoAllowed) auto.disabled = true;
+  }
+  verifyHistory = [];
+  await startVerifyCamera();
+}
+
+async function startVerifyCamera() {
+  const box = document.getElementById("vResult");
+  try {
+    verifyStream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 640 }, height: { ideal: 480 } }
+    });
+    const vid = document.getElementById("vVideo");
+    vid.srcObject = verifyStream;
+    await vid.play().catch(() => {});
+  } catch (e) {
+    if (box) box.innerHTML = `<span style="color:#b00;">无法打开摄像头：${e.message}</span>`;
+  }
+}
+
+function stopVerifyCamera() {
+  stopAutoVerify();
+  if (verifyStream) {
+    verifyStream.getTracks().forEach(t => t.stop());
+    verifyStream = null;
+  }
+}
+
+function toggleAutoVerify() {
+  const cb = document.getElementById("vAuto");
+  if (cb) cb.checked = !cb.checked;
+  onAutoChange();
+}
+
+function onAutoChange() {
+  const cb = document.getElementById("vAuto");
+  const on = !!(cb && cb.checked);
+  stopAutoVerify();
+  const btn = document.getElementById("btnAuto");
+  if (on) {
+    if (btn) btn.textContent = "⏸ 停止自动核验";
+    setStatus("自动核验已开启（每 3 秒）");
+    snapVerify();                                  // 立即核验一次
+    verifyTimer = setInterval(() => { if (!verifyBusy) snapVerify(); }, 3000);
+  } else {
+    if (btn) btn.textContent = "▶ 启动自动核验";
+    setStatus("自动核验已关闭");
+  }
+}
+
+function stopAutoVerify() {
+  if (verifyTimer) { clearInterval(verifyTimer); verifyTimer = null; }
+}
+
+async function snapVerify() {
+  if (verifyBusy) return;
+  const vid = document.getElementById("vVideo");
+  if (!vid || !vid.srcObject) { alert("请先开启摄像头"); return; }
+  verifyBusy = true;
+  const btn = document.getElementById("btnSnap");
+  if (btn) { btn.disabled = true; btn.textContent = "核验中…"; }
+  try {
+    // 便利化：缩到 480 宽再上传，减小体积、加快往返
+    let w = vid.videoWidth || 640, h = vid.videoHeight || 480;
+    const MAXW = 480;
+    if (w > MAXW) { h = Math.round(h * MAXW / w); w = MAXW; }
+    const canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    canvas.getContext("2d").drawImage(vid, 0, 0, w, h);
+    const body = { mode: getVMode(), image: canvas.toDataURL("image/jpeg", 0.72),
+                   device_id: "WEB-BROWSER", source: "camera",
+                   auto_confirm: !!(document.getElementById("vAuto") || {}).checked };
+    if (getVMode() === "1:1") body.candidate_id = document.getElementById("vcand").value;
+    collectVerifyElements(body);
+    const res = await api("/verify", { method: "POST", body: JSON.stringify(body) });
+    renderVerifyResult(res);
+  } catch (e) {
+    renderVerifyResult({ error: e.message });
+  } finally {
+    verifyBusy = false;
+    if (btn) { btn.disabled = false; btn.textContent = "📸 拍照核验"; }
+  }
+}
+
+function renderVerifyResult(r) {
+  const box = document.getElementById("vResult");
+  if (!box) return;
+  if (!r) { box.innerHTML = "尚未核验"; return; }
+  if (r.error) { box.innerHTML = `<span style="color:#b00;">${r.error}</span>`; return; }
+  const color = r.result === "PASS" ? "#0a7d28" : (r.result === "FAIL" ? "#c00000" : "#c07000");
+  const ts = new Date().toLocaleTimeString();
+  const L = [];
+  L.push(`<div style="color:${color};font-weight:bold;">${ts}　${r.result}（${r.reason_code}）</div>`);
+  if (r.reason) L.push(`<div>${r.reason}</div>`);
+  L.push(`<div>相似度 ${r.score ?? "-"} ｜ 阈值 ${r.threshold ?? "-"} ｜ 活体 ${r.liveness ?? "-"}</div>`);
+  if (r.quality_issues || r.enhanced) {
+    L.push(`<div>画质：${r.quality_issues || "正常"}（${r.quality_severity || "ok"}）${r.enhanced ? " ｜已增强" : ""}</div>`);
+  }
+  if (r.pitch !== undefined && r.pitch !== null) {
+    L.push(`<div>姿态：yaw ${r.yaw}° pitch ${r.pitch}° roll ${r.roll}°</div>`);
+  }
+  if (r.gray_zone) L.push(`<div style="color:#c07000;">→ 灰区（模糊匹配），需人工复验</div>`);
+  if (r.twin_candidate_id) L.push(`<div style="color:#c07000;">→ 与 ${r.twin_candidate_id} 撞脸（差距 ${r.twin_gap}）</div>`);
+  if (r.required_witness) L.push(`<div style="color:#c00000;font-weight:bold;">→ 需双人见证复验</div>`);
+  // 身份要素模式（大考/常规）与严格模式留痕
+  if (r.id_mode) {
+    L.push(`<div>身份要素：${r.elements_checked || "-"} ｜ ${r.id_mode === "major"
+      ? "大考模式：身份证必校验" : "常规模式：身份证不参与校验"}</div>`);
+  }
+  if (r.strict_mode_off) {
+    L.push(`<div style="color:#b45309;font-weight:bold;">⚠ ${r.strict_mode_off_reason || "严格模式未生效"}：本次为非现场来源（source=${r.non_live_source || "-"}），已如实留痕</div>`);
+  }
+  if (r.edge_provider) L.push(`<div style="color:#888;">边缘：${r.edge_provider} ｜ ${r.edge_profile} ｜ ${r.edge_latency_ms} ms</div>`);
+  verifyHistory.push(L.join(""));
+  if (verifyHistory.length > 30) verifyHistory.shift();
+  box.innerHTML = verifyHistory.join('<hr style="border:0;border-top:1px solid #e4e8ee;margin:6px 0;">');
+  box.scrollTop = box.scrollHeight;
+
+  const doc = r.doc_info || "";
+  const vdoc = document.getElementById("vDoc");
+  vdoc.innerHTML = doc ? `<div style="font-size:13px;">带出：${doc}</div>` : "";
+  if (r.doc_checked) {
+    // 自动模式：已免人工确认直接通过
+    vdoc.innerHTML += `<div style="margin-top:6px;color:#0a7d28;font-weight:bold;">
+        ✔ 已自动通过（人脸匹配即放行，免人工确认，已留痕）</div>`;
+  } else if (r.candidate_id && r.result === "PASS") {
+    vdoc.innerHTML += `<div style="margin-top:8px;">
+        <button class="success" onclick="webDocCheck('${r.candidate_id}',true)">✓ 证件一致</button>
+        <button class="danger" onclick="webDocCheck('${r.candidate_id}',false)">✗ 证件不符</button>
+      </div>`;
+  }
+}
+
+// 照片文件核验（与摄像头检测同面板）
+// source=file：严格模式开启时服务端会拒绝（LIVENESS_UNAVAILABLE）；
+// 关闭后放行，但返回记录里会带 strict_mode_off / non_live_source（界面会显示）。
+function verifyFromFile(input) {
+  const f = input.files && input.files[0];
+  if (!f) return;
+  if (currentModes && currentModes.strict_mode) {
+    input.value = "";
+    onVerifyFileClick();            // 明确提示，不静默失败
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = async () => {
+    const body = { mode: getVMode(), image: reader.result, source: "file",
+                   device_id: "WEB-BROWSER-FILE" };
+    if (getVMode() === "1:1") body.candidate_id = document.getElementById("vcand").value;
+    collectVerifyElements(body);
+    try {
+      const res = await api("/verify", { method: "POST", body: JSON.stringify(body) });
+      renderVerifyResult(res);
+    } catch (e) {
+      renderVerifyResult({ error: e.message });
+    }
+  };
+  reader.readAsDataURL(f);
+  input.value = "";
+}
+
+async function webDocCheck(cid, ok) {
+  const witness = prompt("见证人姓名（留空则无）：") || "";
+  try {
+    const res = await api("/doc-check", {
+      method: "POST",
+      body: JSON.stringify({ candidate_id: cid, ok, witness })
+    });
+    alert(`证件核对：${res.result}（${res.reason_code}）`);
+    document.getElementById("vDoc").innerHTML = "";
+  } catch (e) { alert(e.message); }
+}
+
+function setStatus(msg) {
+  document.getElementById("statusText").textContent = msg;
+  document.getElementById("statusTime").textContent = new Date().toLocaleTimeString();
+}
+
+(async function init() {
+  if (token) {
+    try {
+      currentUser = await api("/me");
+      try { currentModes = await api("/owner-settings"); } catch (e) { /* 忽略 */ }
+      // 令牌仍有效：**不再因为"必须改密"把用户挡在登录页**，直接进系统并给出提示
+      enterApp();
+      return;
+    } catch (e) { /* token 失效 */ }
+  }
+  document.getElementById("loginPage").style.display = "flex";
+})();
+
+document.getElementById("loginPwd").addEventListener("keydown", e => {
+  if (e.key === "Enter") doLogin();
+});
+</script>
+
+</body>
+</html>

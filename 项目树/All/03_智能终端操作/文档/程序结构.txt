@@ -1,0 +1,56 @@
+智能终端操作端 · 程序结构
+============================================================
+对应《智能终端.md》。本目录是终端侧软件实现。
+
+【入口】
+  启动终端界面.bat      -> terminal_gui.py（桌面界面，4 页签）
+  运行自检与测试.bat    -> 单元测试(76) + 端到端自检(55)
+  main.py               -> 端到端自检；默认用临时数据目录，--real 用真实目录
+  terminal_gui.py       -> 界面；登录后按角色装配视图
+
+【模块与职责】
+  config.py    路径解析(DATA_ROOT)、终端类型、告警分级元数据(LEVEL_META)、
+               角色动作矩阵(ROLE_ACTIONS)、断网与管控阈值、时钟与播报表
+  models.py    Alert（含分级/SLA/脱敏展示/序列化）、ReviewRecord、
+               canonical()、chain_hash() 哈希链原语
+  storage.py   SQLite：alerts / reviews / audit(哈希链) / commands / kv
+               提供 verify_chain() 篡改检测、false_positive_stats() 误报闭环统计
+  access.py    终端账户(PBKDF2 加盐)、Session、can()/require()、
+               room_filter() 考场隔离、visible_alerts()、render() 脱敏、
+               export_payload()（受 export 动作限制）
+  alerts.py    AlertHub：ingest(分级兜底+去重) / ack(红色强制确认) /
+               display_order(红优先-超时次之) / fetch_from_edge(断网不抛异常) /
+               simulate(演示数据，source=demo 不冒充真实接入)
+  review.py    Reviewer：review(结论必填+理由必填+附件留档) /
+               report(一键上报，受考场范围限制) / stats / timeline 全过程留痕
+  offline.py   ConnectivityProbe(可注入) + Outbox：enqueue 落 SQLite + NDJSON、
+               flush 批量补传、失败保留下次再传、超期标记不静默丢弃
+  fleet.py     FleetManager：配置快照(外设浅合并)、应用白名单核查、
+               外设策略、远程擦除(二次确认码 WIPE)、升级任务登记、
+               apply_pending 指令生效、soak_tick/soak_status 稳定性取证
+  clock.py     StandardClock：standard_time(来源如实标注)、drift 偏差、
+               check_and_alert 产生 CLOCK_DRIFT 告警、广播时刻表与到点触发留痕
+  bridge.py    FaceBridge(隔离子进程调 01) + PlatformLink(平台/边缘/认证 HTTP，
+               未配置即如实报"未配置")
+  _face_bridge.py  子进程侧：把 01 目录放进 sys.path，调用其 verifier，
+               以最后一行 JSON 回传；异常一律 ok=false 不伪装成功
+
+【数据流】
+  边缘/平台 --HTTP--> AlertHub.ingest --> SQLite(alerts) --+
+                                    \--> Outbox(synced=0) --恢复--> 平台 POST /alerts
+  处置:  红色 -> ack(强制) -> review(理由+附件) -> 误报闭环统计
+  管控:  平台 commands -> fleet.apply_pending -> 配置/外设/擦除(二次确认)/升级登记
+  时钟:  授时 -> drift -> 超限产生告警；时刻表到点 -> 播报 + 审计
+  核验:  界面 -> FaceBridge -> 子进程 _face_bridge -> 01 模块 -> JSON 结果
+
+【对外接口（平台侧需实现）】
+  GET  /health     联通性探测
+  GET  /time       平台授时 {"epoch": ...}
+  GET  /alerts     告警订阅 {"alerts":[...]}
+  POST /alerts     终端补传告警
+  GET  /commands   平台指令 set_config/peripheral/wipe/upgrade/report
+
+【不在本目录范围（采购/部署事项）】
+  国产化 OS 与信创整机、国密算法、MDM 服务端、终端准入与设备指纹、
+  防拆开关、多路视频解码、签到抽签业务
+============================================================
