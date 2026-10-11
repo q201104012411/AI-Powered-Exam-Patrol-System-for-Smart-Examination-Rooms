@@ -98,6 +98,9 @@ _BEHAVIOR_ALERT_CODE = {
     "前倾/趴桌": "LEAN_FORWARD",
     "东张西望": "TURN_HEAD",
     "长时间低头": "LOOK_DOWN",
+    "眼神游移": "GAZE_SHIFT",
+    "闭眼/趴睡": "SLEEPY",
+    "转脸偏头": "HEAD_TURN",
 }
 
 
@@ -326,14 +329,21 @@ class TerminalApp(object):
             "✅ 可用" if ok else "⚠ " + why, why if not ok else ""))
 
     # ---------- 监控查看（多摄像头视频流，仅 owner/admin/patrol 可见） ----------
+    AREA_EXAM = "exam"      # 考场监考：有 AI 辅助识别
+    AREA_OTHER = "other"    # 非考场监控：纯视频，无 AI
+
     def _monitor_load(self):
         p = config.DATA_ROOT / "monitors.json"
         if not p.exists():
             return []
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
+            cams = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             return []
+        # 老配置没有 area 字段：默认按考场监考处理
+        for c in cams:
+            c.setdefault("area", self.AREA_EXAM)
+        return cams
 
     def _monitor_save(self):
         try:
@@ -345,7 +355,8 @@ class TerminalApp(object):
 
     def _build_monitor_tab(self):
         f = self.tab_monitor
-        ttk.Label(f, text="实时视频监控（多摄像头同时播放）", font=FONT_B).pack(anchor="w")
+        ttk.Label(f, text="实时视频监控（考场监考 + 非考场监控，多摄像头同时播放）",
+                  font=FONT_B).pack(anchor="w")
         if not HAS_CV2 or not HAS_PIL:
             ttk.Label(f, text="⚠ 缺少视频播放依赖：需要 opencv-python 与 Pillow",
                       foreground="#c00").pack(anchor="w", pady=10)
@@ -356,10 +367,11 @@ class TerminalApp(object):
         self._cam_caps = {}         # url -> cap
         self._cam_running = {}      # url -> bool
         self._cam_photos = {}       # url -> PhotoImage
-        self._person_detectors = {}  # url -> PersonTracker（每路一条轨迹集）
+        self._person_detectors = {}  # url -> PersonTracker（仅考场路）
         self._behavior_tracker = _BehaviorTracker()
         self._ai_error_file = config.DATA_ROOT / "ai_detect_error.txt"
 
+        # ---- 顶部工具条 ----
         bar = ttk.Frame(f)
         bar.pack(fill="x", pady=(6, 6))
         ttk.Button(bar, text="📹 管理摄像头",
@@ -368,50 +380,72 @@ class TerminalApp(object):
                    command=self._monitor_play_all).pack(side="left", padx=6)
         ttk.Button(bar, text="⏹ 全部停止",
                    command=self._monitor_stop_all).pack(side="left")
-        self.mon_ai = tk.BooleanVar(value=False)
+        self.mon_ai = tk.BooleanVar(value=True)     # 考场监考默认开启 AI 辅助识别
         if HAS_PD:
             ttk.Checkbutton(
-                bar, text="AI 框选识别（逐人：绿=正常 红=越界/触线）",
+                bar, text="AI 辅助识别（仅考场监考生效：绿=正常 橙=异常 红=越界）",
                 variable=self.mon_ai).pack(side="left", padx=12)
         self.monitor_status = ttk.Label(bar, text="就绪", foreground="#666")
         self.monitor_status.pack(side="right")
 
-        # 摄像头画面网格容器：可滚动，支持鼠标滚轮
-        container = ttk.Frame(f)
-        container.pack(fill="both", expand=True)
-        self.monitor_canvas = tk.Canvas(container, highlightthickness=0)
-        self.monitor_canvas.pack(side="left", fill="both", expand=True)
-        monitor_sb = ttk.Scrollbar(container, orient="vertical",
-                                   command=self.monitor_canvas.yview)
-        monitor_sb.pack(side="right", fill="y")
-        self.monitor_canvas.configure(yscrollcommand=monitor_sb.set)
-        self.monitor_grid = ttk.Frame(self.monitor_canvas)
-        self.monitor_canvas.create_window((0, 0), window=self.monitor_grid, anchor="nw")
-        self.monitor_grid.bind("<Configure>",
-                               lambda _e: self.monitor_canvas.configure(
-                                   scrollregion=self.monitor_canvas.bbox("all")))
-        self._bind_mousewheel(self.monitor_canvas)
+        # ---- 两个子页签：考场监考（有 AI） / 非考场监控（纯视频） ----
+        nb = ttk.Notebook(f)
+        nb.pack(fill="both", expand=True)
+
+        exam_tab = ttk.Frame(nb, padding=4)
+        nb.add(exam_tab, text=" 🎓 考场监考（AI 辅助识别） ")
+        self.mon_exam_canvas, self.mon_exam_grid = self._make_scroll_area(exam_tab)
+
+        other_tab = ttk.Frame(nb, padding=4)
+        nb.add(other_tab, text=" 🚪 非考场监控（走廊/门厅，纯视频） ")
+        self.mon_other_canvas, self.mon_other_grid = self._make_scroll_area(other_tab)
+
         self._monitor_render_grid()
 
+    def _make_scroll_area(self, parent):
+        """可滚动摄像头网格容器，支持鼠标滚轮；返回 (canvas, grid)"""
+        canvas = tk.Canvas(parent, highlightthickness=0, bg="#f4f4f4")
+        canvas.pack(side="left", fill="both", expand=True)
+        sb = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        sb.pack(side="right", fill="y")
+        canvas.configure(yscrollcommand=sb.set)
+        grid = ttk.Frame(canvas)
+        canvas.create_window((0, 0), window=grid, anchor="nw")
+        grid.bind("<Configure>",
+                  lambda _e, c=canvas: c.configure(scrollregion=c.bbox("all")))
+        self._bind_mousewheel(canvas)
+        return canvas, grid
+
     def _monitor_render_grid(self):
-        """根据 monitors 列表渲染摄像头面板网格"""
-        for w in self.monitor_grid.winfo_children():
-            w.destroy()
-        if not self.monitors:
-            ttk.Label(self.monitor_grid,
-                      text="暂无摄像头，请点击「管理摄像头」添加（考场编号 / 设备名称 / 推流URL）。",
-                      foreground="#888").pack(pady=30)
+        """按区域分别渲染：考场监考 -> AI 网格；非考场监控 -> 纯视频网格"""
+        for grid in (self.mon_exam_grid, self.mon_other_grid):
+            for w in grid.winfo_children():
+                w.destroy()
+        exam_cams = [c for c in self.monitors
+                     if c.get("area", self.AREA_EXAM) == self.AREA_EXAM]
+        other_cams = [c for c in self.monitors
+                      if c.get("area", self.AREA_EXAM) != self.AREA_EXAM]
+        self._render_cam_grid(self.mon_exam_grid, exam_cams,
+                              empty_text="暂无考场监考摄像头，请在「管理摄像头」新增时选择「考场监考」。")
+        self._render_cam_grid(self.mon_other_grid, other_cams,
+                              empty_text="暂无非考场监控摄像头，请在「管理摄像头」新增时选择「非考场监控」。")
+
+    def _render_cam_grid(self, grid, cams, empty_text):
+        if not cams:
+            ttk.Label(grid, text=empty_text,
+                      foreground="#888", wraplength=560,
+                      justify="center").pack(pady=30)
             return
         cols = 2
-        for i, cam in enumerate(self.monitors):
+        for i, cam in enumerate(cams):
             room = cam.get("room", "未命名考场")
             device = cam.get("device", "未命名设备")
             url = cam.get("url", "")
-            frame = ttk.LabelFrame(self.monitor_grid, text=" %s · %s " % (room, device),
+            frame = ttk.LabelFrame(grid, text=" %s · %s " % (room, device),
                                    padding=4)
             frame.grid(row=i // cols, column=i % cols, sticky="nsew", padx=4, pady=4)
-            self.monitor_grid.rowconfigure(i // cols, weight=1)
-            self.monitor_grid.columnconfigure(i % cols, weight=1)
+            grid.rowconfigure(i // cols, weight=1)
+            grid.columnconfigure(i % cols, weight=1)
 
             lbl = tk.Label(frame, bg="#000", relief="sunken")
             lbl.pack(fill="both", expand=True)
@@ -495,8 +529,9 @@ class TerminalApp(object):
         if lbl is None or not lbl.winfo_exists():
             return
         try:
-            # AI 框选识别：勾选了才跑，避免不必要的 CPU 占用
-            if HAS_PD and getattr(self, "mon_ai", None) and self.mon_ai.get():
+            # AI 框选识别：仅「考场监考」区域的摄像头生效；勾选才跑，省 CPU
+            if (HAS_PD and getattr(self, "mon_ai", None) and self.mon_ai.get()
+                    and cam.get("area", self.AREA_EXAM) == self.AREA_EXAM):
                 det = self._person_detectors.get(url)
                 if det is None:
                     try:
@@ -608,21 +643,26 @@ class TerminalApp(object):
         self.monitor_status.config(text="已停止全部摄像头")
 
     def _monitor_manage(self):
-        """管理摄像头配置：考场编号、设备名称、推流URL"""
+        """管理摄像头配置：考场编号、设备名称、监控区域、推流URL"""
         win = tk.Toplevel(self.root)
         win.title("管理摄像头")
-        win.geometry("700x400")
+        win.geometry("780x420")
         win.transient(self.root)
         win.grab_set()
 
-        cols = ("room", "device", "url")
+        AREA_TEXT = {self.AREA_EXAM: "🎓 考场监考", self.AREA_OTHER: "🚪 非考场监控"}
+        AREA_VALUE = {v: k for k, v in AREA_TEXT.items()}
+
+        cols = ("room", "device", "area", "url")
         tree = ttk.Treeview(win, columns=cols, show="headings", height=10)
-        tree.heading("room", text="考场编号")
+        tree.heading("room", text="考场/区域编号")
         tree.heading("device", text="设备名称")
+        tree.heading("area", text="监控区域")
         tree.heading("url", text="推流地址")
         tree.column("room", width=100)
         tree.column("device", width=120)
-        tree.column("url", width=400)
+        tree.column("area", width=120)
+        tree.column("url", width=360)
         tree.pack(fill="both", expand=True, padx=10, pady=6)
 
         def reload():
@@ -631,41 +671,63 @@ class TerminalApp(object):
             for c in self.monitors:
                 tree.insert("", "end", values=(c.get("room", ""),
                                                c.get("device", ""),
+                                               AREA_TEXT.get(c.get("area", self.AREA_EXAM),
+                                                             AREA_TEXT[self.AREA_EXAM]),
                                                c.get("url", "")))
         reload()
 
         def add_or_edit(item=None):
-            old = ("", "", "") if item is None else tree.item(item)["values"]
+            if item is None:
+                old = ("", "", AREA_TEXT[self.AREA_EXAM], "")
+            else:
+                old = tuple(tree.item(item)["values"])
             dlg = tk.Toplevel(win)
             dlg.title("摄像头" + ("编辑" if item else "新增"))
-            dlg.geometry("500x180")
+            dlg.geometry("520x230")
             dlg.transient(win)
             dlg.grab_set()
             f = ttk.Frame(dlg, padding=12)
             f.pack(fill="both", expand=True)
-            v = [tk.StringVar(value=old[0]), tk.StringVar(value=old[1]), tk.StringVar(value=old[2])]
-            labels = ["考场编号：", "设备名称：", "推流地址："]
-            for i, (lab, var) in enumerate(zip(labels, v)):
-                ttk.Label(f, text=lab).grid(row=i, column=0, sticky="e", pady=4)
-                ttk.Entry(f, textvariable=var, width=50).grid(row=i, column=1, sticky="w")
+            v_room = tk.StringVar(value=old[0])
+            v_dev = tk.StringVar(value=old[1])
+            v_area = tk.StringVar(value=old[2])
+            v_url = tk.StringVar(value=old[3])
+            ttk.Label(f, text="考场/区域编号：").grid(row=0, column=0, sticky="e", pady=4)
+            ttk.Entry(f, textvariable=v_room, width=46).grid(row=0, column=1, sticky="w")
+            ttk.Label(f, text="设备名称：").grid(row=1, column=0, sticky="e", pady=4)
+            ttk.Entry(f, textvariable=v_dev, width=46).grid(row=1, column=1, sticky="w")
+            ttk.Label(f, text="监控区域：").grid(row=2, column=0, sticky="e", pady=4)
+            cb = ttk.Combobox(f, textvariable=v_area, state="readonly", width=43,
+                              values=[AREA_TEXT[self.AREA_EXAM], AREA_TEXT[self.AREA_OTHER]])
+            cb.grid(row=2, column=1, sticky="w")
+            ttk.Label(f, text="　考场监考：AI 辅助识别逐人行为；非考场监控：纯视频，无 AI",
+                      foreground="#888", font=("Microsoft YaHei", 9)
+                      ).grid(row=3, column=0, columnspan=2, sticky="w")
+            ttk.Label(f, text="推流地址：").grid(row=4, column=0, sticky="e", pady=4)
+            ttk.Entry(f, textvariable=v_url, width=46).grid(row=4, column=1, sticky="w")
 
             def save():
-                room, device, url = [x.get().strip() for x in v]
+                room, device, url = v_room.get().strip(), v_dev.get().strip(), v_url.get().strip()
+                area = AREA_VALUE.get(v_area.get().strip(), self.AREA_EXAM)
                 if not room or not device or not url:
-                    messagebox.showwarning("提示", "考场编号、设备名称、推流地址均不能为空")
+                    messagebox.showwarning("提示", "考场/区域编号、设备名称、推流地址均不能为空")
                     return
-                new = {"room": room, "device": device, "url": url}
+                new = {"room": room, "device": device, "url": url, "area": area}
                 if item is None:
                     self.monitors.append(new)
                 else:
                     idx = tree.index(item)
+                    old_cam = self.monitors[idx]
+                    new["_label"] = old_cam.get("_label")
+                    new["_status"] = old_cam.get("_status")
+                    new["_btn"] = old_cam.get("_btn")
                     self.monitors[idx] = new
                 self._monitor_save()
                 reload()
                 dlg.destroy()
 
             bbar = ttk.Frame(f)
-            bbar.grid(row=3, column=0, columnspan=2, pady=10)
+            bbar.grid(row=5, column=0, columnspan=2, pady=10)
             ttk.Button(bbar, text="保存", command=save).pack(side="left", padx=6)
             ttk.Button(bbar, text="取消", command=dlg.destroy).pack(side="left", padx=6)
 

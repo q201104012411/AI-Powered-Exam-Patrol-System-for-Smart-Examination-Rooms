@@ -801,9 +801,9 @@ class App(object):
         ttk.Button(bar, text="🔄 刷新设备", command=self.refresh_mon).pack(side="left")
         ttk.Button(bar, text="▶ 全部播放", command=self._mon_play_all).pack(side="left", padx=6)
         ttk.Button(bar, text="⏹ 全部停止", command=self._mon_stop_all).pack(side="left")
-        self.mon_ai = tk.BooleanVar(value=False)
+        self.mon_ai = tk.BooleanVar(value=True)     # 考场监控默认开启 AI 辅助识别
         self.mon_ai_chk = ttk.Checkbutton(
-            bar, text="AI 越界检测（人形框：绿=正常 红=越界）",
+            bar, text="AI 辅助识别（逐人：绿=正常 橙=异常 红=越界，考场监控默认开启）",
             variable=self.mon_ai)
         self.mon_ai_chk.pack(side="left", padx=12)
         self.mon_status = ttk.Label(bar, text="就绪", foreground="#666")

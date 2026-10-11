@@ -70,6 +70,9 @@ def report_behavior(device_code, behavior, pid=0, crosses=0,
         "前倾/趴桌": "LEAN_FORWARD",
         "东张西望": "TURN_HEAD",
         "长时间低头": "LOOK_DOWN",
+        "眼神游移": "GAZE_SHIFT",
+        "闭眼/趴睡": "SLEEPY",
+        "转脸偏头": "HEAD_TURN",
     }
     alert_code = code_map.get(behavior, "PERSON_BEHAVIOR_ABNORMAL")
     detail = "AI 实时监控：#%d 号人员「%s」" % (pid, behavior)

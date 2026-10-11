@@ -94,6 +94,9 @@ ALERT_CODE_LEVEL = {
     "BIG_TURN": LEVEL_ORANGE,           # 大幅度偏转/侧转回头
     "STAND_UP": LEVEL_ORANGE,           # 起立/站立
     "LEAN_FORWARD": LEVEL_ORANGE,       # 前倾/趴桌
+    "GAZE_SHIFT": LEVEL_ORANGE,         # 眼神游移/视线偏移
+    "SLEEPY": LEVEL_ORANGE,             # 闭眼/趴睡
+    "HEAD_TURN": LEVEL_ORANGE,          # 转脸偏头
     "PERSON_BEHAVIOR_ABNORMAL": LEVEL_ORANGE,  # 其他异常行为兜底
 }
 

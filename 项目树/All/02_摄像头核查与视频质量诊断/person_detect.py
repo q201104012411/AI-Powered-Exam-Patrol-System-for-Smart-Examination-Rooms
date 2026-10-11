@@ -29,9 +29,13 @@ ACT_DOWN = "长时间低头"
 ACT_LEFT = "靠左"
 ACT_RIGHT = "靠右"
 ACT_CROSS = "触碰红线"       # 每跨越一次警戒线计一次
+ACT_GAZE = "眼神游移"        # 双眼位置不对称/视线漂移（人脸+人眼级联）
+ACT_SLEEPY = "闭眼/趴睡"     # 检测到人脸但长时间看不到眼睛
+ACT_HEADTURN = "转脸偏头"    # 人脸明显偏向人框一侧
 
 # 需要上报 03 的异常行为
-ABNORMAL_ACTIONS = (ACT_CROSS, ACT_STAND, ACT_TURN, ACT_LEAN, ACT_LOOK, ACT_DOWN)
+ABNORMAL_ACTIONS = (ACT_CROSS, ACT_STAND, ACT_TURN, ACT_LEAN, ACT_LOOK, ACT_DOWN,
+                    ACT_GAZE, ACT_SLEEPY, ACT_HEADTURN)
 
 
 def _load_font(size=16):
@@ -58,7 +62,8 @@ def _centroid(rect):
 class _Track(object):
     """一个人的跟踪状态"""
     __slots__ = ("pid", "rect", "missed", "centroids", "heights",
-                 "prev_side", "crosses", "cross_epochs")
+                 "prev_side", "crosses", "cross_epochs",
+                 "face_cache", "face_age")
 
     def __init__(self, pid, rect, line_y):
         self.pid = pid
@@ -69,6 +74,8 @@ class _Track(object):
         self.prev_side = self._side(rect, line_y)
         self.crosses = 0                    # 累计跨线次数
         self.cross_epochs = deque(maxlen=10)
+        self.face_cache = None              # 最近一次人脸/人眼分析结果
+        self.face_age = 99                  # 距上次人脸分析的帧数
 
     @staticmethod
     def _side(rect, line_y):
@@ -77,7 +84,7 @@ class _Track(object):
 
 
 class PersonTracker(object):
-    """HOG 检测 + 质心最近邻逐人跟踪"""
+    """HOG 检测 + 质心最近邻逐人跟踪 + Haar 人脸/人眼微表情分析"""
 
     def __init__(self, margin_ratio=0.05, max_dist=90, max_missed=12):
         if not hasattr(cv2, "HOGDescriptor"):
@@ -93,6 +100,19 @@ class PersonTracker(object):
         self.max_missed = max_missed        # 连续丢失多少帧后删除轨迹
         self._tracks = {}                   # pid -> _Track
         self._next_pid = 1
+        self._frame_no = 0
+        # Haar 人脸/人眼级联（OpenCV 自带，无需下载模型）
+        self._face_cascade = None
+        self._eye_cascade = None
+        try:
+            base = cv2.data.haarcascades
+            self._face_cascade = cv2.CascadeClassifier(
+                base + "haarcascade_frontalface_default.xml")
+            self._eye_cascade = cv2.CascadeClassifier(
+                base + "haarcascade_eye.xml")
+        except Exception:
+            self._face_cascade = None
+            self._eye_cascade = None
 
     # ---------------- 检测 ----------------
     def _detect(self, frame):
@@ -116,6 +136,7 @@ class PersonTracker(object):
     # ---------------- 跟踪 ----------------
     def update(self, frame, boundary_ratio=0.5):
         """每帧调用：检测 -> 匹配轨迹 -> 更新跨线计数，返回 tracks 列表"""
+        self._frame_no += 1
         fh = frame.shape[0]
         line_y = int(fh * boundary_ratio)
         rects = self._detect(frame)
@@ -139,6 +160,7 @@ class PersonTracker(object):
                 cx, cy = cents[best]
                 tr.centroids.append((cx, cy))
                 tr.heights.append(tr.rect[3])
+                tr.face_age += 1
                 # 跨线计数：上->下 或 下->上 都算一次触碰
                 side = tr._side(tr.rect, line_y)
                 if side != tr.prev_side:
@@ -147,6 +169,7 @@ class PersonTracker(object):
                     tr.prev_side = side
             else:
                 tr.missed += 1
+                tr.face_age += 1
                 if tr.missed > self.max_missed:
                     del self._tracks[pid]
 
@@ -159,9 +182,42 @@ class PersonTracker(object):
             self._next_pid += 1
         return self._tracks
 
+    # ---------------- 人脸 / 眼神（微表情近似） ----------------
+    def _face_analyze(self, frame, track):
+        """
+        在人框上半部分做人脸+人眼检测（每 4 帧一次，轨迹级缓存）。
+        返回 {"face": (fx,fy,fw,fh)|None, "eyes": n, "face_dx": 偏头量}
+        """
+        if self._face_cascade is None or self._eye_cascade is None:
+            return None
+        if track.face_cache is not None and track.face_age < 4:
+            return track.face_cache
+        x, y, w, h = track.rect
+        fh, fw = frame.shape[:2]
+        head_h = max(24, int(h * 0.45))          # 头部区域：人框上 45%
+        roi = frame[y:y + head_h, x:x + w]
+        if roi.size == 0:
+            return None
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        faces = self._face_cascade.detectMultiScale(gray, 1.1, 4,
+                                                    minSize=(24, 24))
+        if len(faces) == 0:
+            track.face_cache = {"face": None, "eyes": 0, "face_dx": 0.0}
+        else:
+            fx, fy, fw2, fh2 = max(faces, key=lambda r: r[2] * r[3])
+            fgray = gray[fy:fy + fh2, fx:fx + fw2]
+            eyes = self._eye_cascade.detectMultiScale(fgray, 1.1, 3,
+                                                      minSize=(10, 10))
+            face_cx = fx + fw2 // 2
+            face_dx = (face_cx - w / 2.0) / max(1.0, float(w))   # 人脸偏离人框中心比例
+            track.face_cache = {"face": (x + fx, y + fy, fw2, fh2),
+                                "eyes": int(len(eyes)),
+                                "face_dx": face_dx}
+        track.face_age = 0
+        return track.face_cache
+
     # ---------------- 行为分析 ----------------
-    @staticmethod
-    def analyze(frame, track, boundary_ratio=0.5, edge_margin=20):
+    def analyze(self, frame, track, boundary_ratio=0.5, edge_margin=20):
         """
         对一条轨迹做行为推断。
         返回 (action, bad, behaviors)
@@ -217,7 +273,29 @@ class PersonTracker(object):
                 if action in (ACT_NORMAL, ACT_SIT):
                     action = ACT_DOWN
 
-        # 8) 贴边
+        # 8) 人脸/眼神微表情（有级联时才跑，失败不影响其它判定）
+        try:
+            fa = self._face_analyze(frame, track)
+        except Exception:
+            fa = None
+        if fa and fa.get("face") is not None:
+            # 转脸偏头：人脸明显偏向人框一侧
+            if abs(fa.get("face_dx", 0.0)) > 0.22:
+                behaviors.append(ACT_HEADTURN)
+                if action in (ACT_NORMAL, ACT_SIT):
+                    action = ACT_HEADTURN
+            # 闭眼/趴睡：检测到人脸但看不到眼睛
+            if fa.get("eyes", 0) == 0:
+                behaviors.append(ACT_SLEEPY)
+                if action in (ACT_NORMAL, ACT_SIT):
+                    action = ACT_SLEEPY
+            # 眼神游移：只看到单眼（视线明显偏向一边）
+            elif fa.get("eyes", 0) == 1:
+                behaviors.append(ACT_GAZE)
+                if action in (ACT_NORMAL, ACT_SIT):
+                    action = ACT_GAZE
+
+        # 9) 贴边
         if x < edge_margin or y < edge_margin \
                 or x + w > fw - edge_margin or y + h > fh - edge_margin:
             bad = True
@@ -251,9 +329,21 @@ class PersonTracker(object):
             persons.append({"pid": pid, "rect": tr.rect, "action": action,
                             "bad": bad, "crosses": tr.crosses,
                             "behaviors": behaviors})
-            color = (0, 0, 255) if bad else (0, 200, 0)
+            # 三色：红=越界/贴边，橙=异常行为未越界，绿=正常
+            if bad:
+                color = (0, 0, 255)
+            elif behaviors:
+                color = (0, 165, 255)
+            else:
+                color = (0, 200, 0)
             x, y, w, h = tr.rect
             cv2.rectangle(frame, (x, y), (x + w, y + h), color, 1)  # 细框=更小的视觉占用
+            # 人脸小框（微表情辅助，青色）
+            fa = getattr(tr, "face_cache", None)
+            if fa and fa.get("face") is not None:
+                fx, fy, fw2, fh2 = fa["face"]
+                cv2.rectangle(frame, (fx, fy), (fx + fw2, fy + fh2),
+                              (255, 255, 0), 1)
 
         cv2.line(frame, (0, line_y), (fw, line_y), (0, 165, 255), 1)
 
@@ -263,7 +353,12 @@ class PersonTracker(object):
         draw = ImageDraw.Draw(pil)
         font = _load_font(15)
         for p in persons:
-            color = (0, 0, 255) if p["bad"] else (0, 200, 0)
+            if p["bad"]:
+                color = (0, 0, 255)
+            elif p["behaviors"]:
+                color = (0, 165, 255)
+            else:
+                color = (0, 200, 0)
             x, y, w, h = p["rect"]
             label = "#%d %s" % (p["pid"], p["action"])
             if p["crosses"] >= 2:
