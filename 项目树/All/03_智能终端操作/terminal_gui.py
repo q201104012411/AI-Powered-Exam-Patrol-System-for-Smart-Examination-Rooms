@@ -317,9 +317,21 @@ class TerminalApp(object):
         self.monitor_status = ttk.Label(bar, text="就绪", foreground="#666")
         self.monitor_status.pack(side="right")
 
-        # 摄像头画面网格容器
-        self.monitor_grid = ttk.Frame(f)
-        self.monitor_grid.pack(fill="both", expand=True)
+        # 摄像头画面网格容器：可滚动，支持鼠标滚轮
+        container = ttk.Frame(f)
+        container.pack(fill="both", expand=True)
+        self.monitor_canvas = tk.Canvas(container, highlightthickness=0)
+        self.monitor_canvas.pack(side="left", fill="both", expand=True)
+        monitor_sb = ttk.Scrollbar(container, orient="vertical",
+                                   command=self.monitor_canvas.yview)
+        monitor_sb.pack(side="right", fill="y")
+        self.monitor_canvas.configure(yscrollcommand=monitor_sb.set)
+        self.monitor_grid = ttk.Frame(self.monitor_canvas)
+        self.monitor_canvas.create_window((0, 0), window=self.monitor_grid, anchor="nw")
+        self.monitor_grid.bind("<Configure>",
+                               lambda _e: self.monitor_canvas.configure(
+                                   scrollregion=self.monitor_canvas.bbox("all")))
+        self._bind_mousewheel(self.monitor_canvas)
         self._monitor_render_grid()
 
     def _monitor_render_grid(self):
@@ -1540,6 +1552,16 @@ class TerminalApp(object):
     def _st_text(st):
         return {"pending": "待处置", "acked": "已确认", "reviewed": "已复核",
                 "closed": "已归档"}.get(st, st)
+
+    def _bind_mousewheel(self, widget):
+        """给可滚动控件绑定鼠标滚轮"""
+        def on_wheel(event):
+            # Windows 滚轮事件 delta 是 120 的倍数
+            widget.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            return "break"
+        widget.bind("<MouseWheel>", on_wheel)
+        # 鼠标进入/离开时可获取焦点，滚轮更稳定
+        widget.bind("<Enter>", lambda _e: widget.focus_set())
 
     def _selected(self):
         sel = self.tree.selection()

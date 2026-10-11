@@ -42,6 +42,7 @@ import storage
 import web_accounts
 import baseline as baseline_mod
 import patrol as patrol_mod
+import person_detect as pd_mod
 import report as report_mod
 import workorder as wo_mod
 
@@ -763,8 +764,13 @@ class App(object):
         ttk.Button(bar, text="🔄 刷新设备", command=self.refresh_mon).pack(side="left")
         ttk.Button(bar, text="▶ 全部播放", command=self._mon_play_all).pack(side="left", padx=6)
         ttk.Button(bar, text="⏹ 全部停止", command=self._mon_stop_all).pack(side="left")
+        self.mon_ai = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="AI 越界检测（人形框：绿=正常 红=越界）",
+                        variable=self.mon_ai).pack(side="left", padx=12)
         self.mon_status = ttk.Label(bar, text="就绪", foreground="#666")
         self.mon_status.pack(side="right")
+
+        self._person_detector = None
 
         self.mon_grid = ttk.Frame(f)
         self.mon_grid.pack(fill="both", expand=True)
@@ -878,6 +884,12 @@ class App(object):
         if lbl is None or not lbl.winfo_exists():
             return
         try:
+            # AI 越界检测：勾选了才跑，避免不必要的 CPU 占用
+            if getattr(self, "mon_ai", None) and self.mon_ai.get():
+                if self._person_detector is None:
+                    self._person_detector = pd_mod.PersonDetector()
+                frame, viol = self._person_detector.draw(frame)
+                self.mon_status.config(text="AI检测中，越界：%d" % viol)
             h = lbl.winfo_height()
             w = lbl.winfo_width()
             if h < 50:
