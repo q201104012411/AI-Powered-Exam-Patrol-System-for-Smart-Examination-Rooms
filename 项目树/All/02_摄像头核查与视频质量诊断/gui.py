@@ -779,9 +779,6 @@ class _BehaviorTracker(object):
                 s["count"] = 0
         return triggered
 
-
-class App(object):
-
     def _mon_tab(self):
         f = self.t_mon
         ttk.Label(f, text="实时监控（基于设备台账取流地址，多摄像头同时播放）",
