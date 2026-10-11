@@ -774,6 +774,7 @@ class App(object):
 
         self.mon_grid = ttk.Frame(f)
         self.mon_grid.pack(fill="both", expand=True)
+        self._mon_panels = {}       # code -> {label, status, btn}
         self.refresh_mon()
 
     def refresh_mon(self):
@@ -781,6 +782,7 @@ class App(object):
         if not self.can_monitor:
             return
         self._mon_stop_all()
+        self._mon_panels.clear()
         for w in self.mon_grid.winfo_children():
             w.destroy()
         devs = self.store.list_devices(enabled_only=False)
@@ -801,17 +803,16 @@ class App(object):
             self.mon_grid.columnconfigure(i % cols, weight=1)
             lbl = tk.Label(frame, bg="#000", relief="sunken")
             lbl.pack(fill="both", expand=True)
-            dev._mon_label = lbl
             status = ttk.Label(frame, text="未播放", foreground="#666")
             status.pack(anchor="w")
-            dev._mon_status = status
             bbar = ttk.Frame(frame)
             bbar.pack(fill="x", pady=(2, 0))
-            dev._mon_btn = ttk.Button(bbar, text="▶ 播放",
-                                      command=lambda c=code: self._cam_play(c))
-            dev._mon_btn.pack(side="left")
+            btn = ttk.Button(bbar, text="▶ 播放",
+                             command=lambda c=code: self._cam_play(c))
+            btn.pack(side="left")
             ttk.Button(bbar, text="⏹ 停止",
                        command=lambda c=code: self._cam_stop(c)).pack(side="left", padx=4)
+            self._mon_panels[code] = {"label": lbl, "status": status, "btn": btn}
 
     @staticmethod
     def _mon_try_open(url):
@@ -877,10 +878,10 @@ class App(object):
             pass
 
     def _cam_update(self, code, frame):
-        dev = self._dev_by_code(code)
-        if dev is None or not hasattr(dev, "_mon_label"):
+        panel = self._mon_panels.get(code)
+        if panel is None:
             return
-        lbl = dev._mon_label
+        lbl = panel.get("label")
         if lbl is None or not lbl.winfo_exists():
             return
         try:
@@ -917,10 +918,10 @@ class App(object):
         self._cam_stopped_ui(code)
 
     def _cam_stopped_ui(self, code):
-        dev = self._dev_by_code(code)
+        panel = self._mon_panels.get(code)
         try:
-            if dev is not None and hasattr(dev, "_mon_label") and dev._mon_label.winfo_exists():
-                dev._mon_label.config(image="")
+            if panel is not None and panel.get("label") and panel["label"].winfo_exists():
+                panel["label"].config(image="")
             self._cam_btn_text(code, "▶ 播放")
             self._cam_set_status(code, "已停止", "#666")
         except tk.TclError:
@@ -933,14 +934,14 @@ class App(object):
         return None
 
     def _cam_set_status(self, code, text, color):
-        dev = self._dev_by_code(code)
-        if dev is not None and hasattr(dev, "_mon_status") and dev._mon_status.winfo_exists():
-            dev._mon_status.config(text=text, foreground=color)
+        panel = self._mon_panels.get(code)
+        if panel is not None and panel.get("status") and panel["status"].winfo_exists():
+            panel["status"].config(text=text, foreground=color)
 
     def _cam_btn_text(self, code, text):
-        dev = self._dev_by_code(code)
-        if dev is not None and hasattr(dev, "_mon_btn") and dev._mon_btn.winfo_exists():
-            dev._mon_btn.config(text=text)
+        panel = self._mon_panels.get(code)
+        if panel is not None and panel.get("btn") and panel["btn"].winfo_exists():
+            panel["btn"].config(text=text)
 
     def _mon_play_all(self):
         for d in self.store.list_devices(enabled_only=False):
