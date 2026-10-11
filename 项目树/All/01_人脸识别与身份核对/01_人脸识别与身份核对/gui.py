@@ -228,6 +228,13 @@ class FaceVerifyGUI:
                                       command=self._toggle_console_panel)
         self.cmd_nav_btn.grid(row=0, column=7, padx=(10, 2))
 
+        # 「🤖 AI 助手」独立入口：一键展开控制台并切到 AI 对话模式——
+        # "想和 AI 对话"不该要求用户先理解命令控制台是什么。
+        # 可见性与命令控制台一致，且仅所有者层级（显隐同样由 _sync_cmd_btn 控制）。
+        self.ai_nav_btn = ttk.Button(live, text="🤖 AI 助手",
+                                     command=self._open_ai_chat)
+        self.ai_nav_btn.grid(row=0, column=8, padx=(2, 2))
+
         # 视频画面 + 内置命令控制台：**并排**放在同一行（视频在左，cmd 在右）。
         # 单独用一个容器才能让两者 side-by-side；控制台默认隐藏，点上面的按钮展开。
         media = ttk.Frame(live)
@@ -1038,13 +1045,25 @@ class FaceVerifyGUI:
 
         # 实时视频区右上的开关按钮：按 grid 管理，用 grid_remove 保留布局参数
         nav = getattr(self, "cmd_nav_btn", None)
-        allowed = accounts.can_cmd_console((self.user or {}).get("role"))
+        role = (self.user or {}).get("role")
+        allowed = accounts.can_cmd_console(role)
         if self._widget_alive(nav):
             try:
                 if allowed:
                     nav.grid()
                 else:
                     nav.grid_remove()
+            except tk.TclError:
+                pass
+
+        # 「🤖 AI 助手」入口：仅所有者层级可见（对话/巡视都只对这个层级开放）
+        ai_nav = getattr(self, "ai_nav_btn", None)
+        if self._widget_alive(ai_nav):
+            try:
+                if allowed and accounts.cmd_console_tier(role) == accounts.CMD_TIER_FULL:
+                    ai_nav.grid()
+                else:
+                    ai_nav.grid_remove()
             except tk.TclError:
                 pass
 
@@ -1064,7 +1083,8 @@ class FaceVerifyGUI:
     def _console_hint_text(is_full):
         """控制台提示语：所有者说清能干什么，管理员说清**只能**干什么"""
         if is_full:
-            return "输入任意系统命令 / Python 代码（Ctrl+Enter 执行）"
+            return ("输入任意系统命令 / Python 代码（Ctrl+Enter 执行）；\n"
+                    "直接输入中文问题 = 与 AI 对话，或点右上「🤖 AI 助手」")
         return "仅可执行：ollama run <模型> [提示词]（管理员层级）"
 
     # AI 对话模式的提示语（选中「🤖 AI 对话」时替换默认提示）
@@ -1354,6 +1374,12 @@ class FaceVerifyGUI:
             box, height=11, width=34, font=("Consolas", 9), wrap="word",
             background="#0f172a", foreground="#e2e8f0")
         self.console_out.pack(fill="both", expand=True, pady=(2, 0))
+        # 对话气泡配色：你说的话 / AI 回答 / AI 巡视 / 错误 一眼可辨
+        self.console_out.tag_config("ai_user", foreground="#7dd3fc")    # 浅蓝：你的输入
+        self.console_out.tag_config("ai_bot", foreground="#86efac")     # 浅绿：AI 回答
+        self.console_out.tag_config("ai_watch", foreground="#fcd34d")   # 浅黄：AI 巡视
+        self.console_out.tag_config("ai_err", foreground="#fca5a5")     # 浅红：失败
+        self.console_out.tag_config("ai_dim", foreground="#64748b")     # 灰：分隔线/提示
         self.console_out.insert("end", "（尚未执行）")
         self.console_out.config(state="disabled")
 
@@ -1508,7 +1534,7 @@ class FaceVerifyGUI:
         except tk.TclError:
             pass
 
-    def _ai_append_out(self, text):
+    def _ai_append_out(self, text, tag=None):
         """向控制台输出区**追加**一段内容（对话与巡视都走这里，不覆盖历史）"""
         out = getattr(self, "console_out", None)
         if not self._widget_alive(out):
@@ -1517,9 +1543,31 @@ class FaceVerifyGUI:
             out.config(state="normal")
             if out.get("1.0", "end").strip() in ("（尚未执行）", "（执行中，请稍候…）"):
                 out.delete("1.0", "end")
-            out.insert("end", text.rstrip() + "\n" + "─" * 38 + "\n")
+            out.insert("end", text.rstrip() + "\n", tag or ())
+            out.insert("end", "─" * 38 + "\n", "ai_dim")
             out.see("end")
             out.config(state="disabled")
+        except tk.TclError:
+            pass
+
+    def _open_ai_chat(self):
+        """「🤖 AI 助手」入口：展开控制台 → 切到 AI 对话模式 → 聚焦输入框"""
+        role = (self.user or {}).get("role")
+        if accounts.cmd_console_tier(role) != accounts.CMD_TIER_FULL:
+            messagebox.showerror(
+                "权限不足",
+                "AI 助手当前不可用。\n\n"
+                "请先在「更多操作 → 操作记录 → 所有者设置」勾选「命令控制台」总开关。")
+            return
+        panel = getattr(self, "console_panel", None)
+        if self._widget_alive(panel) and not panel.winfo_manager():
+            self._toggle_console_panel()          # 面板收着则展开（按钮文案同步交给 toggle）
+        self.console_mode.set(CONSOLE_MODE_LABELS["ai"])
+        self._console_mode_changed()
+        if self.ai_chat is None:
+            self._ai_start_chat(self.ai_model_var.get())
+        try:
+            self.console_input.focus_set()
         except tk.TclError:
             pass
 
@@ -1537,7 +1585,8 @@ class FaceVerifyGUI:
         self._ai_append_out(
             "🤖 已加载模型 %s，进入 AI 对话。\n"
             "直接输入问题即可——我能看到你当前的界面状态（考生、视频、核验结果等），\n"
-            "可以问我「我现在在干什么」「刚才为什么被拦截」「下一步该做什么」。" % model)
+            "可以问我「我现在在干什么」「刚才为什么被拦截」「下一步该做什么」。" % model,
+            tag="ai_bot")
 
     def _ai_chat_send(self, text, tier):
         """发送一条对话消息（后台线程调 ollama，不卡界面）"""
@@ -1554,7 +1603,7 @@ class FaceVerifyGUI:
         self._ai_busy = True
         self.console_run_btn.config(state="disabled")
         self.console_meta.config(text="AI 思考中…（%s）" % model)
-        self._ai_append_out("🧑 你：%s" % text)
+        self._ai_append_out("🧑 你：%s" % text, tag="ai_user")
         try:                                # 发出去就清空输入框，像正常聊天软件一样
             self.console_input.delete("1.0", "end")
         except tk.TclError:
@@ -1577,7 +1626,8 @@ class FaceVerifyGUI:
                     return
                 self._ai_busy = False
                 tag = "🤖 AI" if ok else "⚠ AI 调用失败"
-                self._ai_append_out("%s：%s" % (tag, reply))
+                self._ai_append_out("%s：%s" % (tag, reply),
+                                    tag=("ai_bot" if ok else "ai_err"))
                 self.console_meta.config(
                     text=("✅ 已回复" if ok else "❌ 失败") + " ｜ 模型 " + model)
                 self.console_run_btn.config(state="normal")
@@ -1725,9 +1775,10 @@ class FaceVerifyGUI:
                     return
                 self._ai_busy = False
                 if ok:
-                    self._ai_append_out("🔎 AI 巡视（自动分析当前操作）：\n%s" % text)
+                    self._ai_append_out("🔎 AI 巡视（自动分析当前操作）：\n%s" % text,
+                                        tag="ai_watch")
                 else:
-                    self._ai_append_out("⚠ AI 巡视失败：%s" % text)
+                    self._ai_append_out("⚠ AI 巡视失败：%s" % text, tag="ai_err")
                 # 同步写到主结果输出框：巡视是"不盯着控制台也能看到"的提醒，
                 # 只写控制台输出框的话，面板收着时用户根本看不到分析结果
                 tag = "🔎 AI 巡视" if ok else "⚠ AI 巡视失败"

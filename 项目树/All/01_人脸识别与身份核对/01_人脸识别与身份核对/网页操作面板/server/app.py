@@ -356,6 +356,140 @@ def cmd_console_run():
     return jsonify(result)
 
 
+# ---------------- AI 助手（ollama 对话 / 状态分析；仅所有者层级） ----------------
+def _ai_tier_or_403():
+    """
+    AI 助手统一门槛：总开关已开 + 当前角色为所有者（full 层级）。
+    与 GUI 保持一致：管理员层级只能用命令控制台里的 ollama 单轮问答。
+    返回 (tier, error_response | None)。
+    """
+    import accounts as _accounts
+    if not _accounts.can_cmd_console(request.user["role"]):
+        return None, (jsonify({"error": "AI 助手未开启：请先由所有者在"
+                                        "「所有者设置」中开启「命令控制台」。"}), 403)
+    tier = _accounts.cmd_console_tier(request.user["role"])
+    if tier != _accounts.CMD_TIER_FULL:
+        return tier, (jsonify({"error": "AI 助手仅所有者可用；"
+                                        "管理员请使用命令控制台中的 ollama 辅助。"}), 403)
+    return tier, None
+
+
+def _web_snapshot():
+    """
+    网页端"AI 调取当前我在干什么"的快照：服务器视角的系统状态 +
+    最近操作日志尾部（操作日志天然记录"用户刚做了什么"）。
+    """
+    from action_logger import ActionLogger
+    lines = ["时间：%s" % datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
+    lines.append("操作员：%s（网页端，角色 %s）"
+                 % (request.user["username"], request.user["role"]))
+    try:
+        cands = store.load()
+        consent_yes = sum(1 for c in cands.values()
+                          if str(c.get("consent_status", "")).startswith("已同意"))
+        lines.append("报名库：共 %d 名考生，其中 %d 名已登记单独同意"
+                     % (len(cands), consent_yes))
+    except Exception:
+        pass
+    lines.append("大考模式：%s ｜ 严格模式：%s"
+                 % ("开启" if accounts.major_exam_enabled() else "关闭",
+                    "开启" if accounts.strict_mode_enabled() else "关闭"))
+    try:                            # 最近操作：操作员"正在干什么"的最直接证据
+        recent = ActionLogger().query(limit=8)
+        if recent:
+            lines.append("最近操作（新→旧）：\n" + "\n".join(recent))
+    except Exception:
+        pass
+    return "\n".join(lines)
+
+
+@app.route("/api/ai/models", methods=["GET"])
+@require_auth(roles=["owner", "admin"])
+def ai_models():
+    """列出本机 ollama 可用模型（供 AI 助手的模型选择框）"""
+    _tier, err = _ai_tier_or_403()
+    if err:
+        return err
+    import ai_assistant
+    return jsonify({"models": ai_assistant.list_models(),
+                    "default": ai_assistant.DEFAULT_MODEL})
+
+
+@app.route("/api/ai/chat", methods=["POST"])
+@require_auth(roles=["owner", "admin"])
+@limiter.limit("20 per minute")
+def ai_chat():
+    """
+    AI 对话。请求体：{"message": "...", "model": "可选",
+                     "history": [{"role":"user"|"assistant","content":"..."}]}
+    历史由前端维护并回传（服务端无会话状态），服务端只取最近 20 条，
+    并强制以服务端快照 + 系统提示开头——前端改请求体也改不了这两点。
+    每次对话都写审计哈希链（ai_assistant 内部完成）。
+    """
+    tier, err = _ai_tier_or_403()
+    if err:
+        return err
+    import ai_assistant
+
+    data = request.get_json(silent=True) or {}
+    message = (data.get("message") or "").strip()
+    if not message:
+        return jsonify({"error": "消息为空"}), 400
+    model = (data.get("model") or ai_assistant.DEFAULT_MODEL).strip()
+    history = data.get("history") or []
+    if not isinstance(history, list):
+        history = []
+    # 只保留合法的 user/assistant 文本消息，最多 20 条
+    clean_history = []
+    for m in history[-20:]:
+        if (isinstance(m, dict) and m.get("role") in ("user", "assistant")
+                and isinstance(m.get("content"), str)):
+            clean_history.append({"role": m["role"], "content": m["content"][:4000]})
+
+    user_content = ("【当前系统状态快照】\n%s\n\n【我的消息】\n%s"
+                    % (_web_snapshot(), message))
+    messages = ([{"role": "system", "content": ai_assistant.SYSTEM_PROMPT}]
+                + clean_history
+                + [{"role": "user", "content": user_content}])
+    try:
+        timeout = min(max(int(data.get("timeout") or 120), 30), 300)
+    except (TypeError, ValueError):
+        timeout = 120
+
+    import time as _time
+    started = _time.time()
+    ok, reply, err_detail, transport = ai_assistant.ollama_chat(
+        model, messages, timeout=timeout)
+    duration_ms = int((_time.time() - started) * 1000)
+    if ok:
+        reply = ai_assistant._strip_think(reply)
+    ai_assistant._audit_chat("ai-chat", model, message, ok,
+                             reply if ok else err_detail, duration_ms,
+                             request.user["username"], tier, "web")
+    if not ok:
+        return jsonify({"ok": False, "error": err_detail, "transport": transport}), 200
+    return jsonify({"ok": True, "reply": reply, "transport": transport})
+
+
+@app.route("/api/ai/watch", methods=["POST"])
+@require_auth(roles=["owner", "admin"])
+@limiter.limit("10 per minute")
+def ai_watch():
+    """AI 巡视：手动触发一次"分析我最近在干什么"（网页端按操作日志分析）"""
+    tier, err = _ai_tier_or_403()
+    if err:
+        return err
+    import ai_assistant
+    data = request.get_json(silent=True) or {}
+    model = (data.get("model") or ai_assistant.DEFAULT_MODEL).strip()
+    ok, text, transport = ai_assistant.analyze_activity(
+        _web_snapshot(), model=model, operator=request.user["username"],
+        tier=tier, source="web")
+    if not ok:
+        return jsonify({"ok": False, "error": text, "transport": transport}), 200
+    return jsonify({"ok": True, "reply": text, "transport": transport})
+
+
 _VERIFIER_CACHE = {"candidates": None, "index": None}
 
 

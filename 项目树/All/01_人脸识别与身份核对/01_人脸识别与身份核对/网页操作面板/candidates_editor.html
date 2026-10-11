@@ -194,6 +194,8 @@
     <div class="nav-item" id="navOwner" style="display:none;" onclick="showOwnerSettings()">⚙ 所有者设置</div>
     <!-- 命令控制台：仅所有者可见，且必须已由所有者显式开启（默认关闭） -->
     <div class="nav-item" id="navCmd" style="display:none;" onclick="showCmdConsole()">⌨ 命令控制台</div>
+    <!-- AI 助手：仅所有者层级；与命令控制台共用总开关 -->
+    <div class="nav-item" id="navAi" style="display:none;" onclick="showAiAssistant()">🤖 AI 助手</div>
     <div class="nav-item" onclick="showRecords()">📋 操作记录</div>
     <div class="nav-item" onclick="openVerify()">🎥 实时核验</div>
     <div class="nav-item" onclick="showChangePwd()">🔑 修改密码</div>
@@ -751,12 +753,14 @@ let ccTier = "none";
 //   管理员 —— 还需所有者单独授权（cmd_console_admin）
 function syncNavCmd() {
   const navCmd = document.getElementById("navCmd");
-  if (!navCmd) return;
+  const navAi = document.getElementById("navAi");
   const role = currentUser && currentUser.role;
   const on = !!(currentModes && currentModes.cmd_console);
   const delegated = !!(currentModes && currentModes.cmd_console_admin);
   const allowed = on && (role === "owner" || (role === "admin" && delegated));
-  navCmd.style.display = allowed ? "" : "none";
+  if (navCmd) navCmd.style.display = allowed ? "" : "none";
+  // AI 助手（多轮对话 + 状态分析）只对所有者层级开放，与 GUI / 服务端口径一致
+  if (navAi) navAi.style.display = (on && role === "owner") ? "" : "none";
 }
 
 // ---------------- 命令控制台（仅所有者 + 默认关闭） ----------------
@@ -887,7 +891,183 @@ async function runCmdConsole() {
   }
 }
 
-async function showUsers() {
+// ---------------- AI 助手（ollama 多轮对话 + 状态分析，仅所有者） ----------------
+// 对话历史由前端维护、随请求回传（服务端无会话状态）；
+// 系统状态快照由服务端在每次请求时实时生成——AI 总能"看到"你最近在干什么。
+let aiHistory = [];
+let aiBusy = false;
+
+async function showAiAssistant() {
+  let models = [], defModel = "";
+  try {
+    const r = await api("/ai/models");
+    models = r.models || [];
+    defModel = r.default || "";
+  } catch (e) {
+    alert("AI 助手不可用：" + e.message);
+    return;
+  }
+  const options = models.map(m =>
+    `<option value="${m}" ${m === defModel ? "selected" : ""}>${m}</option>`).join("");
+
+  document.getElementById("modalTitle").textContent = "🤖 AI 助手（本地 ollama）";
+  document.getElementById("modalBody").innerHTML = `
+    <div style="background:#ecfdf5;border-left:4px solid #10b981;padding:9px 11px;
+                font-size:12px;line-height:1.7;color:#065f46;margin-bottom:12px;">
+      🤖 基于本地 ollama 大模型，<b>数据不出本机</b>。AI 每次回答都能看到
+      <b>当前系统状态快照</b>（报名库、开关、最近操作），可以直接问：
+      「我最近在干什么」「现在有多少考生」「下一步该做什么」。
+      每次对话都写入审计哈希链。
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap;">
+      <label style="font-size:13px;">模型：
+        <select id="aiModel" style="width:auto;display:inline-block;margin-left:4px;
+                                    max-width:340px;">${options}</select>
+      </label>
+      <button class="ghost" style="padding:4px 10px;font-size:12px;"
+              onclick="aiWatchOnce()" id="aiWatchBtn">🔎 分析我最近在干什么</button>
+      <button class="ghost" style="padding:4px 10px;font-size:12px;"
+              onclick="aiClear()">🗑 清空对话</button>
+    </div>
+    <div id="aiMsgs" style="background:#0f172a;border-radius:8px;padding:12px;
+         height:340px;overflow-y:auto;font-size:13px;line-height:1.7;"></div>
+    <div style="display:flex;gap:8px;margin-top:10px;">
+      <textarea id="aiInput" rows="2" placeholder="输入问题，Enter 发送（Shift+Enter 换行）…"
+        style="flex:1;font-size:13px;padding:8px;border:1px solid #d1d5db;
+               border-radius:6px;resize:none;font-family:inherit;"></textarea>
+      <button onclick="sendAiChat()" id="aiSendBtn" style="align-self:flex-end;">发送</button>
+    </div>
+    <div class="err" id="aiErr" style="margin-top:6px;"></div>
+  `;
+  document.getElementById("modalActions").innerHTML = `
+    <button class="secondary" onclick="closeModal()">关闭</button>
+  `;
+  document.getElementById("modalBg").classList.add("show");
+
+  const ta = document.getElementById("aiInput");
+  ta.addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendAiChat(); }
+  });
+  ta.focus();
+  aiRender();
+  if (!aiHistory.length) {
+    aiAppendBubble("bot", "🤖 你好，我是考场 AI 助手。我能看到系统当前状态和你最近的操作，" +
+                          "有什么想问的？");
+  }
+}
+
+// 渲染整段对话（打开/清空时重绘）
+function aiRender() {
+  const box = document.getElementById("aiMsgs");
+  if (!box) return;
+  box.innerHTML = "";
+  aiHistory.forEach(m => aiAppendBubble(m.role === "user" ? "user" : "bot", m.content, true));
+  box.scrollTop = box.scrollHeight;
+}
+
+// 追加一个气泡。kind: user / bot / watch / err / thinking
+// 一律用 textContent 填充：AI 输出与用户输入都是不可信内容，innerHTML 会自伤型 XSS。
+function aiAppendBubble(kind, text, noScroll) {
+  const box = document.getElementById("aiMsgs");
+  if (!box) return null;
+  const styles = {
+    user:     "background:#1d4ed8;color:#fff;margin-left:18%;border-radius:10px 10px 2px 10px;",
+    bot:      "background:#1e293b;color:#e2e8f0;margin-right:18%;border-radius:10px 10px 10px 2px;",
+    watch:    "background:#422006;color:#fcd34d;margin-right:10%;border-radius:10px;",
+    err:      "background:#450a0a;color:#fca5a5;margin-right:10%;border-radius:10px;",
+    thinking: "background:#1e293b;color:#64748b;margin-right:18%;border-radius:10px;font-style:italic;",
+  };
+  const labels = { user: "🧑 你", bot: "🤖 AI", watch: "🔎 AI 巡视", err: "⚠", thinking: "🤖" };
+  const div = document.createElement("div");
+  div.style.cssText = (styles[kind] || styles.bot) +
+    "padding:8px 12px;margin-bottom:8px;white-space:pre-wrap;word-break:break-word;";
+  const head = document.createElement("div");
+  head.style.cssText = "font-size:11px;opacity:.65;margin-bottom:3px;";
+  head.textContent = labels[kind] || "";
+  const body = document.createElement("div");
+  body.textContent = text;                 // 关键：textContent，不解析 HTML
+  div.appendChild(head);
+  div.appendChild(body);
+  box.appendChild(div);
+  if (!noScroll) box.scrollTop = box.scrollHeight;
+  return div;
+}
+
+async function sendAiChat() {
+  if (aiBusy) return;
+  const ta = document.getElementById("aiInput");
+  const err = document.getElementById("aiErr");
+  const btn = document.getElementById("aiSendBtn");
+  const message = (ta.value || "").trim();
+  if (!message) return;
+  err.textContent = "";
+  aiBusy = true;
+  btn.disabled = true;
+  ta.value = "";
+  aiAppendBubble("user", message);
+  const thinking = aiAppendBubble("thinking", "思考中…（本地模型可能需要几十秒）");
+
+  try {
+    const r = await api("/ai/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        message,
+        model: document.getElementById("aiModel").value,
+        history: aiHistory,
+      })
+    });
+    if (thinking) thinking.remove();
+    if (r.ok) {
+      aiHistory.push({ role: "user", content: message });
+      aiHistory.push({ role: "assistant", content: r.reply });
+      if (aiHistory.length > 20) aiHistory = aiHistory.slice(-20);
+      aiAppendBubble("bot", r.reply);
+    } else {
+      aiAppendBubble("err", "AI 调用失败：" + (r.error || "未知错误"));
+    }
+  } catch (e) {
+    if (thinking) thinking.remove();
+    aiAppendBubble("err", "AI 调用失败：" + e.message);
+  } finally {
+    aiBusy = false;
+    btn.disabled = false;
+    ta.focus();
+  }
+}
+
+async function aiWatchOnce() {
+  if (aiBusy) return;
+  const btn = document.getElementById("aiWatchBtn");
+  aiBusy = true;
+  btn.disabled = true;
+  const thinking = aiAppendBubble("thinking", "🔎 正在分析最近操作…");
+  try {
+    const r = await api("/ai/watch", {
+      method: "POST",
+      body: JSON.stringify({ model: document.getElementById("aiModel").value })
+    });
+    if (thinking) thinking.remove();
+    if (r.ok) {
+      aiAppendBubble("watch", r.reply);
+    } else {
+      aiAppendBubble("err", "AI 巡视失败：" + (r.error || "未知错误"));
+    }
+  } catch (e) {
+    if (thinking) thinking.remove();
+    aiAppendBubble("err", "AI 巡视失败：" + e.message);
+  } finally {
+    aiBusy = false;
+    btn.disabled = false;
+  }
+}
+
+function aiClear() {
+  aiHistory = [];
+  aiRender();
+  aiAppendBubble("bot", "🤖 对话已清空，重新开始吧。");
+}
+
+
   if (currentUser.role !== "admin" && currentUser.role !== "owner") {
     alert("仅管理员或所有者可访问"); return;
   }
