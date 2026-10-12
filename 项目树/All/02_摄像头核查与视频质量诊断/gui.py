@@ -91,6 +91,8 @@ AI_SETTINGS_DEFAULT = {
     "box_margin_pct": 2,         # 1 / 2 / 5 / 10
     "haar_face": True,
     "sound_beep": True,
+    "boundary_pct": 92,          # 警戒线位置（画面高度百分比）：
+                                 # 越大越靠画面底部，越不容易把中后排考生误判越界
 }
 
 # ---------------- 渲染性能参数（解决"画面一多就卡"） ----------------
@@ -100,18 +102,22 @@ RENDER_MS_MID = 90          # ≤4 路：约 11fps
 RENDER_MS_MANY = 130        # ≤9 路：约 8fps
 RENDER_MS_HUGE = 200        # >9 路：约 5fps
 AI_INTERVAL_MS = {          # 单路 AI 分析最小间隔（毫秒）
-    "standard": 250,
-    "dense": 400,           # 密集模式更慢，进一步降频
-    "energy": 800,          # 节能模式
+    "standard": 500,        # 标准：2 次/秒
+    "dense": 900,           # 密集模式更慢，进一步降频
+    "energy": 1600,         # 节能模式
 }
 AI_INPUT_DIM = {            # AI 分析用长边（越小越快）
-    "standard": 480,
-    "dense": 640,
+    "standard": 416,
+    "dense": 576,
     "energy": 320,
 }
 INFO_BAR_MS = 500           # 顶部信息条/汇总的最小刷新间隔
 MAX_PANEL_W = 480           # 单路面板最大渲染宽度（超过就缩，省 CPU）
 MAX_PANEL_H = 300
+PANEL_W = 384               # 单路画面初始像素宽度（Label 显示 image 时按像素解释）
+PANEL_H = 216               # 单路画面初始像素高度（16:9）
+CAM_COLS = 2                # 监控网格列数
+TOOLTIP_THROTTLE_MS = 120   # 悬停提示移动时的最小重定位间隔
 
 # pythonw 隐藏窗口启动时 stdout/stderr 为 None，兜住避免任何 print 崩掉界面
 config.ensure_stdio("gui_console.log")
@@ -901,18 +907,29 @@ class App(object):
         """当前框边距百分比 -> 小数"""
         return self._ai_settings.get("box_margin_pct", 2) / 100.0
 
+    def _ai_boundary_ratio(self):
+        """当前警戒线位置（画面高度百分比 -> 小数）"""
+        pct = self._ai_settings.get("boundary_pct", 92)
+        try:
+            pct = float(pct)
+        except (TypeError, ValueError):
+            pct = 92.0
+        return min(0.99, max(0.30, pct / 100.0))
+
     def _ai_tracker_kwargs(self):
-        """构造 PersonTracker 初始化参数，兼容当前与 AI 优化子Agent 新增参数"""
+        """构造 PersonTracker 初始化参数，兼容不同版本的 person_detect"""
         sig = inspect.signature(pd_mod.PersonTracker.__init__)
         params = sig.parameters
         kw = {"margin_ratio": self._ai_margin_ratio()}
         settings = self._ai_settings
         # 界面层已按 AI_INPUT_DIM 缩放后再送进来，这里把内部再缩放阈值放高，
-        # 避免"缩两次"浪费 CPU（真实长边已经 <= 640）。
+        # 避免"缩两次"浪费 CPU（真实长边已经 <= 576）。
         for key, val in (("dense_mode", settings.get("mode") == "dense"),
                          ("max_input_dim", 1280),
                          ("detect_stride", 2 if settings.get("mode") == "energy" else 1),
-                         ("enable_face_dense", settings.get("haar_face", True))):
+                         ("enable_face_dense", settings.get("haar_face", True)),
+                         ("boundary_ratio", self._ai_boundary_ratio()),
+                         ("confirm_frames", 4 if settings.get("mode") != "energy" else 3)):
             if key in params:
                 kw[key] = val
         return kw
@@ -962,8 +979,18 @@ class App(object):
         sound_var = tk.BooleanVar(value=settings.get("sound_beep", True))
         ttk.Checkbutton(f, text="启用（异常行为时 beep）", variable=sound_var).grid(row=3, column=1, sticky="w")
 
+        ttk.Label(f, text="警戒线位置：").grid(row=4, column=0, sticky="e", pady=6)
+        boundary_var = tk.IntVar(value=int(settings.get("boundary_pct", 92)))
+        boundary_bar = ttk.Frame(f)
+        boundary_bar.grid(row=4, column=1, sticky="w")
+        for pct in (50, 75, 92, 98):
+            ttk.Radiobutton(boundary_bar, text="%d%%" % pct, variable=boundary_var,
+                            value=pct).pack(side="left", padx=(0, 8))
+        ttk.Label(f, text="越大越靠画面底部；92% 表示只有走到镜头前才算越界",
+                  foreground="#888", font=FONT_SMALL).grid(row=4, column=2, sticky="w", padx=(8, 0))
+
         msg = ttk.Label(f, text="", foreground="#c00")
-        msg.grid(row=4, column=0, columnspan=3, pady=(10, 0))
+        msg.grid(row=5, column=0, columnspan=3, pady=(10, 0))
 
         def apply():
             new_settings = {
@@ -971,18 +998,20 @@ class App(object):
                 "box_margin_pct": margin_var.get(),
                 "haar_face": haar_var.get(),
                 "sound_beep": sound_var.get(),
+                "boundary_pct": boundary_var.get(),
             }
             if self._save_ai_settings(new_settings):
                 self._ai_settings = new_settings
                 # 边距/模式实时生效：清掉每路的检测器，下次分析按新设置重建
                 self._reset_ai_trackers()
                 msg.config(text="已保存并生效", foreground="#0a7d28")
-                self.status.config(text="AI 设置已更新：模式=%s 边距=%d%%" % (
-                    new_settings["mode"], new_settings["box_margin_pct"]))
+                self.status.config(text="AI 设置已更新：模式=%s 边距=%d%% 警戒线=%d%%" % (
+                    new_settings["mode"], new_settings["box_margin_pct"],
+                    new_settings["boundary_pct"]))
                 self._mon_log_line("AI 设置更新：%s" % new_settings)
 
         bbar = ttk.Frame(f)
-        bbar.grid(row=5, column=0, columnspan=3, pady=(16, 0))
+        bbar.grid(row=6, column=0, columnspan=3, pady=(16, 0))
         ttk.Button(bbar, text="保存", command=apply).pack(side="left", padx=6)
         ttk.Button(bbar, text="关闭", command=win.destroy).pack(side="left", padx=6)
 
@@ -1023,22 +1052,36 @@ class App(object):
         return DENSITY_LOW
 
     def _cam_bind_tooltip(self, widget, code):
-        """给画面控件绑定悬停提示"""
+        """给画面控件绑定悬停提示（移动时限频重定位，避免鼠标一动就重建窗口）"""
         tip = None
+        state = {"ts": 0.0}
 
         def enter(event):
             nonlocal tip
             self._cam_hide_tooltip(tip)
             tip = self._cam_show_tooltip(code, event.x_root, event.y_root)
+            state["ts"] = time.time() * 1000.0
 
         def leave(event):
             nonlocal tip
             self._cam_hide_tooltip(tip)
             tip = None
 
+        def motion(event):
+            if tip is None:
+                return
+            now = time.time() * 1000.0
+            if now - state["ts"] < TOOLTIP_THROTTLE_MS:
+                return
+            state["ts"] = now
+            try:
+                tip.geometry("+%d+%d" % (event.x_root + 16, event.y_root + 16))
+            except tk.TclError:
+                pass
+
         widget.bind("<Enter>", enter)
         widget.bind("<Leave>", leave)
-        widget.bind("<Motion>", lambda e: None if tip is None else tip.geometry("+%d+%d" % (e.x_root + 16, e.y_root + 16)))
+        widget.bind("<Motion>", motion)
 
     def _cam_show_tooltip(self, code, x, y):
         """显示一路摄像头的悬停提示"""
@@ -1256,6 +1299,7 @@ class App(object):
         self._cam_latest.clear()
         self._cam_enlarge_active.clear()
         self._cam_trackers.clear()
+        self._dev_cache = None       # 台账已重建，设备缓存作废
         self._mon_panels.clear()
         for w in self.mon_grid.winfo_children():
             w.destroy()
@@ -1268,7 +1312,7 @@ class App(object):
             self._mon_bind_wheel()
             self.mon_status.config(text="暂无摄像头", foreground=GRAY_HINT)
             return
-        cols = 2
+        cols = CAM_COLS
         for i, dev in enumerate(devs):
             room = dev.room_id or "未分配考场"
             name = dev.name or dev.code or "未命名"
@@ -1279,10 +1323,18 @@ class App(object):
                                   highlightthickness=2, highlightbackground=CAM_COLORS["idle"])
             frame.grid(row=i // cols, column=i % cols, sticky="nsew", padx=6, pady=6)
             self.mon_grid.rowconfigure(i // cols, weight=1)
-            self.mon_grid.columnconfigure(i % cols, weight=1)
-            # 黑底画面区：先给一个初始高度，播放时按真实尺寸贴图
+            # 两列都给权重：单路时才不会一个面板横跨整宽、比例失衡
+            for c in range(cols):
+                self.mon_grid.columnconfigure(c, weight=1)
+            # 黑底画面区。
+            # 注意：tk.Label 一旦设置了 image，width/height 会被按**像素**解释，
+            # 所以这里必须先给一张 1x1 黑图再设置像素尺寸——否则 height=9 会
+            # 变成"9 像素高"，画面被压成一条细缝（旧版的实际表现）。
+            blank = tk.PhotoImage(width=1, height=1)
+            blank.put("#000000", to=(0, 0))
             lbl = tk.Label(frame, bg="#000", relief="sunken", cursor="hand2",
-                           height=9)
+                           image=blank, width=PANEL_W, height=PANEL_H)
+            lbl._blank_img = blank          # 保住引用，避免被 GC
             lbl.pack(fill="both", expand=True, padx=2, pady=2)
             lbl.bind("<Button-1>", lambda _e, c=code: self._cam_enlarge(c))
             # 状态行：播放状态 + 密度等级 + AI 检测人数
@@ -1541,12 +1593,16 @@ class App(object):
                         ai_frame = raw
                     tracker = self._cam_tracker(code)
                     if tracker is not None:
-                        persons, viol, line_y = tracker.analyze_only(ai_frame)
+                        persons, viol, line_y = tracker.analyze_only(
+                            ai_frame, boundary_ratio=self._ai_boundary_ratio())
                         panel["ai_ts"] = now_ms
                         panel["ai_persons"] = persons
                         panel["ai_viol"] = viol
                         panel["ai_line_y"] = line_y
                         panel["ai_shape"] = ai_frame.shape
+                        # 平滑人数（中位数），界面读数不再跳变
+                        panel["ai_count"] = tracker.stable_count() \
+                            if hasattr(tracker, "stable_count") else len(persons)
                         # 分析分辨率 -> 显示分辨率 的比例
                         panel["ai_scale"] = disp.shape[1] / float(ai_frame.shape[1])
                         # 人脸框带出来给 draw_boxes 画
@@ -1591,7 +1647,8 @@ class App(object):
             self._cam_set_border(code, "stalled")
         else:
             self._cam_set_border(code, "playing")
-        self._cam_set_ai(code, len(persons), viol)
+        # 显示平滑后的人数（避免读数在 15/16/17 之间乱跳）
+        self._cam_set_ai(code, panel.get("ai_count", len(persons)), viol)
         # 顶部信息条与汇总限频刷新，避免每路每次分析都去改 Tk 控件
         now_ms = time.time() * 1000.0
         if (now_ms - getattr(self, "_info_ts", 0.0)) >= INFO_BAR_MS:
@@ -1913,8 +1970,28 @@ class App(object):
             pass
 
     def _dev_by_code(self, code):
+        """按设备编码取设备（带缓存）。
+
+        这个方法在异常上报路径上会被频繁调用，而 store.list_devices() 每次都要
+        查 SQLite 并逐条解密设备名/位置——高频调用时是明显的额外开销。
+        """
+        cache = getattr(self, "_dev_cache", None)
+        if cache is None:
+            cache = {}
+            try:
+                for d in self.store.list_devices(enabled_only=False):
+                    if d.code:
+                        cache[d.code] = d
+            except Exception:
+                cache = {}
+            self._dev_cache = cache
+        dev = cache.get(code)
+        if dev is not None:
+            return dev
+        # 缓存里没有（台账刚变过）就查一次并补进缓存
         for d in self.store.list_devices(enabled_only=False):
             if d.code == code:
+                cache[code] = d
                 return d
         return None
 

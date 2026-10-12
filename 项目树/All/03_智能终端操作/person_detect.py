@@ -205,9 +205,9 @@ def _density_level(n_persons, frame_area):
 
 class _Track(object):
     """一个人的跟踪状态"""
-    __slots__ = ("pid", "rect", "missed", "centroids", "heights",
+    __slots__ = ("pid", "rect", "missed", "centroids", "heights", "aspects",
                  "prev_side", "crosses", "cross_epochs",
-                 "face_cache", "face_age",
+                 "face_cache", "face_age", "action_hist",
                  "vx", "vy", "last_seen_frame")
 
     def __init__(self, pid, rect, line_y):
@@ -216,6 +216,8 @@ class _Track(object):
         self.missed = 0
         self.centroids = deque(maxlen=20)   # 最近 20 帧质心，用于东张西望判定
         self.heights = deque(maxlen=20)     # 最近 20 帧框高，用于低头判定
+        self.aspects = deque(maxlen=8)      # 最近 8 帧宽高比，用于偏转/前倾确认
+        self.action_hist = deque(maxlen=6)  # 最近 6 次行为推断，用于稳定确认
         self.prev_side = self._side(rect, line_y)
         self.crosses = 0                    # 累计跨线次数
         self.cross_epochs = deque(maxlen=10)
@@ -249,7 +251,9 @@ class PersonTracker(object):
 
     def __init__(self, margin_ratio=0.02, max_dist=90, max_missed=12,
                  max_input_dim=640, detect_stride=1, dense_mode=True,
-                 enable_face_dense=False, dnn_threshold=0.5):
+                 enable_face_dense=False, dnn_threshold=0.5,
+                 boundary_ratio=0.92, min_box_w=16, min_box_h=32,
+                 max_aspect=1.8, confirm_frames=3):
         if not hasattr(cv2, "HOGDescriptor"):
             raise RuntimeError(
                 "当前 OpenCV 未包含 HOGDescriptor，无法运行 AI 框选识别。\n"
@@ -268,10 +272,21 @@ class PersonTracker(object):
         self.enable_face_dense = enable_face_dense  # 密集场景仍强制做人脸分析
         self.dnn_threshold = dnn_threshold        # DNN 置信度阈值
 
+        # 越界判定：警戒线默认放在画面 92% 高度处。
+        # 原默认 50%（画面中线）会把"坐在中后排"的考生全部判成越界，
+        # 实测 17 人有 16 人报越界，属于明显误判。
+        self.boundary_ratio = float(boundary_ratio)
+        self.min_box_w = int(min_box_w)           # 最小框宽（像素）
+        self.min_box_h = int(min_box_h)           # 最小框高（像素）
+        self.max_aspect = float(max_aspect)       # 框宽/高超过此值视为误检（太扁）
+        self.confirm_frames = max(1, int(confirm_frames))  # 行为需连续确认的帧数
+
         self._tracks = {}                         # pid -> _Track
         self._next_pid = 1
         self._frame_no = 0
         self._density_level = "low"
+        self._count_hist = deque(maxlen=5)        # 人数平滑（取中位数，避免跳变）
+        self._stable_count = 0
         self._model_dir = os.path.dirname(os.path.abspath(__file__))
 
         # Haar 级联（OpenCV 自带）
@@ -480,6 +495,27 @@ class PersonTracker(object):
                     merged.append(r)
         return merged
 
+    def _sanitize_boxes(self, rects, fw, fh):
+        """过滤"不像人"的框，减少虚警导致的人数虚高与假行为。
+
+        典型误检：桌子/椅子/墙面被检成很扁的宽框（宽高比 > max_aspect），
+        或过小的碎片框。这类框一旦进入跟踪，还会把"大幅度偏转/前倾"刷成
+        持续假警报，所以必须在源头掐掉。
+        """
+        out = []
+        for x, y, w, h in rects:
+            if w < self.min_box_w or h < self.min_box_h:
+                continue
+            if h <= 0:
+                continue
+            if (w / float(h)) > self.max_aspect:
+                continue
+            # 完全在画面外的框丢弃
+            if x + w <= 0 or y + h <= 0 or x >= fw or y >= fh:
+                continue
+            out.append((int(x), int(y), int(w), int(h)))
+        return out
+
     def _detect(self, frame):
         """综合检测：DNN -> HOG -> 背景/人头辅助，结果映射回原图并收紧"""
         small, scale = self._scale_frame(frame)
@@ -504,10 +540,11 @@ class PersonTracker(object):
             head_rects = self._detect_heads(small)
             rects = self._merge_sources(rects, [bg_rois, head_rects], iou_thresh=0.30)
 
-        # 4) 映射回原图、收紧、最终 NMS
+        # 4) 映射回原图、收紧、剔除不合理框、最终 NMS
         orig_rects = [self._rect_to_orig(r, scale) for r in rects]
         shrunk = [self._shrink_rect(r, orig_w, orig_h) for r in orig_rects]
-        return _soft_nms(shrunk, iou_thresh=0.35, sigma=0.5)
+        cleaned = self._sanitize_boxes(shrunk, orig_w, orig_h)
+        return _soft_nms(cleaned, iou_thresh=0.35, sigma=0.5)
 
     # ---------------- 跟踪 ----------------
     def _greedy_assignment(self, cost):
@@ -564,6 +601,8 @@ class PersonTracker(object):
                 cx, cy = cents[j]
                 tr.centroids.append((cx, cy))
                 tr.heights.append(tr.rect[3])
+                tr.aspects.append(tr.rect[2] / float(tr.rect[3])
+                                  if tr.rect[3] > 0 else 0.0)
                 tr.face_age += 1
                 side = tr._side(tr.rect, line_y)
                 if side != tr.prev_side:
@@ -600,6 +639,8 @@ class PersonTracker(object):
             cx, cy = _centroid(tr.rect)
             tr.centroids.append((cx, cy))
             tr.heights.append(tr.rect[3])
+            tr.aspects.append(tr.rect[2] / float(tr.rect[3])
+                              if tr.rect[3] > 0 else 0.0)
             side = tr._side(tr.rect, line_y)
             if side != tr.prev_side:
                 tr.crosses += 1
@@ -608,10 +649,12 @@ class PersonTracker(object):
             if tr.missed > self.max_missed:
                 del self._tracks[pid]
 
-    def update(self, frame, boundary_ratio=0.5):
+    def update(self, frame, boundary_ratio=None):
         """每帧调用：检测 -> 匹配/预测 -> 更新跨线计数，返回 tracks 列表"""
         self._frame_no += 1
         fh = frame.shape[0]
+        if boundary_ratio is None:
+            boundary_ratio = self.boundary_ratio
         line_y = int(fh * boundary_ratio)
 
         run_detect = ((self._frame_no - 1) % self.detect_stride) == 0
@@ -663,7 +706,20 @@ class PersonTracker(object):
         return track.face_cache
 
     # ---------------- 行为分析 ----------------
-    def analyze(self, frame, track, boundary_ratio=0.5, edge_margin=20):
+    def _confirmed(self, track, action, hit, need=None):
+        """把"这一帧像异常"升级成"连续若干次分析都像异常"才算数。
+
+        原实现只看单帧宽高比，HOG 框一抖动就报"大幅度偏转/前倾"，
+        实测 17 个人能刷出 17 条异常。现在要求最近 confirm_frames 次
+        分析里至少有 confirm_frames-1 次命中，才真正采纳。
+        """
+        need = need or max(2, self.confirm_frames - 1)
+        hist = list(track.action_hist)
+        hist.append(1 if hit else 0)
+        track.action_hist.append(1 if hit else 0)
+        return sum(hist[-self.confirm_frames:]) >= need
+
+    def analyze(self, frame, track, boundary_ratio=None, edge_margin=20):
         """
         对一条轨迹做行为推断。
         返回 (action, bad, behaviors)
@@ -674,11 +730,20 @@ class PersonTracker(object):
         fh, fw = frame.shape[:2]
         x, y, w, h = track.rect
         bottom = y + h
+        if boundary_ratio is None:
+            boundary_ratio = self.boundary_ratio
         line_y = int(fh * boundary_ratio)
+        # 越界 = 人已越过警戒线（默认画面 92% 高度，即贴近镜头/走出考区）
         bad = bottom > line_y
 
         behaviors = []
         action = ACT_NORMAL
+
+        # 横向历史宽高比（中位数 + 命中次数），避免单帧抖动误报
+        aspects = list(track.aspects)
+        recent = aspects[-self.confirm_frames:] if aspects else []
+        wide_hits = sum(1 for r in recent if r > 0.85)
+        lean_hits = sum(1 for r in recent if r > 0.68)
 
         # 1) 触碰红线：跨线次数 >= 2 视为"多次触线"
         if track.crosses >= 2:
@@ -686,20 +751,22 @@ class PersonTracker(object):
         elif bad:
             action = "越界"
 
-        # 2) 大幅度偏转：框宽高比 > 0.72（侧转/回头时人框明显变宽）
-        if h > 0 and (w / float(h)) > 0.72:
+        # 2) 大幅度偏转：连续多次宽高比 > 0.85（侧转/回头时人框明显变宽）
+        if wide_hits >= max(2, self.confirm_frames - 1):
             action = ACT_TURN
             behaviors.append(ACT_TURN)
-        # 3) 起立/站立：框很高且底部越过中线
-        elif h > fh * 0.55 and bottom > line_y:
+        # 3) 起立/站立：框很高且底部越过警戒线（起立才会越过 92% 线）
+        elif h > fh * 0.55 and bad:
             action = ACT_STAND
             behaviors.append(ACT_STAND)
-        # 4) 前倾/趴桌：框偏宽
-        elif h > 0 and (w / float(h)) > 0.58:
-            action = ACT_LEAN
-            behaviors.append(ACT_LEAN)
+        # 4) 前倾/趴桌：连续多次宽高比 > 0.68 且高度在收缩
+        elif lean_hits >= max(2, self.confirm_frames - 1) and len(track.heights) >= 4:
+            hs = list(track.heights)
+            if hs[-1] <= hs[0] * 1.02:
+                action = ACT_LEAN
+                behaviors.append(ACT_LEAN)
         # 5) 坐下：框较矮、在画面下半
-        elif h < fh * 0.45 and bottom > line_y:
+        elif h < fh * 0.45 and y > fh * 0.35:
             action = ACT_SIT
 
         # 6) 东张西望：近 20 帧质心横向摆动大、纵向基本不动
@@ -741,10 +808,11 @@ class PersonTracker(object):
                 if action in (ACT_NORMAL, ACT_SIT):
                     action = ACT_GAZE
 
-        # 9) 贴边
-        if x < edge_margin or y < edge_margin \
-                or x + w > fw - edge_margin or y + h > fh - edge_margin:
-            bad = True
+        # 9) 贴边（只有真正贴到画面边缘才算，不再和"越界"混为一谈）
+        if (x < edge_margin or y < edge_margin
+                or x + w > fw - edge_margin or y + h > fh - edge_margin):
+            if x < edge_margin or x + w > fw - edge_margin:
+                bad = True
             if x < fw * 0.12:
                 action = ACT_LEFT
             elif x + w > fw * 0.88:
@@ -765,13 +833,19 @@ class PersonTracker(object):
         self._next_pid = 1
         self._frame_no = 0
         self._density_level = "low"
+        self._count_hist.clear()
+        self._stable_count = 0
 
     def start(self):
         """启动/复位跟踪器（与 stop 后状态一致即可继续运行）"""
         self.stop()
 
+    def stable_count(self):
+        """平滑后的人数（最近 5 次分析的中位数），避免数字跳来跳去"""
+        return self._stable_count
+
     # ---------------- 绘制 ----------------
-    def analyze_only(self, frame, boundary_ratio=0.5):
+    def analyze_only(self, frame, boundary_ratio=None):
         """只做检测/跟踪/行为分析，**不绘制**。
 
         返回 (persons, violations, line_y)。persons[i]["rect"] 为像素坐标。
@@ -779,6 +853,8 @@ class PersonTracker(object):
         既省 CPU 又不会出现"框时有时无"的闪烁。
         """
         fh = frame.shape[0]
+        if boundary_ratio is None:
+            boundary_ratio = self.boundary_ratio
         line_y = int(fh * boundary_ratio)
         tracks = self.update(frame, boundary_ratio=boundary_ratio)
         persons = []
@@ -790,6 +866,11 @@ class PersonTracker(object):
                             "behaviors": behaviors,
                             "density_level": self._density_level})
         violations = sum(1 for p in persons if p["bad"])
+        # 人数平滑：最近 5 次分析取中位数，界面读数不再跳变
+        self._count_hist.append(len(persons))
+        if self._count_hist:
+            ordered = sorted(self._count_hist)
+            self._stable_count = ordered[len(ordered) // 2]
         return persons, violations, line_y
 
     @staticmethod

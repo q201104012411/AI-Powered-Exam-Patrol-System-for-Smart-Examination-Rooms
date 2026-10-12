@@ -134,11 +134,14 @@ RENDER_MS_FEW = 66
 RENDER_MS_MID = 90
 RENDER_MS_MANY = 130
 RENDER_MS_HUGE = 200
-AI_INTERVAL_MS = 300        # 单路 AI 分析最小间隔
-AI_INPUT_DIM = 480          # AI 分析用长边
+AI_INTERVAL_MS = 500        # 单路 AI 分析最小间隔（2 次/秒）
+AI_INPUT_DIM = 416          # AI 分析用长边
 INFO_BAR_MS = 500           # 顶部状态条最小刷新间隔
 MAX_PANEL_W = 480
 MAX_PANEL_H = 300
+PANEL_W = 384               # 单路画面初始像素宽（Label 显示 image 时按像素解释）
+PANEL_H = 216               # 单路画面初始像素高
+BOUNDARY_RATIO = 0.92       # 警戒线：只有走到镜头前（画面底部 8%）才算越界
 
 
 class TerminalApp(object):
@@ -538,7 +541,13 @@ class TerminalApp(object):
             cam["_frame"] = frame
             cam["_border_state"] = None
 
-            lbl = tk.Label(frame, bg="#000", relief="sunken")
+            # 注意：tk.Label 设置 image 后 width/height 按**像素**解释，
+            # 必须先给一张 1x1 黑图再定像素尺寸，否则画面会被压成细缝。
+            blank = tk.PhotoImage(width=1, height=1)
+            blank.put("#000000", to=(0, 0))
+            lbl = tk.Label(frame, bg="#000", relief="sunken",
+                           image=blank, width=PANEL_W, height=PANEL_H)
+            lbl._blank_img = blank
             lbl.pack(fill="both", expand=True)
             cam["_label"] = lbl
             srow = ttk.Frame(frame)
@@ -707,7 +716,8 @@ class TerminalApp(object):
                         ai_frame = raw
                     det = self._person_detector_for(url)
                     if det is not None:
-                        persons, viol, line_y = det.analyze_only(ai_frame)
+                        persons, viol, line_y = det.analyze_only(
+                            ai_frame, boundary_ratio=BOUNDARY_RATIO)
                         for p in persons:
                             tr = getattr(det, "_tracks", {}).get(p["pid"])
                             fa = getattr(tr, "face_cache", None) if tr is not None else None
@@ -718,6 +728,9 @@ class TerminalApp(object):
                         cam["_ai_line_y"] = line_y
                         cam["_ai_shape"] = ai_frame.shape
                         cam["_ai_scale"] = disp.shape[1] / float(ai_frame.shape[1])
+                        cam["_ai_count"] = (det.stable_count()
+                                            if hasattr(det, "stable_count")
+                                            else len(persons))
                         self._cam_ai_side_effects(url, cam, persons, viol)
                 scale = cam.get("_ai_scale")
                 if scale is None:
@@ -775,7 +788,8 @@ class TerminalApp(object):
             self._info_ts = now_ms
             try:
                 self.monitor_status.config(
-                    text="AI识别中：%d 人，越界 %d" % (len(persons), viol))
+                    text="AI识别中：%d 人，越界 %d"
+                         % (cam.get("_ai_count", len(persons)), viol))
             except tk.TclError:
                 pass
             self._monitor_update_info_bar()
@@ -808,13 +822,14 @@ class TerminalApp(object):
         exam_count = 0
         for cam in self.monitors:
             persons = cam.get("_persons", []) or []
-            ai_total += len(persons)
+            n = cam.get("_ai_count", len(persons))
+            ai_total += n
             cross_total += sum(1 for p in persons if p.get("bad"))
             abnormal += sum(len(p.get("behaviors", [])) for p in persons)
             if cam.get("_density_level") == DENSITY_HIGH:
                 high_count += 1
             if cam.get("area", self.AREA_EXAM) == self.AREA_EXAM:
-                exam_count += len(persons)
+                exam_count += n
         other_count = ai_total - exam_count
         text = ("播放 %d/%d 路　｜　AI 总人数 %d　越界 %d　异常行为 %d　｜"
                 "　高密度机位 %d 路" % (playing, total, ai_total, cross_total, abnormal, high_count))

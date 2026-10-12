@@ -186,6 +186,84 @@ class TestPersonTracker(unittest.TestCase):
         self.assertIsInstance(heads, list)
 
 
+class TestAccuracyFixes(unittest.TestCase):
+    """人数/越界准确性：警戒线默认值、误检过滤、行为时间确认、人数平滑"""
+
+    def test_default_boundary_is_near_bottom(self):
+        """警戒线默认必须在画面 90% 以下，否则中后排考生会被误判越界"""
+        tracker = pd.PersonTracker(max_input_dim=1920)
+        self.assertGreaterEqual(tracker.boundary_ratio, 0.90)
+
+    def test_seated_person_in_middle_is_not_out_of_bounds(self):
+        """坐在画面中部（底部在 70% 高度）的人不应被判越界/上报"""
+        tracker = pd.PersonTracker(max_input_dim=1920)
+        frame = np.full((1080, 1920, 3), 200, dtype=np.uint8)
+        track = pd._Track(1, (800, 500, 120, 250), int(1080 * tracker.boundary_ratio))
+        # 框底 = 750，警戒线 = 993 -> 不越界
+        action, bad, behaviors = tracker.analyze(frame, track)
+        self.assertFalse(bad, "画面中部的坐姿考生不应判越界")
+        self.assertNotIn(pd.ACT_CROSS, behaviors)
+
+    def test_person_at_camera_front_is_out_of_bounds(self):
+        """走到镜头前（框底越过 92% 线）才应判越界"""
+        tracker = pd.PersonTracker(max_input_dim=1920)
+        frame = np.full((1080, 1920, 3), 200, dtype=np.uint8)
+        track = pd._Track(1, (800, 950, 200, 200), int(1080 * tracker.boundary_ratio))
+        _, bad, _ = tracker.analyze(frame, track)
+        self.assertTrue(bad, "框底 1150 > 警戒线 993，应判越界")
+
+    def test_wide_boxes_are_filtered_out(self):
+        """宽高比超过 max_aspect 的扁框（桌椅/墙面误检）必须被剔除"""
+        tracker = pd.PersonTracker(max_input_dim=1920)
+        rects = [
+            (100, 100, 60, 150),     # 正常人（宽高比 0.4）
+            (200, 100, 400, 100),    # 很扁的误检（宽高比 4.0）
+            (300, 100, 10, 100),     # 太窄
+            (400, 100, 60, 10),      # 太矮
+        ]
+        kept = tracker._sanitize_boxes(rects, 1920, 1080)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0], (100, 100, 60, 150))
+
+    def test_turn_requires_consecutive_confirmation(self):
+        """单帧宽高比突变不应立刻报'大幅度偏转'（旧版会把噪音全刷成异常）"""
+        tracker = pd.PersonTracker(max_input_dim=1920, confirm_frames=4)
+        frame = np.full((720, 1280, 3), 200, dtype=np.uint8)
+        track = pd._Track(1, (600, 300, 260, 200), 662)   # 宽高比 1.3，单帧很宽
+        action, _, behaviors = tracker.analyze(frame, track)
+        self.assertNotIn(pd.ACT_TURN, behaviors,
+                         "只有一帧偏宽时不应报大幅度偏转")
+
+    def test_turn_reported_after_sustained_wide_frames(self):
+        """连续多帧都偏宽时才报'大幅度偏转'"""
+        tracker = pd.PersonTracker(max_input_dim=1920, confirm_frames=4)
+        frame = np.full((720, 1280, 3), 200, dtype=np.uint8)
+        track = pd._Track(1, (600, 300, 260, 200), 662)
+        for _ in range(5):
+            # 模拟 update 里写入宽高比历史
+            track.aspects.append(260 / 200.0)
+        _, _, behaviors = tracker.analyze(frame, track)
+        self.assertIn(pd.ACT_TURN, behaviors, "连续偏宽应确认为大幅度偏转")
+
+    def test_stable_count_uses_median(self):
+        """人数读数取最近几次的中位数，避免在 15/16/17 之间乱跳"""
+        tracker = pd.PersonTracker(max_input_dim=1920)
+        for n in (10, 11, 10, 40, 10):
+            tracker._count_hist.append(n)
+            ordered = sorted(tracker._count_hist)
+            tracker._stable_count = ordered[len(ordered) // 2]
+        # 出现了孤立尖峰 40，但中位数仍是 10
+        self.assertEqual(tracker.stable_count(), 10)
+
+    def test_stop_resets_count_smoothing(self):
+        tracker = pd.PersonTracker(max_input_dim=1920)
+        tracker._count_hist.extend([5, 6, 7])
+        tracker._stable_count = 6
+        tracker.stop()
+        self.assertEqual(tracker.stable_count(), 0)
+        self.assertEqual(len(tracker._count_hist), 0)
+
+
 class TestHelpers(unittest.TestCase):
 
     def test_iou(self):

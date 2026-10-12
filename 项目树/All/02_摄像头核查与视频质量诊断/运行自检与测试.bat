@@ -29,7 +29,7 @@ echo 编译通过
 
 echo.
 echo ============================================
-echo  [2/3] 单元测试（147 项，临时数据目录）
+echo  [2/3] 单元测试（155 项，临时数据目录）
 echo ============================================
 "%PY%" -m unittest discover -s tests -t .
 if errorlevel 1 ( echo. & echo 单元测试未通过 & pause & exit /b 1 )
