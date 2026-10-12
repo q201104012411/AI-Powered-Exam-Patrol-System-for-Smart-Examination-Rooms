@@ -36,6 +36,7 @@ except Exception:
     HAS_PIL = False
 
 import config
+import camera_stream
 import diagnose
 import models
 import probe
@@ -57,11 +58,12 @@ PAD_BAR = 6             # 工具栏与内容的纵向间距
 PAD_BTN = 6             # 按钮之间的横向间距
 GRAY_MUTED = "#888"     # 日志/占位/次要文字统一灰
 GRAY_HINT = "#666"      # 状态栏灰
-# 摄像头状态 -> 颜色（未播放灰 / 缓冲中蓝 / 播放中绿 / 失败红）
+# 摄像头状态 -> 颜色（未播放灰 / 缓冲中蓝 / 播放中绿 / 画面中断橙 / 失败红）
 CAM_COLORS = {
     "idle": "#888",        # 未播放 / 已停止
     "buffering": "#1f56b8",  # 缓冲中
     "playing": "#0a7d28",    # 播放中
+    "stalled": "#c07000",    # 画面中断（正在自动重连）
     "error": "#c00",         # 打开失败 / 渲染失败
 }
 CAM_AI_COLOR = "#c07000"     # AI 识别到越界时的橙色
@@ -124,7 +126,35 @@ class App(object):
         self.orders = wo_mod.WorkOrderManager(self.store)
         self.runner = patrol_mod.PatrolRunner(self.store, baseline_store=self.baselines)
         self.reporter = report_mod.Reporter(self.store, runner=self.runner, orders=self.orders)
+        # 关窗口 = 停止所有取流（否则后台读线程/网络连接会拖住进程退出）
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_login()                  # 先登录，登录成功后原地切主界面
+
+    def _on_close(self):
+        """退出前尽力收尾：停取流、取消定时任务，然后销毁窗口。
+
+        注意：可能卡在网络 read 里的线程是 daemon，进程退出时自然结束，
+        所以这里**不做任何 join/wait**，保证"点关闭立刻关掉"。
+        """
+        try:
+            for after_id in list(getattr(self, "_cam_render_after", {}).values()):
+                try:
+                    self.root.after_cancel(after_id)
+                except (tk.TclError, ValueError):
+                    pass
+            self._cam_render_after.clear()
+        except Exception:
+            pass
+        for reader in list(getattr(self, "_cam_readers", {}).values()):
+            try:
+                reader.stop("程序退出")
+            except Exception:
+                pass
+        try:
+            self._cam_readers.clear()
+        except Exception:
+            pass
+        self.root.destroy()
 
     # ---------------- 登录（直接建在主窗口内，最稳） ----------------
     def _build_login(self):
@@ -817,11 +847,13 @@ class App(object):
                       foreground=CAM_COLORS["error"]).pack(anchor="w", pady=10)
             return
 
-        self._cam_threads = {}
-        self._cam_caps = {}
-        self._cam_running = {}
+        self._cam_readers = {}      # code -> camera_stream.FrameReader（取流内核）
+        self._cam_running = {}      # code -> bool
         self._cam_photos = {}
         self._cam_latest = {}       # code -> 最新帧（用于放大窗口）
+        self._cam_seen = {}         # code -> (generation, seq) 已渲染过的帧序号
+        self._cam_render_after = {}  # code -> after id（渲染循环，避免重复排程）
+        self._mon_log = config.LOG_DIR / "monitor_ui.log"
 
         # ---- 工具栏：左=操作按钮组，中=AI 开关，右=状态标签 ----
         bar = ttk.Frame(f)
@@ -912,7 +944,11 @@ class App(object):
         """根据设备台账重建摄像头网格"""
         if not self.can_monitor:
             return
+        # 先彻底停掉取流与渲染循环，避免重建网格后残留线程往已销毁的控件贴图
         self._mon_stop_all()
+        self._cam_readers.clear()
+        self._cam_seen.clear()
+        self._cam_latest.clear()
         self._mon_panels.clear()
         for w in self.mon_grid.winfo_children():
             w.destroy()
@@ -968,68 +1004,88 @@ class App(object):
         self._mon_bind_wheel()
         self._mon_ai_summary()
 
-    @staticmethod
-    def _mon_try_open(url):
-        """尝试多种后端打开视频流，返回 (cap, backend_name, info)"""
-        backends = []
-        if hasattr(cv2, "CAP_FFMPEG"):
-            backends.append((cv2.CAP_FFMPEG, "FFMPEG"))
-        if hasattr(cv2, "CAP_GSTREAMER"):
-            backends.append((cv2.CAP_GSTREAMER, "GSTREAMER"))
-        backends.append((0, "默认"))
-        last_info = ""
-        for backend, name in backends:
-            try:
-                cap = cv2.VideoCapture(url, backend) if backend else cv2.VideoCapture(url)
-                if cap.isOpened():
-                    ok, frame = cap.read()
-                    if ok and frame is not None:
-                        return cap, name, ""
-                    last_info = "%s 后端能打开但读不到帧" % name
-                    cap.release()
-                else:
-                    last_info = "%s 后端无法打开" % name
-            except Exception as e:
-                last_info = "%s 后端异常：%s" % (name, e)
-        return None, "", last_info
-
     def _cam_play(self, code):
+        """开始播放一路摄像头。
+
+        **绝不在界面线程里打开视频流**：历史上这里的 cv2.VideoCapture + cap.read()
+        会依次试 FFMPEG/GSTREAMER/默认三个后端，网络不通时把界面冻死。
+        现在只创建一个 FrameReader（后台线程负责打开+读帧+卡死重连），界面线程立刻返回。
+        """
         dev = self._dev_by_code(code)
         if dev is None:
             return
         url = dev.url
         if not url or self._cam_running.get(code):
             return
-        self._cam_stop(code)
-        cap, backend, info = self._mon_try_open(url)
-        if cap is None:
-            self._cam_set_status(code, "打开失败：%s" % info, CAM_COLORS["error"])
-            self._cam_set_placeholder(code, "图像不存在\n%s" % info)
-            return
-        self._cam_caps[code] = cap
+        self._cam_stop(code, quiet=True)
+        reader = camera_stream.FrameReader(url, label="%s/%s" % (code, camera_stream.short_url(url, 32)))
+        self._cam_readers[code] = reader
         self._cam_running[code] = True
-        self._cam_set_status(code, "[%s后端] 缓冲中…" % backend, CAM_COLORS["buffering"])
-        self._cam_btn_text(code, "播放中…")
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        t = threading.Thread(target=lambda: self._cam_loop(code, url), daemon=True)
-        self._cam_threads[code] = t
-        t.start()
+        self._cam_seen.pop(code, None)
+        self._cam_latest.pop(code, None)
+        self._cam_set_status(code, "正在连接…", CAM_COLORS["buffering"])
+        self._cam_btn_text(code, "连接中…")
+        reader.start()
+        self._cam_poll(code)
+        self._cam_render(code)
+        self._mon_log_line("播放 %s：%s" % (code, url))
 
-    def _cam_loop(self, code, url):
-        cap = self._cam_caps.get(code)
-        while self._cam_running.get(code) and cap and cap.isOpened():
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                time.sleep(0.05)
-                continue
-            try:
-                self.root.after(0, lambda f=frame, c=code: self._cam_update(c, f))
-            except (tk.TclError, RuntimeError):
-                break
-            time.sleep(0.033)
+    def _cam_poll(self, code):
+        """每 500ms 看一次取流状态，把状态如实显示到界面（这一步也不阻塞）。"""
+        reader = self._cam_readers.get(code)
+        if reader is None or not self._cam_running.get(code):
+            return
+        snap = reader.snapshot()
+        state = snap["state"]
+        if state == "live":
+            if snap["seq"]:
+                self._cam_set_status(code, "播放中 ｜ %.1f fps" % snap["fps"],
+                                     CAM_COLORS["playing"])
+            else:
+                self._cam_set_status(code, "已连接，等待画面…", CAM_COLORS["buffering"])
+        elif state == "connecting":
+            self._cam_set_status(code, snap["status"] or "正在连接…",
+                                 CAM_COLORS["buffering"])
+        elif state == "stalled":
+            self._cam_set_status(code, snap["status"], CAM_COLORS["stalled"])
+            self._cam_set_placeholder(code, "画面中断，正在自动重连…\n%s"
+                                      % snap["status"])
+        elif state in ("error", "stopped"):
+            self._cam_set_status(code, snap["status"] or "取流已停止", CAM_COLORS["error"])
+            if state == "error":
+                self._cam_set_placeholder(code, "无法取流\n%s" % snap["status"])
+                self._cam_btn_text(code, "▶ 重试")
         try:
-            self.root.after(0, lambda c=code: self._cam_stopped_ui(c))
+            self.root.after(500, lambda c=code: self._cam_poll(c))
         except (tk.TclError, RuntimeError):
+            pass
+
+    def _cam_render(self, code):
+        """渲染循环：从 FrameReader 取最新帧贴图（非阻塞）。
+
+        关键点：帧序号 (generation, seq) 没变就**不重复渲染**，因此"画面中断"
+        时界面不会死转；同时这个循环是 after 排程的，不会出现多份循环叠加。
+        """
+        try:
+            reader = self._cam_readers.get(code)
+            if reader is None or not self._cam_running.get(code):
+                return
+            snap = reader.snapshot()
+            key = (snap["generation"], snap["seq"])
+            if snap["frame"] is not None and snap["seq"] and self._cam_seen.get(code) != key:
+                self._cam_seen[code] = key
+                self._cam_update(code, snap["frame"])
+        except Exception as e:                       # noqa: BLE001
+            self._cam_set_status(code, "渲染失败：%s" % str(e)[:60], CAM_COLORS["error"])
+        self._cam_render_after[code] = self.root.after(
+            33, lambda c=code: self._cam_render(c))
+
+    def _mon_log_line(self, text):
+        """监控操作日志（取流问题事后可查；写失败不影响运行）"""
+        try:
+            with open(str(self._mon_log), "a", encoding="utf-8") as f:
+                f.write("%s  %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), text))
+        except OSError:
             pass
 
     def _cam_update(self, code, frame):
@@ -1090,7 +1146,7 @@ class App(object):
             img.thumbnail((w, h), Image.Resampling.LANCZOS)
             self._cam_photos[code] = ImageTk.PhotoImage(image=img)
             lbl.config(image=self._cam_photos[code])
-            self._cam_set_status(code, "播放中", CAM_COLORS["playing"])
+            # 播放状态由 _cam_poll 统一维护（含 fps / 画面中断提示），这里不覆盖
         except Exception as e:
             self._cam_set_status(code, "渲染失败：%s" % e, CAM_COLORS["error"])
 
@@ -1144,16 +1200,23 @@ class App(object):
             return
         self.mon_status.config(text=text, foreground=GRAY_HINT)
 
-    def _cam_stop(self, code):
+    def _cam_stop(self, code, quiet=False):
+        """停止一路摄像头。立刻返回：句柄释放交给后台线程（卡住的流 release 也会阻塞）"""
         self._cam_running[code] = False
-        cap = self._cam_caps.pop(code, None)
-        if cap:
+        reader = self._cam_readers.pop(code, None)
+        if reader is not None:
+            reader.stop("界面停止播放")        # 内部异步释放，不阻塞界面
+        self._cam_running.pop(code, None)
+        after_id = self._cam_render_after.pop(code, None)
+        if after_id:
             try:
-                cap.release()
-            except Exception:
+                self.root.after_cancel(after_id)
+            except (tk.TclError, ValueError):
                 pass
         self._cam_photos.pop(code, None)
-        self._cam_stopped_ui(code)
+        self._cam_seen.pop(code, None)
+        if not quiet:
+            self._cam_stopped_ui(code)
 
     def _cam_stopped_ui(self, code):
         panel = self._mon_panels.get(code)
@@ -1248,15 +1311,22 @@ class App(object):
             panel["btn"].config(text=text)
 
     def _mon_play_all(self):
-        for d in self.store.list_devices(enabled_only=False):
-            if d.code:
-                self._cam_play(d.code)
-        self._mon_set_status("已启动全部摄像头")
+        devs = [d for d in self.store.list_devices(enabled_only=False) if d.code and d.url]
+        if not devs:
+            self._mon_set_status("没有可播放的摄像头（请先在设备台账填取流地址）")
+            return
+        for d in devs:
+            self._cam_play(d.code)
+        self._mon_log_line("全部播放：%d 路" % len(devs))
+        self._mon_set_status("已启动 %d 路摄像头（连接中，不通的会自动重连）" % len(devs))
 
     def _mon_stop_all(self):
         codes = list(self._cam_running.keys())
         for code in codes:
-            self._cam_stop(code)
+            self._cam_stop(code, quiet=True)
+        for code in list(self._mon_panels):
+            self._cam_stopped_ui(code)
+        self._mon_log_line("全部停止：%d 路" % len(codes))
         self._mon_set_status("已停止全部摄像头")
 
 

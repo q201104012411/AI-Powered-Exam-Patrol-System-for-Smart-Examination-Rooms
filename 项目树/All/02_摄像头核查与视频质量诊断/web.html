@@ -251,7 +251,23 @@ async function api(path, opts = {}) {
     opts.headers["Content-Type"] = "application/json";
     if (typeof opts.body !== "string") opts.body = JSON.stringify(opts.body);
   }
-  const res = await fetch(API + path, opts);
+  // 请求超时：后端在探取流（网络不通）时会等好几秒，没有超时的话浏览器会
+  // 一直转圈、页面看起来像卡死。巡检/画质诊断这类重活给更长的预算。
+  const heavy = /\/api\/(patrol|devices\/[^/]+\/(inspect|baseline)|report)/.test(path);
+  const budget = heavy ? 60000 : 15000;
+  const ctl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+  if (ctl) opts.signal = ctl.signal;
+  const timer = ctl ? setTimeout(() => ctl.abort(), budget) : null;
+  let res;
+  try {
+    res = await fetch(API + path, opts);
+  } catch (e) {
+    throw new Error(e && e.name === "AbortError"
+      ? ("请求超时（" + Math.round(budget / 1000) + " 秒无响应，可能是取流地址不通）")
+      : ("请求失败：" + (e && e.message ? e.message : e)));
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
   return data;

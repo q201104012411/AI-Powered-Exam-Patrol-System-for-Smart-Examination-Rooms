@@ -2202,9 +2202,10 @@ class FaceVerifyGUI:
     # ---------------- 实时视频 ----------------
     def _toggle_video(self):
         if self.video_stream is not None and self.video_stream.running:
+            self._video_seq_id = getattr(self, "_video_seq_id", 0) + 1   # 取消未完成的打开
             self.video_stream.stop()
             self.video_stream = None
-            self.video_btn.config(text="开启实时视频")
+            self.video_btn.config(text="开启实时视频", state="normal")
             self.fps_label.config(text="FPS: 0.0")
             self.video_label.config(image="", text="视频已关闭", background="#111", foreground="#aaa")
             self.video_status.config(text="视频已关闭", foreground="#666")
@@ -2216,12 +2217,44 @@ class FaceVerifyGUI:
             idx = int(self.camera_var.get().strip() or "0")
         except ValueError:
             idx = 0
-        self.video_status.config(text="正在打开摄像头…", foreground="#666")
-        self.root.update_idletasks()
+        if getattr(self, "_video_opening", False):
+            return                                  # 正在打开，忽略重复点击
+        # 打开摄像头放到后台线程：某些摄像头/驱动打开会卡很久，
+        # 从前这里同步调 start() 会把界面冻住（这正是"卡死"的典型来源）。
         stream = video_mod.VideoStream(camera_index=idx)
-        ok = stream.start()
         self.video_stream = stream
+        self._video_opening = True
+        self._video_seq_id = getattr(self, "_video_seq_id", 0) + 1
+        seq = self._video_seq_id
+        self.video_status.config(text="正在打开摄像头…（最长 3 秒）", foreground="#666")
+        self.video_btn.config(text="正在打开…", state="disabled")
+
+        def work():
+            ok = False
+            try:
+                ok = bool(stream.start())
+            except Exception:                       # noqa: BLE001
+                ok = False
+            try:
+                self.root.after(0, lambda: self._video_opened(seq, stream, ok))
+            except (tk.TclError, RuntimeError):
+                pass
+
+        self.action_log.log("开启实时视频", "摄像头编号=%d" % idx)
+        threading.Thread(target=work, daemon=True, name="video-open").start()
+
+    def _video_opened(self, seq, stream, ok):
+        """后台打开流程回到界面线程后的收尾（可能已被用户取消/关闭）"""
+        self._video_opening = False
+        if seq != getattr(self, "_video_seq_id", 0) or self.video_stream is not stream:
+            try:
+                stream.stop()
+            except Exception:
+                pass
+            return
+        self.video_btn.config(state="normal")
         if not ok:
+            self.video_btn.config(text="开启实时视频")
             self.video_status.config(text=stream.error or "摄像头打开失败", foreground="#b00")
             self.video_label.config(image="", text="无法获取视频\n%s" % (stream.error or ""),
                                     background="#111", foreground="#b00")
@@ -2229,8 +2262,20 @@ class FaceVerifyGUI:
             self.video_stream = None
             return
         self.video_btn.config(text="关闭实时视频")
-        self.action_log.log("开启实时视频", "摄像头编号=%d" % idx)
         self._update_video()
+
+    def _wait_video_ready(self, timeout=4.0):
+        """等后台打开流程结束（供"取当前画面"这类一次性操作使用）"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            self.root.update_idletasks()
+            s = self.video_stream
+            if s is not None and s.running:
+                return True
+            if not getattr(self, "_video_opening", False):
+                return False
+            time.sleep(0.05)
+        return False
 
     def _frame_to_photo(self, frame):
         """BGR -> tkinter 可显示的图像对象（优先 Pillow，缺失则用 PNG+base64 回退）。
@@ -2281,16 +2326,25 @@ class FaceVerifyGUI:
         """便利化：没开视频就自动开；抓当前帧后立即核验（真实相机帧 + 现场令牌）"""
         s = self.video_stream
         if s is None or not s.running:
-            self._toggle_video()                 # 自动开启实时视频
-            s = self.video_stream
-            if s is None or not s.running:
+            self._toggle_video()                 # 自动开启实时视频（后台打开，不阻塞界面）
+            if not self._wait_video_ready(timeout=4.0):
+                s = self.video_stream
                 messagebox.showwarning("提示", "无法打开摄像头：%s"
                                        % (s.error if s else "未知错误"))
                 return
-            time.sleep(0.6)                      # 等自动曝光稳定
+            s = self.video_stream
         frame, _seq = s.latest()
         if frame is None:
-            messagebox.showwarning("提示", "尚未取到画面，请稍候再试。")
+            # 刚连上但还没出画面：最多再等 3 秒，避免"点了没反应"
+            deadline = time.time() + 3.0
+            while frame is None and time.time() < deadline:
+                self.root.update_idletasks()
+                frame, _seq = s.latest()
+                if frame is None:
+                    time.sleep(0.1)
+        if frame is None:
+            messagebox.showwarning("提示", "尚未取到画面（%s），请稍候再试。"
+                                   % (s.status_text() if s else ""))
             return
         self.live_image = frame
         self.live_token = liveness.make_token(self.device_var.get().strip() or "GATE-A-01",
@@ -2654,9 +2708,10 @@ class FaceVerifyGUI:
         self.action_log.log("清空结果")
 
     def _on_close(self):
+        self._video_seq_id = getattr(self, "_video_seq_id", 0) + 1   # 取消未完成的打开
         try:
             if self.video_stream is not None:
-                self.video_stream.stop()          # 退出时释放摄像头
+                self.video_stream.stop()          # 退出时释放摄像头（内部不阻塞）
         except Exception:
             pass
         try:

@@ -305,7 +305,22 @@ async function api(path, options = {}) {
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
   if (token) headers["Authorization"] = "Bearer " + token;
 
-  const res = await fetch(API + path, { ...options, headers });
+  // 请求超时：后端在等 ollama（模型未加载/网络不通）时可能长时间不返回，
+  // 否则页面会一直转圈、看起来像卡死。核验/AI 这类重活给更长预算。
+  const heavy = /(verify|index|ai-|roster-import|chat)/.test(path);
+  const budget = heavy ? 120000 : 20000;
+  const ctl = (typeof AbortController !== "undefined") ? new AbortController() : null;
+  const timer = ctl ? setTimeout(() => ctl.abort(), budget) : null;
+  let res;
+  try {
+    res = await fetch(API + path, { ...options, headers, ...(ctl ? { signal: ctl.signal } : {}) });
+  } catch (e) {
+    throw new Error(e && e.name === "AbortError"
+      ? ("请求超时（" + Math.round(budget / 1000) + " 秒无响应）")
+      : ("请求失败：" + (e && e.message ? e.message : e)));
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   const data = await res.json().catch(() => ({}));
 
   if (res.status === 401) {

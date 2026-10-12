@@ -41,6 +41,7 @@ except Exception:
 import access
 import alerts as alerts_mod
 import bridge
+import camera_stream
 import clock as clock_mod
 import config
 import console
@@ -123,7 +124,31 @@ class TerminalApp(object):
         # 放在这里而不是写在界面上，是为了将来新增入口时不会漏掉留痕
         self.cmd_bridge = bridge.CmdBridge(store=self.store)
         self.session = None
+        # 关窗口 = 停掉所有取流（卡在网络 read 里的线程是 daemon，退出时自然结束）
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_login()
+
+    def _on_close(self):
+        """退出前尽力收尾：停取流、取消渲染定时器，然后立刻销毁窗口（不做任何 join）"""
+        try:
+            for after_id in list(getattr(self, "_cam_render_after", {}).values()):
+                try:
+                    self.root.after_cancel(after_id)
+                except (tk.TclError, ValueError):
+                    pass
+            self._cam_render_after.clear()
+        except Exception:
+            pass
+        for reader in list(getattr(self, "_cam_readers", {}).values()):
+            try:
+                reader.stop("程序退出")
+            except Exception:
+                pass
+        try:
+            self._cam_readers.clear()
+        except Exception:
+            pass
+        self.root.destroy()
 
     # ================= 登录（建在主窗口内，避免 Toplevel 不显示） =================
     def _build_login(self):
@@ -363,13 +388,16 @@ class TerminalApp(object):
             return
 
         self.monitors = self._monitor_load()
-        self._cam_threads = {}      # url -> thread
-        self._cam_caps = {}         # url -> cap
+        self._cam_readers = {}      # url -> camera_stream.FrameReader（取流内核）
         self._cam_running = {}      # url -> bool
         self._cam_photos = {}       # url -> PhotoImage
+        self._cam_latest = {}       # url -> 最新帧
+        self._cam_seen = {}         # url -> (generation, seq) 已渲染过的帧
+        self._cam_render_after = {}  # url -> after id（渲染循环，避免重复排程）
         self._person_detectors = {}  # url -> PersonTracker（仅考场路）
         self._behavior_tracker = _BehaviorTracker()
         self._ai_error_file = config.DATA_ROOT / "ai_detect_error.txt"
+        self._mon_log = config.LOG_DIR / "monitor_ui.log"
 
         # ---- 顶部工具条 ----
         bar = ttk.Frame(f)
@@ -426,7 +454,11 @@ class TerminalApp(object):
         return canvas, grid
 
     def _monitor_render_grid(self):
-        """按区域分别渲染：考场监考 -> AI 网格；非考场监控 -> 纯视频网格"""
+        """按区域分别渲染：考场监考 -> AI 网格；非考场监控 -> 纯视频网格
+
+        重建网格前先停掉所有取流与渲染定时器，避免残留循环往已销毁的控件贴图。
+        """
+        self._monitor_stop_all()
         for grid in (self.mon_exam_grid, self.mon_other_grid):
             for w in grid.winfo_children():
                 w.destroy()
@@ -473,64 +505,75 @@ class TerminalApp(object):
             ttk.Button(bbar, text="⏹ 停止",
                        command=lambda u=url: self._cam_stop(u)).pack(side="left", padx=4)
 
-    @staticmethod
-    def _monitor_try_open(url):
-        """尝试多种后端打开视频流，返回 (cap, backend_name, info)"""
-        backends = []
-        if hasattr(cv2, "CAP_FFMPEG"):
-            backends.append((cv2.CAP_FFMPEG, "FFMPEG"))
-        if hasattr(cv2, "CAP_GSTREAMER"):
-            backends.append((cv2.CAP_GSTREAMER, "GSTREAMER"))
-        backends.append((0, "默认"))
-        last_info = ""
-        for backend, name in backends:
-            try:
-                cap = cv2.VideoCapture(url, backend) if backend else cv2.VideoCapture(url)
-                if cap.isOpened():
-                    ok, frame = cap.read()
-                    if ok and frame is not None:
-                        return cap, name, ""
-                    last_info = "%s 后端能打开但读不到帧" % name
-                    cap.release()
-                else:
-                    last_info = "%s 后端无法打开" % name
-            except Exception as e:
-                last_info = "%s 后端异常：%s" % (name, e)
-        return None, "", last_info
-
     def _cam_play(self, url):
+        """开始播放一路监控。
+
+        **不在界面线程里打开视频流**：旧版这里同步调 cv2.VideoCapture + cap.read()
+        并依次试多个后端，网络不通/推流断开时会把整个终端界面冻住。
+        现在交给 camera_stream.FrameReader：后台打开、超时可控、卡死自动重连。
+        """
         if not url or self._cam_running.get(url):
             return
-        self._cam_stop(url)
-        cap, backend, info = self._monitor_try_open(url)
-        cam = self._cam_by_url(url)
-        if cap is None:
-            self._cam_set_status(url, "打开失败：%s" % info, "#c00")
-            return
-        self._cam_caps[url] = cap
+        self._cam_stop(url, quiet=True)
+        reader = camera_stream.FrameReader(
+            url, label="03/%s" % camera_stream.short_url(url, 32))
+        self._cam_readers[url] = reader
         self._cam_running[url] = True
-        self._cam_set_status(url, "[%s后端] 缓冲中…" % backend, "#1f56b8")
-        self._cam_btn_text(url, "播放中…")
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        t = threading.Thread(target=lambda: self._cam_loop(url), daemon=True)
-        self._cam_threads[url] = t
-        t.start()
+        self._cam_seen.pop(url, None)
+        self._cam_latest.pop(url, None)
+        self._cam_set_status(url, "正在连接…", "#1f56b8")
+        self._cam_btn_text(url, "连接中…")
+        reader.start()
+        self._cam_poll(url)
+        self._cam_render(url)
 
-    def _cam_loop(self, url):
-        cap = self._cam_caps.get(url)
-        while self._cam_running.get(url) and cap and cap.isOpened():
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                time.sleep(0.05)
-                continue
-            try:
-                self.root.after(0, lambda f=frame, u=url: self._cam_update(u, f))
-            except (tk.TclError, RuntimeError):
-                break
-            time.sleep(0.033)
+    def _cam_poll(self, url):
+        """每 500ms 刷新一路的取流状态（非阻塞），含"画面中断/重连"提示"""
+        reader = self._cam_readers.get(url)
+        if reader is None or not self._cam_running.get(url):
+            return
+        snap = reader.snapshot()
+        state = snap["state"]
+        if state == "live":
+            if snap["seq"]:
+                self._cam_set_status(url, "播放中 ｜ %.1f fps" % snap["fps"], "#0a7d28")
+            else:
+                self._cam_set_status(url, "已连接，等待画面…", "#1f56b8")
+        elif state == "connecting":
+            self._cam_set_status(url, snap["status"] or "正在连接…", "#1f56b8")
+        elif state == "stalled":
+            self._cam_set_status(url, snap["status"], "#c07000")
+        elif state in ("error", "stopped"):
+            self._cam_set_status(url, snap["status"] or "取流已停止", "#c00")
+            if state == "error":
+                self._cam_btn_text(url, "▶ 重试")
         try:
-            self.root.after(0, lambda u=url: self._cam_stopped_ui(u))
+            self.root.after(500, lambda u=url: self._cam_poll(u))
         except (tk.TclError, RuntimeError):
+            pass
+
+    def _cam_render(self, url):
+        """渲染循环：取最新帧贴图。帧序号不变就不重复渲染，画面中断时界面也不会卡"""
+        try:
+            reader = self._cam_readers.get(url)
+            if reader is None or not self._cam_running.get(url):
+                return
+            snap = reader.snapshot()
+            key = (snap["generation"], snap["seq"])
+            if snap["frame"] is not None and snap["seq"] and self._cam_seen.get(url) != key:
+                self._cam_seen[url] = key
+                self._cam_update(url, snap["frame"])
+        except Exception as e:                       # noqa: BLE001
+            self._cam_set_status(url, "渲染失败：%s" % str(e)[:60], "#c00")
+        self._cam_render_after[url] = self.root.after(
+            33, lambda u=url: self._cam_render(u))
+
+    def _mon_log_line(self, text):
+        """监控操作日志（取流问题事后可查）"""
+        try:
+            with open(str(self._mon_log), "a", encoding="utf-8") as f:
+                f.write("%s  %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), text))
+        except OSError:
             pass
 
     def _cam_update(self, url, frame):
@@ -600,17 +643,24 @@ class TerminalApp(object):
             except Exception:
                 pass
 
-    def _cam_stop(self, url):
+    def _cam_stop(self, url, quiet=False):
+        """停止一路监控。立刻返回：句柄释放走后台线程（卡住的流 release 也会阻塞）"""
         self._cam_running[url] = False
-        cap = self._cam_caps.pop(url, None)
-        if cap:
+        reader = self._cam_readers.pop(url, None)
+        if reader is not None:
+            reader.stop("界面停止播放")
+        self._cam_running.pop(url, None)
+        after_id = self._cam_render_after.pop(url, None)
+        if after_id:
             try:
-                cap.release()
-            except Exception:
+                self.root.after_cancel(after_id)
+            except (tk.TclError, ValueError):
                 pass
         self._cam_photos.pop(url, None)
+        self._cam_seen.pop(url, None)
         self._person_detectors.pop(url, None)   # 轨迹随停止清空，编号重新计
-        self._cam_stopped_ui(url)
+        if not quiet:
+            self._cam_stopped_ui(url)
 
     def _cam_stopped_ui(self, url):
         cam = self._cam_by_url(url)
@@ -641,17 +691,23 @@ class TerminalApp(object):
             cam["_btn"].config(text=text)
 
     def _monitor_play_all(self):
-        for cam in self.monitors:
-            url = cam.get("url", "")
-            if url:
-                self._cam_play(url)
-        self.monitor_status.config(text="已启动全部摄像头")
+        urls = [c.get("url", "") for c in self.monitors if c.get("url")]
+        if not urls:
+            self.monitor_status.config(text="没有配置推流地址的摄像头")
+            return
+        for url in urls:
+            self._cam_play(url)
+        self._mon_log_line("全部播放：%d 路" % len(urls))
+        self.monitor_status.config(
+            text="已启动 %d 路摄像头（连接中，不通的会自动重连）" % len(urls))
 
     def _monitor_stop_all(self):
-        for cam in list(self.monitors):
-            url = cam.get("url", "")
-            if url:
-                self._cam_stop(url)
+        urls = [c.get("url", "") for c in list(self.monitors) if c.get("url")]
+        for url in urls:
+            self._cam_stop(url, quiet=True)
+        for url in urls:
+            self._cam_stopped_ui(url)
+        self._mon_log_line("全部停止：%d 路" % len(urls))
         self.monitor_status.config(text="已停止全部摄像头")
 
     def _monitor_manage(self):
@@ -763,6 +819,7 @@ class TerminalApp(object):
             idx = tree.index(sel[0])
             url = self.monitors[idx].get("url", "")
             self._cam_stop(url)
+            self._cam_latest.pop(url, None)
             del self.monitors[idx]
             self._monitor_save()
             reload()

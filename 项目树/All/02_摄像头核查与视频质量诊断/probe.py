@@ -13,6 +13,7 @@ import time
 
 import numpy as np
 
+import camera_stream
 import config
 import models
 
@@ -20,6 +21,10 @@ try:
     import cv2
 except ImportError:                       # 允许无 OpenCV 环境下跑纯台账逻辑
     cv2 = None
+
+# 取流探测的并发上限：卡死的探测线程（C 调用里出不来）是收不回来的，
+# 因此宁可让后来的探测**快速失败并说明原因**，也不能让线程无限堆积。
+_PROBE_SLOTS = threading.BoundedSemaphore(3)
 
 
 # ---------------- 在线状态 ----------------
@@ -41,20 +46,32 @@ def heartbeat_status(device, now=None, timeout_sec=90):
 def probe_stream(url, timeout_sec=6.0, device_id=None):
     """
     取流探测：返回 (ok, frame, reason)
-    用独立线程 + 超时，避免 VideoCapture 在错误地址上卡死整个巡检。
+
+    三层保护，保证"探测本身"不会卡死巡检：
+      · 独立线程 + 超时（超时立即返回，不 join 卡住的线程）；
+      · 打开超时由 camera_stream 兜住（FFMPEG 带 socket 超时选项）；
+      · 并发上限：卡死的探测线程回收不了，超过 3 路同时探测时后来的**直接快速失败**，
+        绝不会"三路不通就等于整个系统假死"。
     """
     if cv2 is None:
         return False, None, "当前 Python 未安装 OpenCV，无法取流"
     if not url:
         return False, None, "未配置取流地址"
+
+    timeout_sec = max(1.0, float(timeout_sec or 6.0))
+    # 打开/读取各自不超过总预算，避免"打开 6 秒 + 读取 6 秒"远超调用方预期
+    open_timeout = max(1.5, timeout_sec * 0.6)
     box = {"frame": None, "reason": "取流超时（%.0fs）" % timeout_sec}
+
+    if not _PROBE_SLOTS.acquire(blocking=False):
+        return False, None, "取流探测并发已满（有探测卡在网络无响应上），请稍后重试"
 
     def worker():
         cap = None
         try:
-            cap = cv2.VideoCapture(url)
-            if not cap or not cap.isOpened():
-                box["reason"] = "取流失败：无法打开 %s" % _short(url)
+            cap, info = camera_stream.open_capture(url, timeout=open_timeout, log_it=False)
+            if cap is None:
+                box["reason"] = "取流失败：%s" % (info or ("无法打开 %s" % _short(url)))
                 return
             ok, frame = cap.read()
             if not ok or frame is None:
@@ -65,18 +82,17 @@ def probe_stream(url, timeout_sec=6.0, device_id=None):
         except Exception as e:                       # noqa: BLE001
             box["reason"] = "取流异常：%s" % str(e)[:100]
         finally:
-            try:
-                if cap is not None:
-                    cap.release()
-            except Exception:                        # noqa: BLE001
-                pass
+            # 释放丢后台：卡住的句柄 release 也可能阻塞，不能拖住探测线程的记账
+            camera_stream.release_async(cap, "探测结束")
+            _PROBE_SLOTS.release()
 
     t = threading.Thread(target=worker, daemon=True)
     t.start()
     t.join(timeout_sec)
     if box["frame"] is None:
         if t.is_alive():
-            return False, None, "取流超时（%.0fs）" % timeout_sec
+            # 线程卡在 C 调用里：不 join、不清理，让它在后台自然结束
+            return False, None, "取流超时（%.0fs，网络无响应）" % timeout_sec
         return False, None, box["reason"] or "取流失败"
     return True, box["frame"], "取流成功"
 

@@ -380,14 +380,14 @@ def main(argv=None):
     check("网页端与桌面端读到的是同一份账户（同一 kv 键 web.accounts）",
           web_accounts.Accounts(storage.Store()).usernames() == acc.usernames())
 
-    owner_only = ("device_delete", "account_manage", "audit_view", "hide_cmd_toggle")
+    owner_only = ("device_delete", "account_manage", "audit_view")
     daily = ("view", "device_add", "baseline_capture", "inspect_upload", "patrol_run",
-             "workorder_operate", "report_export", "change_own_pwd")
+             "workorder_operate", "report_export", "change_own_pwd", "hide_cmd_toggle")
     check("所有者拥有全部权限",
           all(web_accounts.can(a, web_accounts.ROLE_OWNER) for a in web_accounts.CAN))
-    check("管理员日常操作（台账/基准图/抽查/巡检/工单/报告）全部可用",
+    check("管理员日常操作（台账/基准图/抽查/巡检/工单/报告/隐藏cmd开关）全部可用",
           all(web_accounts.can(a, web_accounts.ROLE_ADMIN) for a in daily))
-    check("管理员被拒：删机位 / 管账户 / 看审计 / 隐藏cmd开关",
+    check("管理员被拒：删机位 / 管账户 / 看审计",
           not any(web_accounts.can(a, web_accounts.ROLE_ADMIN) for a in owner_only))
     check("未知角色与未知动作一律拒绝",
           not web_accounts.can("device_delete", "teacher")

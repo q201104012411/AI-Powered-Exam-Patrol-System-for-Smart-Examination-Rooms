@@ -23,7 +23,7 @@ echo.
 echo ============================================
 echo  [1/3] 编译检查
 echo ============================================
-"%PY%" -m py_compile config.py models.py storage.py web_accounts.py diagnose.py probe.py baseline.py patrol.py workorder.py report.py gui.py main.py
+"%PY%" -m py_compile config.py models.py storage.py web_accounts.py diagnose.py camera_stream.py probe.py baseline.py patrol.py workorder.py report.py gui.py main.py
 if errorlevel 1 ( echo 编译未通过 & pause & exit /b 1 )
 echo 编译通过
 

@@ -18,8 +18,11 @@
 """
 import json
 import os
+import signal
 import subprocess
 import sys
+import threading
+import time
 
 ALL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -34,13 +37,65 @@ class LinkageError(Exception):
     pass
 
 
+def kill_tree(proc, grace=5.0):
+    """
+    杀掉子进程**及其整个进程树**。
+
+    为什么必须杀树：跨项目调用是 `python integration_api.py`，它内部可能再起
+    ollama / 取流等孙进程。只 kill 父进程的话，孙进程会占着 stdout/stderr 管道不放，
+    父进程的收输出就会一直等下去 —— 这正是旧版"超时了还卡着"的根因。
+    """
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=10)
+        else:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except Exception:
+                proc.kill()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    try:
+        proc.wait(timeout=grace)
+    except Exception:
+        pass
+
+
+def _pump(stream, sink):
+    """把管道内容读进 sink（bytes 列表）。读不到就结束，绝不在主管道里阻塞调用方。"""
+    try:
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                break
+            sink.append(chunk)
+    except Exception:
+        pass
+    finally:
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+
 class Project(object):
     """对某一套系统的调用句柄（子进程 + JSON）"""
 
     # 各套的数据目录重定向环境变量（用于"沙箱自检"，不污染真实数据）
     HOME_ENV = {"01": "EXAM_HOME", "02": "EXAM_CAMERA_HOME", "03": "EXAM_TERMINAL_HOME"}
 
-    def __init__(self, key, python=None, timeout=180, home=None):
+    # 单次子进程调用的默认上限：旧版 180 秒，只要对端卡在取流/网络等待上，
+    # 调用方（界面/巡检）就会跟着"沉默"三分钟，看起来就是卡死。
+    DEFAULT_TIMEOUT = 60
+
+    def __init__(self, key, python=None, timeout=DEFAULT_TIMEOUT, home=None):
         self.key = key
         self.dir = PROJECTS[key]
         self.python = python or sys.executable
@@ -67,26 +122,51 @@ class Project(object):
         cmd = [self.python, self.script, "--op", op,
                "--args", json.dumps(args or {}, ensure_ascii=False)]
         try:
-            run_kwargs = {"capture_output": True, "timeout": self.timeout,
-                          "env": env, "cwd": self.dir}
-            if sys.platform == "win32":
-                # 禁止在 02/03 GUI 调用时弹出黑色命令行窗口
-                run_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            p = subprocess.run(cmd, **run_kwargs)
-        except subprocess.TimeoutExpired:
-            raise LinkageError("[%s] 调用 %s 超时（%ds）" % (self.key, op, self.timeout))
+            popen_kwargs = {"stdin": subprocess.DEVNULL,
+                            "stdout": subprocess.PIPE, "stderr": subprocess.PIPE,
+                            "env": env, "cwd": self.dir}
+            if os.name == "nt":
+                # 禁止在 02/03 GUI 调用时弹出黑色命令行窗口；并新建进程组便于整树终止
+                popen_kwargs["creationflags"] = (
+                    getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+            else:
+                popen_kwargs["start_new_session"] = True
+            p = subprocess.Popen(cmd, **popen_kwargs)
         except OSError as e:
             raise LinkageError("[%s] 无法启动子进程：%s" % (self.key, e))
-        out = (p.stdout or b"").decode("utf-8", "replace").strip()
+
+        # 双线程收输出：绝不用 communicate() —— 孙进程占着管道不放时它会一直等
+        out_chunks, err_chunks = [], []
+        t_out = threading.Thread(target=_pump, args=(p.stdout, out_chunks), daemon=True)
+        t_err = threading.Thread(target=_pump, args=(p.stderr, err_chunks), daemon=True)
+        t_out.start()
+        t_err.start()
+
+        timed_out = False
+        started = time.time()
+        try:
+            p.wait(timeout=self.timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            kill_tree(p)                     # 超时 -> 连同孙进程一起终止，避免残留卡住后续调用
+        t_out.join(timeout=3)
+        t_err.join(timeout=3)
+
+        out = b"".join(out_chunks).decode("utf-8", "replace").strip()
+        err = b"".join(err_chunks).decode("utf-8", "replace").strip()
+        if timed_out:
+            raise LinkageError("[%s] 调用 %s 超时（%ds，已强制终止进程树）"
+                               % (self.key, op, self.timeout))
         line = ""
         for ln in reversed(out.splitlines()):
             if ln.strip().startswith("{"):
                 line = ln.strip()
                 break
         if not line:
-            err = (p.stderr or b"").decode("utf-8", "replace")[:300]
-            raise LinkageError("[%s] %s 无有效输出（返回码 %s）：%s"
-                               % (self.key, op, p.returncode, err))
+            raise LinkageError("[%s] %s 无有效输出（返回码 %s，耗时 %.1fs）：%s"
+                               % (self.key, op, p.returncode, time.time() - started,
+                                  err[:300]))
         try:
             data = json.loads(line)
         except ValueError:
@@ -100,11 +180,12 @@ class Linkage(object):
     """三套系统的联动总线"""
 
     def __init__(self, python=None, sandbox_root=None, sandbox_keys=("02", "03"),
-                 sandbox_01=False):
+                 sandbox_01=False, timeout=Project.DEFAULT_TIMEOUT):
         """
         sandbox_root 给定时，sandbox_keys 里的系统会把自己的数据目录重定向到
         <sandbox_root>/<key>，用于"联动自检"不污染真实运行数据。
         01 默认用真实数据（否则没人脸库可核验，演示不出效果）；需要时用 sandbox_01=True。
+        timeout 是单次跨系统子进程调用的上限（超时会**强制终止整个进程树**）。
         """
         keys = set(sandbox_keys)
         if sandbox_01:
@@ -114,9 +195,9 @@ class Linkage(object):
         def home(key):
             return os.path.join(sandbox_root, key) if (sandbox_root and key in keys) else None
 
-        self.p01 = Project("01", python=python, home=home("01"))
-        self.p02 = Project("02", python=python, home=home("02"))
-        self.p03 = Project("03", python=python, home=home("03"))
+        self.p01 = Project("01", python=python, timeout=timeout, home=home("01"))
+        self.p02 = Project("02", python=python, timeout=timeout, home=home("02"))
+        self.p03 = Project("03", python=python, timeout=timeout, home=home("03"))
 
     # ---------- 各自状态 ----------
     def status(self):
