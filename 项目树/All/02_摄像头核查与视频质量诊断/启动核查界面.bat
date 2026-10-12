@@ -24,7 +24,7 @@ if not defined PY (
 
 REM ---- 启动前快速自检：关键源码编译检查，损坏则中止启动（完整自检用「启动前自检.bat」） ----
 if not exist "%H%data\logs" mkdir "%H%data\logs" >nul 2>nul
-"%PY%" -m py_compile gui.py person_detect.py linkage_bridge.py web_accounts.py storage.py models.py patrol.py integration_api.py ui_selfcheck.py 2>"%H%data\logs\compile_check.log"
+"%PY%" -m py_compile gui.py person_detect.py linkage_bridge.py web_accounts.py storage.py data_crypto.py models.py patrol.py integration_api.py ui_selfcheck.py 2>"%H%data\logs\compile_check.log"
 if errorlevel 1 (
     echo ============================================
     echo  [自检失败] 源代码编译检查未通过，已中止启动

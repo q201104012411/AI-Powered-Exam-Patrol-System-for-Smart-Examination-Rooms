@@ -71,16 +71,30 @@ def imread_unicode(path):
     cv2.imread 内部使用 ANSI 接口，路径含中文时返回 None——
     本项目路径含"智能考场AI巡考系统/项目树/人脸识别与身份核对"，
     必须走 np.fromfile + cv2.imdecode 才能稳定读图。
+
+    若文件内容以 "enc:" 开头，则先调用 data_crypto 解密（支持参考照加密存储）。
     """
     import cv2
-    buf = np.fromfile(str(path), dtype=np.uint8)
-    if buf.size == 0:
+    raw = np.fromfile(str(path), dtype=np.uint8)
+    if raw.size == 0:
         return None
+    # 判断是否加密文件：前 4 字节为 "enc:" 的 UTF-8
+    buf = raw
+    if raw.size >= 4:
+        header = raw[:4].tobytes()
+        if header == b"enc:":
+            try:
+                from data_crypto import decrypt_bytes
+                plain = decrypt_bytes(raw.tobytes().decode("utf-8"))
+                buf = np.frombuffer(plain, dtype=np.uint8)
+            except Exception:
+                # 解密失败时仍尝试按原图解码，避免误伤非加密但碰巧以 enc: 开头的文件
+                buf = raw
     return cv2.imdecode(buf, cv2.IMREAD_COLOR)
 
 
-def imwrite_unicode(path, img, quality=95):
-    """写图片（同样规避中文路径问题）"""
+def imwrite_unicode(path, img, quality=95, encrypt=False):
+    """写图片（同样规避中文路径问题）。encrypt=True 时用 data_crypto 加密后写入。"""
     import cv2
     ext = os.path.splitext(str(path))[1].lower() or ".jpg"
     params = []
@@ -89,7 +103,18 @@ def imwrite_unicode(path, img, quality=95):
     ok, buf = cv2.imencode(ext, img, params)
     if not ok:
         return False
-    buf.tofile(str(path))
+    data = buf.tobytes()
+    if encrypt:
+        try:
+            from data_crypto import encrypt_bytes
+            data = encrypt_bytes(data).encode("utf-8")
+        except Exception as e:
+            raise FaceError(RC_IMAGE_ERROR, "参考照加密写入失败：%s" % e)
+    try:
+        with open(str(path), "wb") as f:
+            f.write(data)
+    except Exception as e:
+        raise FaceError(RC_IMAGE_ERROR, "图片写入失败：%s" % e)
     return True
 
 

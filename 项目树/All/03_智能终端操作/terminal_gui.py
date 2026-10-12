@@ -104,6 +104,27 @@ _BEHAVIOR_ALERT_CODE = {
     "转脸偏头": "HEAD_TURN",
 }
 
+# 密度等级（与 02 保持一致）
+DENSITY_LOW = "low"
+DENSITY_MED = "medium"
+DENSITY_HIGH = "high"
+DENSITY_TEXT = {DENSITY_LOW: "低", DENSITY_MED: "中", DENSITY_HIGH: "高"}
+DENSITY_COLOR = {DENSITY_LOW: "#0a7d28", DENSITY_MED: "#1f56b8", DENSITY_HIGH: "#e67e00"}
+
+
+def _density_level(persons, frame):
+    """按每百万像素人数返回密度等级"""
+    if frame is None or not persons:
+        return DENSITY_LOW
+    h, w = frame.shape[:2]
+    mp = max(h * w / 1_000_000.0, 0.01)
+    d = len(persons) / mp
+    if d >= 30:
+        return DENSITY_HIGH
+    if d >= 15:
+        return DENSITY_MED
+    return DENSITY_LOW
+
 
 class TerminalApp(object):
     def __init__(self, root):
@@ -425,17 +446,24 @@ class TerminalApp(object):
         self.monitor_status = ttk.Label(bar, text="就绪", foreground="#666")
         self.monitor_status.pack(side="right")
 
+        # ---- 全局状态条 ----
+        self.info_bar = ttk.LabelFrame(f, text=" 实时状态 ", padding=6)
+        self.info_bar.pack(fill="x", pady=(0, 6))
+        self.info_label = ttk.Label(self.info_bar, text="暂无摄像头",
+                                    font=FONT, foreground="#333")
+        self.info_label.pack(anchor="w")
+
         # ---- 两个子页签：考场监考（有 AI） / 非考场监控（纯视频） ----
-        nb = ttk.Notebook(f)
-        nb.pack(fill="both", expand=True)
+        self.mon_nb = ttk.Notebook(f)
+        self.mon_nb.pack(fill="both", expand=True)
 
-        exam_tab = ttk.Frame(nb, padding=4)
-        nb.add(exam_tab, text=" 🎓 考场监考（AI 辅助识别） ")
-        self.mon_exam_canvas, self.mon_exam_grid = self._make_scroll_area(exam_tab)
+        self.exam_tab = ttk.Frame(self.mon_nb, padding=4)
+        self.mon_nb.add(self.exam_tab, text=" 🎓 考场监考（AI 辅助识别） ")
+        self.mon_exam_canvas, self.mon_exam_grid = self._make_scroll_area(self.exam_tab)
 
-        other_tab = ttk.Frame(nb, padding=4)
-        nb.add(other_tab, text=" 🚪 非考场监控（走廊/门厅，纯视频） ")
-        self.mon_other_canvas, self.mon_other_grid = self._make_scroll_area(other_tab)
+        self.other_tab = ttk.Frame(self.mon_nb, padding=4)
+        self.mon_nb.add(self.other_tab, text=" 🚪 非考场监控（走廊/门厅，纯视频） ")
+        self.mon_other_canvas, self.mon_other_grid = self._make_scroll_area(self.other_tab)
 
         self._monitor_render_grid()
 
@@ -493,17 +521,22 @@ class TerminalApp(object):
             lbl = tk.Label(frame, bg="#000", relief="sunken")
             lbl.pack(fill="both", expand=True)
             cam["_label"] = lbl
-            status = ttk.Label(frame, text=("未播放" if is_exam else "未播放（该区域无 AI）"),
+            srow = ttk.Frame(frame)
+            srow.pack(fill="x", pady=(2, 0))
+            status = ttk.Label(srow, text=("未播放" if is_exam else "未播放（该区域无 AI）"),
                                foreground="#666")
-            status.pack(anchor="w")
-            cam["_status"] = status
+            status.pack(side="left")
+            if is_exam:
+                density = ttk.Label(srow, text="密度：-", foreground="#888", font=FONT)
+                density.pack(side="left", padx=(8, 0))
+                cam["_density"] = density
             bbar = ttk.Frame(frame)
-            bbar.pack(fill="x", pady=(2, 0))
+            bbar.pack(fill="x", pady=(4, 0))
             cam["_btn"] = ttk.Button(bbar, text="▶ 播放",
                                      command=lambda u=url: self._cam_play(u))
-            cam["_btn"].pack(side="left")
+            cam["_btn"].pack(side="left", padx=(0, 4), pady=(2, 2))
             ttk.Button(bbar, text="⏹ 停止",
-                       command=lambda u=url: self._cam_stop(u)).pack(side="left", padx=4)
+                       command=lambda u=url: self._cam_stop(u)).pack(side="left", padx=(0, 4), pady=(2, 2))
 
     def _cam_play(self, url):
         """开始播放一路监控。
@@ -584,6 +617,8 @@ class TerminalApp(object):
         if lbl is None or not lbl.winfo_exists():
             return
         try:
+            persons = []
+            viol = 0
             # AI 框选识别：仅「考场监考」区域的摄像头生效；勾选才跑，省 CPU
             if (HAS_PD and getattr(self, "mon_ai", None) and self.mon_ai.get()
                     and cam.get("area", self.AREA_EXAM) == self.AREA_EXAM):
@@ -606,6 +641,14 @@ class TerminalApp(object):
                     self.monitor_status.config(
                         text="AI识别中：%d 人，越界 %d" % (len(persons), viol))
                     self._ai_ingest_behaviors(url, cam, persons)
+                    # 密度等级
+                    level = _density_level(persons, frame)
+                    cam["_persons"] = persons
+                    cam["_density_level"] = level
+                    density = cam.get("_density")
+                    if density is not None and density.winfo_exists():
+                        density.config(text="密度：%s" % DENSITY_TEXT.get(level, level),
+                                       foreground=DENSITY_COLOR.get(level, "#888"))
             h = lbl.winfo_height()
             w = lbl.winfo_width()
             if h < 50:
@@ -618,8 +661,44 @@ class TerminalApp(object):
             self._cam_photos[url] = ImageTk.PhotoImage(image=img)
             lbl.config(image=self._cam_photos[url])
             self._cam_set_status(url, "播放中", "#0a7d28")
+            self._monitor_update_info_bar()
         except Exception as e:
             self._cam_set_status(url, "渲染失败：%s" % e, "#c00")
+
+    def _monitor_update_info_bar(self):
+        """刷新顶部状态条和分区域标题人数"""
+        total = len(self.monitors)
+        playing = sum(1 for v in self._cam_running.values() if v)
+        ai_total = 0
+        cross_total = 0
+        abnormal = 0
+        high_count = 0
+        exam_count = 0
+        for cam in self.monitors:
+            persons = cam.get("_persons", []) or []
+            ai_total += len(persons)
+            cross_total += sum(1 for p in persons if p.get("bad"))
+            abnormal += sum(len(p.get("behaviors", [])) for p in persons)
+            if cam.get("_density_level") == DENSITY_HIGH:
+                high_count += 1
+            if cam.get("area", self.AREA_EXAM) == self.AREA_EXAM:
+                exam_count += len(persons)
+        other_count = ai_total - exam_count
+        text = ("播放 %d/%d 路　｜　AI 总人数 %d　越界 %d　异常行为 %d　｜"
+                "　高密度机位 %d 路" % (playing, total, ai_total, cross_total, abnormal, high_count))
+        try:
+            self.info_label.config(text=text)
+        except tk.TclError:
+            pass
+        # 更新两个分区域标题旁的人数
+        try:
+            if getattr(self, "mon_nb", None) is not None:
+                self.mon_nb.tab(self.exam_tab,
+                                text=" 🎓 考场监考（%d 人） " % exam_count)
+                self.mon_nb.tab(self.other_tab,
+                                text=" 🚪 非考场监控（%d 人） " % other_count)
+        except tk.TclError:
+            pass
 
     def _ai_ingest_behaviors(self, url, cam, persons):
         """逐人异常行为达到阈值后，直接在本终端生成告警（进 03 自己的告警列表）"""
@@ -671,6 +750,12 @@ class TerminalApp(object):
                 cam["_label"].config(image="")
             self._cam_btn_text(url, "▶ 播放")
             self._cam_set_status(url, "已停止", "#666")
+            cam["_persons"] = []
+            cam["_density_level"] = DENSITY_LOW
+            density = cam.get("_density")
+            if density is not None and density.winfo_exists():
+                density.config(text="密度：-", foreground="#888")
+            self._monitor_update_info_bar()
         except tk.TclError:
             pass
 

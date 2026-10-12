@@ -674,16 +674,26 @@ def roster_import():
 @app.route("/api/candidates", methods=["GET"])
 @require_auth()
 def list_candidates():
-    """只返回脱敏后的身份证号；完整号码不再通过任何接口下发。"""
-    conn = get_db()
-    try:
-        rows = conn.execute("""
-            SELECT candidate_id, name, id_card_masked, ticket_no, seat_no, reference_photo,
-                   consent_status, consent_at, retention_until, updated_at, updated_by
-            FROM candidates ORDER BY candidate_id""").fetchall()
-    finally:
-        conn.close()
-    return jsonify([dict(r) for r in rows])
+    """只返回脱敏后的身份证号；完整号码不再通过任何接口下发。
+    姓名/准考证号/座位号/参考照路径从加密存储中解密后返回（已登录管理员/所有者可见）。"""
+    cands = store.load()
+    out = []
+    for c in cands.values():
+        out.append({
+            "candidate_id": c.candidate_id,
+            "name": c.name,
+            "id_card_masked": c.id_card_masked,
+            "ticket_no": c.ticket_no,
+            "seat_no": c.seat_no,
+            "reference_photo": c.reference_photo,
+            "consent_status": c.consent_status,
+            "consent_at": c.consent_at,
+            "retention_until": c.retention_until,
+            "updated_at": c.updated_at,
+            "updated_by": c.updated_by,
+        })
+    out.sort(key=lambda x: x["candidate_id"])
+    return jsonify(out)
 
 
 @app.route("/api/candidates", methods=["POST"])

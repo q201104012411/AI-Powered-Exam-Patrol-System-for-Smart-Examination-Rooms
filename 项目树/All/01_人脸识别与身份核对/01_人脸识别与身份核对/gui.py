@@ -35,6 +35,10 @@ from verifier import FaceVerifier
 # 所有者可切换：是否隐藏启动器的命令行窗口（由 .bat 读取该标记文件）
 HIDE_CMD_FLAG = os.path.join(str(config.DATA_ROOT), "hide_cmd.on")
 
+# 界面字体常量（UI 优化新增 tooltip 等控件使用）
+FONT = ("Microsoft YaHei", 10)
+FONT_SMALL = ("Microsoft YaHei", 9)
+
 # 命令控制台的执行类型：下拉框显示中文，执行时再映射回 cmd / python / ollama / ai
 CONSOLE_MODE_LABELS = {"cmd": "系统命令 (cmd)",
                        "python": "Python 代码",
@@ -257,12 +261,16 @@ class FaceVerifyGUI:
 
         self.video_status = ttk.Label(live, text="视频未开启", foreground="#666")
         self.video_status.grid(row=2, column=0, columnspan=8, sticky="w")
+        # 视频快捷状态行：分辨率 / FPS / 摄像头编号
+        self.video_meta = ttk.Label(live, text="分辨率：-　FPS：-　摄像头：-",
+                                    foreground="#1f56b8", font=FONT_SMALL)
+        self.video_meta.grid(row=3, column=0, columnspan=8, sticky="w", pady=(2, 0))
 
         # 操作按钮：并入视频块；只留常用项，其余收进「更多操作」
-        ttk.Separator(live, orient="horizontal").grid(row=3, column=0, columnspan=8,
+        ttk.Separator(live, orient="horizontal").grid(row=4, column=0, columnspan=8,
                                                       sticky="ew", pady=(10, 6))
         act = ttk.Frame(live)
-        act.grid(row=4, column=0, columnspan=8, sticky="w")
+        act.grid(row=5, column=0, columnspan=8, sticky="w")
         self.verify_btn = ttk.Button(act, text="开始核验", command=self._start_verify)
         self.verify_btn.pack(side="left", padx=4)
 
@@ -272,6 +280,8 @@ class FaceVerifyGUI:
                                           variable=self.auto_verify,
                                           command=self._toggle_auto_verify)
         self.auto_check.pack(side="left", padx=(14, 4))
+        self._bind_tooltip(self.auto_check,
+                           "每 %.1f 秒自动抓帧核验" % (self.AUTO_INTERVAL_MS / 1000.0))
         if not can_auto:
             self.auto_check.config(state="disabled")
             ttk.Label(act, text="（需所有者授权）", foreground="#b00").pack(side="left")
@@ -360,9 +370,9 @@ class FaceVerifyGUI:
         out.pack(fill="both", expand=True, padx=10, pady=6)
         self.output = scrolledtext.ScrolledText(out, wrap="word", height=18)
         self.output.pack(fill="both", expand=True)
-        self.output.tag_config("PASS", foreground="#0a7d28")
-        self.output.tag_config("FAIL", foreground="#c00000")
-        self.output.tag_config("MANUAL", foreground="#c07000")
+        self.output.tag_config("PASS", foreground="#0a7d28", background="#e6f4ea")
+        self.output.tag_config("FAIL", foreground="#c00000", background="#fce8e8")
+        self.output.tag_config("MANUAL", foreground="#8a5a00", background="#fff6e0")
 
         self.status = ttk.Label(body, text="初始化中…", foreground="#666")
         self.status.pack(fill="x", padx=12, pady=(0, 6))
@@ -1052,6 +1062,33 @@ class FaceVerifyGUI:
             return bool(w.winfo_exists())
         except tk.TclError:
             return False
+
+    def _bind_tooltip(self, widget, text):
+        """给控件绑定悬停提示"""
+        tip = None
+
+        def show(event):
+            nonlocal tip
+            if tip is not None:
+                return
+            tip = tk.Toplevel(self.root)
+            tip.overrideredirect(True)
+            tip.geometry("+%d+%d" % (event.x_root + 14, event.y_root + 14))
+            lbl = ttk.Label(tip, text=text, font=FONT_SMALL, background="#ffffe0",
+                            foreground="#333", padding=(6, 3))
+            lbl.pack()
+
+        def hide(event):
+            nonlocal tip
+            if tip is not None and tip.winfo_exists():
+                try:
+                    tip.destroy()
+                except tk.TclError:
+                    pass
+            tip = None
+
+        widget.bind("<Enter>", show)
+        widget.bind("<Leave>", hide)
 
     def _toggle_auto_fill_doc(self):
         """所有者开关：人脸通过后是否自动带出报名库证件信息"""
@@ -2209,6 +2246,7 @@ class FaceVerifyGUI:
             self.fps_label.config(text="FPS: 0.0")
             self.video_label.config(image="", text="视频已关闭", background="#111", foreground="#aaa")
             self.video_status.config(text="视频已关闭", foreground="#666")
+            self.video_meta.config(text="分辨率：-　FPS：-　摄像头：-")
             self.action_log.log("关闭实时视频", "")
             return
 
@@ -2258,10 +2296,12 @@ class FaceVerifyGUI:
             self.video_status.config(text=stream.error or "摄像头打开失败", foreground="#b00")
             self.video_label.config(image="", text="无法获取视频\n%s" % (stream.error or ""),
                                     background="#111", foreground="#b00")
+            self.video_meta.config(text="分辨率：-　FPS：-　摄像头：%s" % self.camera_var.get())
             self.action_log.log("开启实时视频失败", stream.error)
             self.video_stream = None
             return
         self.video_btn.config(text="关闭实时视频")
+        self.video_meta.config(text="分辨率：-　FPS：-　摄像头：%s" % self.camera_var.get())
         self._update_video()
 
     def _wait_video_ready(self, timeout=4.0):
@@ -2319,6 +2359,17 @@ class FaceVerifyGUI:
         self.fps_label.config(text="FPS: %.1f" % s.fps)
         self.video_status.config(text=s.status_text(),
                                  foreground="#0a7d28" if not s.error else "#b00")
+        # 更新快捷状态行
+        try:
+            frame, _seq = s.latest()
+            if frame is not None:
+                h, w = frame.shape[:2]
+                cam_idx = int(self.camera_var.get().strip() or "0")
+                self.video_meta.config(text="分辨率：%dx%d　FPS：%.1f　摄像头：%d" % (w, h, s.fps, cam_idx))
+            else:
+                self.video_meta.config(text="分辨率：-　FPS：%.1f　摄像头：%s" % (s.fps, self.camera_var.get()))
+        except Exception:
+            pass
         # 30 FPS（33ms）让预览更顺滑；界面转换已做降采样，开销可控
         self.root.after(33, self._update_video)
 

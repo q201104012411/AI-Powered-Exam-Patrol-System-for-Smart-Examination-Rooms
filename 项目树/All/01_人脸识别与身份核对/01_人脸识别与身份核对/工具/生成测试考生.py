@@ -246,14 +246,13 @@ def main():
     os.makedirs(str(config.PHOTO_DIR), exist_ok=True)
     items = build_items(rng, args.count, args.prefix, args.start)
     print("生成 %d 张合成人像 -> %s" % (len(items), config.PHOTO_DIR))
+    from face_engine import imwrite_unicode
     for i, it in enumerate(items, 1):
         img = draw_face(rng)
         p = photo_path(it["candidate_id"])
-        ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
-        if not ok:
+        if not imwrite_unicode(p, img, quality=88, encrypt=True):
             print("  写入失败：%s" % p)
             continue
-        buf.tofile(p)
         it["reference_photo"] = p
         if i % 50 == 0 or i == len(items):
             print("  已生成 %d/%d" % (i, len(items)))

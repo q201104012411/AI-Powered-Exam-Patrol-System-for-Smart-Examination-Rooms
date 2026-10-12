@@ -182,13 +182,22 @@ def rebase_photo_paths():
     import sqlite3
     if not Path(DB_PATH).exists():
         return {"updated": 0, "missing": []}
+    try:
+        import data_crypto
+    except Exception:                                    # pragma: no cover - 极端降级
+        data_crypto = None
     updated, missing = 0, []
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     try:
         rows = conn.execute("SELECT candidate_id, reference_photo FROM candidates").fetchall()
         for r in rows:
-            old = (r["reference_photo"] or "").strip()
+            raw = (r["reference_photo"] or "").strip()
+            if not raw:
+                continue
+            # 参考照路径可能是加密存储：先解密再解析，回写时重新加密
+            old = data_crypto.decrypt_field(raw) if data_crypto else raw
+            old = (old or "").strip()
             if not old:
                 continue
             new = resolve_photo(old)
@@ -196,8 +205,9 @@ def rebase_photo_paths():
                 missing.append("%s：%s" % (r["candidate_id"], old))
                 continue
             if str(new) != old:
+                stored = data_crypto.encrypt_field(str(new)) if data_crypto else str(new)
                 conn.execute("UPDATE candidates SET reference_photo=? WHERE candidate_id=?",
-                             (str(new), r["candidate_id"]))
+                             (stored, r["candidate_id"]))
                 updated += 1
         conn.commit()
     except sqlite3.Error as e:

@@ -13,6 +13,7 @@ import sqlite3
 import threading
 
 import config
+import data_crypto
 import models
 
 
@@ -27,6 +28,57 @@ class Store(object):
         c.row_factory = sqlite3.Row
         c.execute("PRAGMA journal_mode=WAL")
         return c
+
+    # ---------------- 字段级加密辅助（考生敏感数据） ----------------
+    @staticmethod
+    def _enc_alert(alert):
+        """保存前加密考生敏感字段；返回一个新的 Alert 副本，不修改原对象。"""
+        if alert is None:
+            return None
+        import copy
+        a = copy.copy(alert)
+        a.candidate_id = data_crypto.encrypt_field(alert.candidate_id)
+        a.candidate_name = data_crypto.encrypt_field(alert.candidate_name)
+        a.seat_no = data_crypto.encrypt_field(alert.seat_no)
+        a.detail = data_crypto.encrypt_field(alert.detail)
+        return a
+
+    @staticmethod
+    def _dec_alert(alert):
+        """读取后解密考生敏感字段。"""
+        if alert is None:
+            return None
+        alert.candidate_id = data_crypto.decrypt_field(alert.candidate_id)
+        alert.candidate_name = data_crypto.decrypt_field(alert.candidate_name)
+        alert.seat_no = data_crypto.decrypt_field(alert.seat_no)
+        alert.detail = data_crypto.decrypt_field(alert.detail)
+        return alert
+
+    @staticmethod
+    def _enc_review(rec):
+        """保存前加密复核敏感字段；返回副本，不修改原对象。"""
+        if rec is None:
+            return None
+        import copy
+        r = copy.copy(rec)
+        r.reason = data_crypto.encrypt_field(rec.reason)
+        if rec.attachments:
+            r.attachments = data_crypto.encrypt_field(
+                json.dumps(rec.attachments, ensure_ascii=False))
+        return r
+
+    @staticmethod
+    def _dec_review_row(row):
+        """先把原始行里的敏感字段解密，再交给 ReviewRecord.from_row 反序列化。"""
+        if row is None:
+            return None
+        d = dict(row)
+        d["reason"] = data_crypto.decrypt_field(d.get("reason") or "")
+        att = data_crypto.decrypt_field(d.get("attachments") or "")
+        if isinstance(att, str) and att and not att.lstrip().startswith("["):
+            att = "[]"
+        d["attachments"] = att or "[]"
+        return models.ReviewRecord.from_row(d)
 
     def _init(self):
         with self._lock, self._conn() as c:
@@ -66,7 +118,8 @@ class Store(object):
 
     # ---------------- 告警 ----------------
     def save_alert(self, alert):
-        row = alert.to_row()
+        enc = self._enc_alert(alert)
+        row = enc.to_row()
         cols = ",".join(row.keys())
         ph = ",".join("?" * len(row))
         with self._lock, self._conn() as c:
@@ -76,7 +129,7 @@ class Store(object):
     def get_alert(self, alert_id):
         with self._lock, self._conn() as c:
             r = c.execute("SELECT * FROM alerts WHERE alert_id=?", (alert_id,)).fetchone()
-        return models.Alert.from_row(r) if r else None
+        return self._dec_alert(models.Alert.from_row(r)) if r else None
 
     def list_alerts(self, room_id=None, level=None, status=None, limit=500):
         sql = "SELECT * FROM alerts WHERE 1=1"
@@ -94,13 +147,13 @@ class Store(object):
         args.append(int(limit))
         with self._lock, self._conn() as c:
             rows = c.execute(sql, args).fetchall()
-        return [models.Alert.from_row(r) for r in rows]
+        return [self._dec_alert(models.Alert.from_row(r)) for r in rows]
 
     def pending_unsynced(self, limit=50):
         with self._lock, self._conn() as c:
             rows = c.execute("SELECT * FROM alerts WHERE synced=0 "
                              "ORDER BY created_epoch ASC LIMIT ?", (int(limit),)).fetchall()
-        return [models.Alert.from_row(r) for r in rows]
+        return [self._dec_alert(models.Alert.from_row(r)) for r in rows]
 
     def mark_synced(self, alert_id):
         with self._lock, self._conn() as c:
@@ -108,7 +161,8 @@ class Store(object):
 
     # ---------------- 复核 ----------------
     def save_review(self, rec):
-        row = rec.to_row()
+        enc = self._enc_review(rec)
+        row = enc.to_row()
         cols = ",".join(row.keys())
         ph = ",".join("?" * len(row))
         with self._lock, self._conn() as c:
@@ -119,15 +173,14 @@ class Store(object):
         with self._lock, self._conn() as c:
             rows = c.execute("SELECT * FROM reviews ORDER BY created_at DESC LIMIT ?",
                              (int(limit),)).fetchall()
-        return [dict(r) for r in rows]
+        return [self._dec_review_row(r) for r in rows]
 
     def get_review(self, review_id):
         with self._lock, self._conn() as c:
             r = c.execute("SELECT * FROM reviews WHERE review_id=?", (review_id,)).fetchone()
         if r is None:
             return None
-        import models
-        return models.ReviewRecord.from_row(dict(r))
+        return self._dec_review_row(r)
 
     def false_positive_stats(self):
         """误报闭环统计：按告警码汇总，供算法迭代使用"""

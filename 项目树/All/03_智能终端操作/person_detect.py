@@ -1,22 +1,32 @@
 # -*- coding: utf-8 -*-
 """
-考场监控 · 逐人行为识别（演示级）
+考场监控 · 逐人行为识别（密集教室版）
 
-在 HOG+SVM 行人检测之上加了一层"逐人跟踪 + 行为分析"：
-  · 每个人分配稳定编号 #1 #2 …（质心最近邻跟踪，丢帧容忍）
-  · 每人每帧推断当前动作：坐下 / 起立 / 大幅度偏转 / 前倾趴桌 / 东张西望 / 长时间低头 …
-  · 每人单独累计"触碰红线次数"（跨越警戒线一次算一次）
-  · 框比原 HOG 输出收紧（只留 5% 边距），人多时不糊成一团
+针对 40 人同框大教室优化：
+  · MobileNet-SSD DNN 行人检测优先（若存在模型文件）
+  · HOG 密集模式 + 软 NMS + 自适应阈值
+  · 背景差分 / Haar 人头/人脸辅助检测
+  · 匈牙利匹配（scipy 可用时）/ 最近邻回退
+  · detect_stride 跳帧检测 + 匀速预测
+  · max_input_dim 长边缩放检测
+  · 密度感知、小人框、小标签
 
 行为 -> 03 告警码映射见 gui.py / terminal_gui.py。
 生产环境建议换成 YOLO-pose / 边缘 AI 节点返回的骨骼点，本文件是原型。
 """
 import os
+import math
 from collections import deque
 
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+
+try:
+    from scipy.optimize import linear_sum_assignment
+    _HAS_SCIPY = True
+except Exception:  # pragma: no cover - scipy 为可选依赖
+    _HAS_SCIPY = False
 
 # 行为常量（与 02 gui / 03 terminal 的映射保持一致）
 ACT_NORMAL = "正常姿态"
@@ -37,8 +47,15 @@ ACT_HEADTURN = "转脸偏头"    # 人脸明显偏向人框一侧
 ABNORMAL_ACTIONS = (ACT_CROSS, ACT_STAND, ACT_TURN, ACT_LEAN, ACT_LOOK, ACT_DOWN,
                     ACT_GAZE, ACT_SLEEPY, ACT_HEADTURN)
 
+# MobileNet-SSD 中 "person" 的类别编号
+_MOBILENET_PERSON_CLASS = 15
 
-def _load_font(size=16):
+# 模块级提示标志，避免每个实例都重复打印
+_DNN_WARNED = False
+_MOG_WARNED = False
+
+
+def _load_font(size=13):
     """加载支持中文的字体，找不到则回退到默认字体"""
     candidates = [
         os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "msyh.ttc"),
@@ -59,11 +76,57 @@ def _centroid(rect):
     return x + w // 2, y + h // 2
 
 
+def _iou(a, b):
+    """两个矩形之间的 IoU"""
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    xi1 = max(ax, bx)
+    yi1 = max(ay, by)
+    xi2 = min(ax + aw, bx + bw)
+    yi2 = min(ay + ah, by + bh)
+    inter = max(0, xi2 - xi1) * max(0, yi2 - yi1)
+    union = aw * ah + bw * bh - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _soft_nms(rects, scores=None, iou_thresh=0.5, sigma=0.5, score_thresh=0.001):
+    """基于高斯惩罚的贪婪软 NMS，返回保留下来的矩形"""
+    if not rects:
+        return []
+    N = len(rects)
+    rects_arr = np.array(rects, dtype=float)
+    scores_arr = np.array(scores if scores is not None else [1.0] * N, dtype=float)
+    indices = np.argsort(scores_arr)[::-1]
+    keep = []
+    while len(indices) > 0:
+        current = indices[0]
+        keep.append(current)
+        current_box = rects_arr[current]
+        rest = indices[1:]
+        if len(rest) == 0:
+            break
+        ious = np.array([_iou(tuple(current_box), tuple(rects_arr[i])) for i in rest])
+        scores_arr[rest] *= np.exp(-(ious * ious) / sigma)
+        indices = rest[scores_arr[rest] > score_thresh]
+    return [tuple(int(v) for v in rects_arr[i]) for i in keep]
+
+
+def _density_level(n_persons, frame_area):
+    """根据每 10 万像素的人数估算密度等级（40 人 1080P 教室视为 high）"""
+    density = n_persons * 100000.0 / max(1, frame_area)
+    if density < 0.5:
+        return "low"
+    elif density < 1.5:
+        return "medium"
+    return "high"
+
+
 class _Track(object):
     """一个人的跟踪状态"""
     __slots__ = ("pid", "rect", "missed", "centroids", "heights",
                  "prev_side", "crosses", "cross_epochs",
-                 "face_cache", "face_age")
+                 "face_cache", "face_age",
+                 "vx", "vy", "last_seen_frame")
 
     def __init__(self, pid, rect, line_y):
         self.pid = pid
@@ -76,17 +139,35 @@ class _Track(object):
         self.cross_epochs = deque(maxlen=10)
         self.face_cache = None              # 最近一次人脸/人眼分析结果
         self.face_age = 99                  # 距上次人脸分析的帧数
+        self.vx = 0.0                       # 水平速度（像素/帧）
+        self.vy = 0.0                       # 垂直速度（像素/帧）
+        self.last_seen_frame = 0            # 上次被检测命中的帧号
 
     @staticmethod
     def _side(rect, line_y):
         """框底中心在警戒线上方(-1)还是下方(+1)"""
         return 1 if rect[1] + rect[3] > line_y else -1
 
+    def predict(self):
+        """按当前速度预测下一帧位置"""
+        x, y, w, h = self.rect
+        return (int(round(x + self.vx)), int(round(y + self.vy)), w, h)
+
+    def update_motion(self, new_rect):
+        """更新位置并平滑估计速度"""
+        cx1, cy1 = _centroid(self.rect)
+        cx2, cy2 = _centroid(new_rect)
+        self.vx = self.vx * 0.7 + (cx2 - cx1) * 0.3
+        self.vy = self.vy * 0.7 + (cy2 - cy1) * 0.3
+        self.rect = new_rect
+
 
 class PersonTracker(object):
-    """HOG 检测 + 质心最近邻逐人跟踪 + Haar 人脸/人眼微表情分析"""
+    """多源检测 + 匈牙利/最近邻跟踪 + 密度感知 + 人脸微表情分析"""
 
-    def __init__(self, margin_ratio=0.05, max_dist=90, max_missed=12):
+    def __init__(self, margin_ratio=0.02, max_dist=90, max_missed=12,
+                 max_input_dim=640, detect_stride=1, dense_mode=True,
+                 enable_face_dense=False, dnn_threshold=0.5):
         if not hasattr(cv2, "HOGDescriptor"):
             raise RuntimeError(
                 "当前 OpenCV 未包含 HOGDescriptor，无法运行 AI 框选识别。\n"
@@ -95,105 +176,388 @@ class PersonTracker(object):
             raise RuntimeError("当前 OpenCV 缺少 HOG 默认行人检测器。")
         self.hog = cv2.HOGDescriptor()
         self.hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-        self.margin_ratio = margin_ratio    # 收紧框：只留 5% 边距
-        self.max_dist = max_dist            # 质心匹配最大距离（像素）
-        self.max_missed = max_missed        # 连续丢失多少帧后删除轨迹
-        self._tracks = {}                   # pid -> _Track
+
+        self.margin_ratio = margin_ratio          # 收紧框：默认 2% 边距
+        self.max_dist = max_dist                  # 匹配最大距离（像素）
+        self.max_missed = max_missed              # 连续丢失多少帧后删除轨迹
+        self.max_input_dim = max_input_dim        # 检测用长边上限
+        self.detect_stride = max(1, int(detect_stride))  # 每 N 帧做一次完整检测
+        self.dense_mode = dense_mode              # 是否启用 HOG 密集参数
+        self.enable_face_dense = enable_face_dense  # 密集场景仍强制做人脸分析
+        self.dnn_threshold = dnn_threshold        # DNN 置信度阈值
+
+        self._tracks = {}                         # pid -> _Track
         self._next_pid = 1
         self._frame_no = 0
-        # Haar 人脸/人眼级联（OpenCV 自带，无需下载模型）
+        self._density_level = "low"
+        self._model_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Haar 级联（OpenCV 自带）
         self._face_cascade = None
         self._eye_cascade = None
+        self._head_cascade = None
+        self._init_cascades()
+
+        # DNN MobileNet-SSD
+        self._net = None
+        self._init_dnn()
+
+        # 背景差分
+        self._bg_subtractor = None
+        self._init_bg_subtractor()
+
+    # ---------------- 初始化 ----------------
+    def _init_cascades(self):
         try:
             base = cv2.data.haarcascades
             self._face_cascade = cv2.CascadeClassifier(
                 base + "haarcascade_frontalface_default.xml")
             self._eye_cascade = cv2.CascadeClassifier(
                 base + "haarcascade_eye.xml")
+            # 用 frontalface 在上半画面辅助找头部/人脸，并推断人身框
+            self._head_cascade = cv2.CascadeClassifier(
+                base + "haarcascade_frontalface_default.xml")
         except Exception:
             self._face_cascade = None
             self._eye_cascade = None
+            self._head_cascade = None
+
+    def _init_dnn(self):
+        global _DNN_WARNED
+        prototxt = os.path.join(self._model_dir, "MobileNetSSD_deploy.prototxt")
+        caffemodel = os.path.join(self._model_dir, "MobileNetSSD_deploy.caffemodel")
+        if os.path.exists(prototxt) and os.path.exists(caffemodel):
+            try:
+                self._net = cv2.dnn.readNetFromCaffe(prototxt, caffemodel)
+            except Exception as e:
+                print("[person_detect] DNN 初始化失败，回退 HOG：%s" % e)
+                self._net = None
+        else:
+            self._net = None
+            if not _DNN_WARNED:
+                print("[person_detect] 未找到 MobileNet-SSD 模型文件（"
+                      "MobileNetSSD_deploy.prototxt / .caffemodel），使用 HOG 模式。")
+                _DNN_WARNED = True
+
+    def _init_bg_subtractor(self):
+        global _MOG_WARNED
+        try:
+            self._bg_subtractor = cv2.createBackgroundSubtractorMOG2(
+                history=120, varThreshold=36, detectShadows=False)
+        except Exception:
+            self._bg_subtractor = None
+            if not _MOG_WARNED:
+                print("[person_detect] 背景差分器初始化失败，将仅依赖检测器。")
+                _MOG_WARNED = True
+
+    # ---------------- 辅助 ----------------
+    def _scale_frame(self, frame):
+        """若长边超过 max_input_dim 则等比缩小，返回（缩放图，缩放系数）"""
+        h, w = frame.shape[:2]
+        long_edge = max(h, w)
+        if long_edge <= self.max_input_dim:
+            return frame, 1.0
+        scale = self.max_input_dim / float(long_edge)
+        new_w = int(round(w * scale))
+        new_h = int(round(h * scale))
+        return cv2.resize(frame, (new_w, new_h)), scale
+
+    @staticmethod
+    def _rect_to_orig(rect, scale):
+        """把缩放图上的矩形映射回原图坐标"""
+        return tuple(int(round(v / scale)) for v in rect)
+
+    def _shrink_rect(self, rect, fw, fh):
+        """按 margin_ratio 收紧矩形，并保证最小 24×24"""
+        x, y, w, h = rect
+        mw = max(0, int(w * self.margin_ratio))
+        mh = max(0, int(h * self.margin_ratio))
+        x = max(0, x + mw)
+        y = max(0, y + mh)
+        w = max(24, min(fw - x, w - mw * 2))
+        h = max(24, min(fh - y, h - mh * 2))
+        if x + w > fw:
+            w = fw - x
+        if y + h > fh:
+            h = fh - y
+        return (x, y, w, h)
 
     # ---------------- 检测 ----------------
-    def _detect(self, frame):
-        """HOG 原始检测 -> 收紧后的框列表"""
-        small = cv2.resize(frame, None, fx=0.5, fy=0.5)
-        rects, _ = self.hog.detectMultiScale(small, winStride=(8, 8),
-                                             padding=(12, 12), scale=1.05)
-        fh, fw = frame.shape[:2]
+    def _detect_dnn(self, frame):
+        """MobileNet-SSD 行人检测"""
+        if self._net is None:
+            return []
+        h, w = frame.shape[:2]
+        blob = cv2.dnn.blobFromImage(frame, 0.007843, (300, 300), 127.5)
+        self._net.setInput(blob)
+        detections = self._net.forward()
+        rects, scores = [], []
+        for i in range(detections.shape[2]):
+            confidence = detections[0, 0, i, 2]
+            if confidence < self.dnn_threshold:
+                continue
+            class_id = int(detections[0, 0, i, 1])
+            if class_id != _MOBILENET_PERSON_CLASS:
+                continue
+            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+            x1, y1, x2, y2 = box.astype(int)
+            rw, rh = x2 - x1, y2 - y1
+            if rw < 8 or rh < 8:
+                continue
+            rects.append((x1, y1, rw, rh))
+            scores.append(float(confidence))
+        return _soft_nms(rects, scores, iou_thresh=0.35, sigma=0.5)
+
+    def _detect_hog(self, frame, dense):
+        """HOG 行人检测；dense=True 时使用更密的 winStride/scale"""
+        if dense:
+            win_stride = (4, 4)
+            padding = (16, 16)
+            scale = 1.03
+            score_thresh = 0.15
+        else:
+            win_stride = (8, 8)
+            padding = (12, 12)
+            scale = 1.05
+            score_thresh = 0.05
+        try:
+            found, weights = self.hog.detectMultiScale(
+                frame, winStride=win_stride, padding=padding, scale=scale)
+        except Exception:
+            return []
+        if len(found) == 0:
+            return []
+        weights = np.asarray(weights).ravel()
+        if weights.size == 0:
+            return []
+        w_min, w_max = weights.min(), weights.max()
+        rng = w_max - w_min
+        if rng > 0:
+            scores = (weights - w_min) / rng
+        else:
+            scores = np.ones_like(weights)
+        rects = [tuple(int(v) for v in r) for r, s in zip(found, scores) if s > score_thresh]
+        scores = [float(s) for s in scores if s > score_thresh]
+        return _soft_nms(rects, scores, iou_thresh=0.45, sigma=0.5)
+
+    def _detect_bg_rois(self, frame):
+        """背景差分补充候选框"""
+        if self._bg_subtractor is None:
+            return []
+        fg = self._bg_subtractor.apply(frame)
+        if self._frame_no < 10:
+            return []
+        _, fg = cv2.threshold(fg, 128, 255, cv2.THRESH_BINARY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        fg = cv2.morphologyEx(fg, cv2.MORPH_CLOSE, kernel)
+        fg = cv2.morphologyEx(fg, cv2.MORPH_OPEN, kernel)
+        cnts, _ = cv2.findContours(fg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        rois = []
+        h, w = frame.shape[:2]
+        for c in cnts:
+            bx, by, bw, bh = cv2.boundingRect(c)
+            area = bw * bh
+            if area < 400 or area > h * w * 0.25:
+                continue
+            ar = bw / float(bh) if bh > 0 else 0
+            if ar < 0.15 or ar > 1.3:
+                continue
+            rois.append((bx, by, bw, bh))
+        return rois
+
+    def _detect_heads(self, frame):
+        """在上半画面用 Haar frontalface 找头并推断人身框"""
+        if self._head_cascade is None:
+            return []
+        h, w = frame.shape[:2]
+        roi = frame[:int(h * 0.65), :]
+        if roi.size == 0:
+            return []
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        heads = self._head_cascade.detectMultiScale(
+            gray, scaleFactor=1.05, minNeighbors=2,
+            minSize=(16, 16), maxSize=(w // 4, h // 3))
         out = []
-        for (x, y, w, h) in rects:
-            x, y, w, h = x * 2, y * 2, w * 2, h * 2
-            mw = int(w * self.margin_ratio)
-            mh = int(h * self.margin_ratio)
-            x = max(0, x - mw)
-            y = max(0, y - mh)
-            w = min(fw - x, w + mw * 2)
-            h = min(fh - y, h + mh * 2)
-            out.append((x, y, w, h))
+        for hx, hy, hw, hh in heads:
+            body_w = int(hw * 2.2)
+            body_h = int(hh * 3.5)
+            bx = max(0, hx + hw // 2 - body_w // 2)
+            by = max(0, hy)
+            bw = min(w - bx, body_w)
+            bh = min(h - by, body_h)
+            if bw >= 24 and bh >= 24:
+                out.append((bx, by, bw, bh))
         return out
 
-    # ---------------- 跟踪 ----------------
-    def update(self, frame, boundary_ratio=0.5):
-        """每帧调用：检测 -> 匹配轨迹 -> 更新跨线计数，返回 tracks 列表"""
-        self._frame_no += 1
-        fh = frame.shape[0]
-        line_y = int(fh * boundary_ratio)
-        rects = self._detect(frame)
-        cents = [_centroid(r) for r in rects]
+    def _merge_sources(self, primary, aux_list, iou_thresh=0.35):
+        """把主检测框与辅助来源框合并，去除重复"""
+        merged = list(primary)
+        for src in aux_list:
+            for r in src:
+                if all(_iou(r, m) < iou_thresh for m in merged):
+                    merged.append(r)
+        return merged
 
-        used = set()
-        # 1) 已有轨迹逐个找最近检测框
-        for pid, tr in list(self._tracks.items()):
-            best, best_d = None, self.max_dist
-            tcx, tcy = _centroid(tr.rect)
-            for i, (cx, cy) in enumerate(cents):
-                if i in used:
+    def _detect(self, frame):
+        """综合检测：DNN -> HOG -> 背景/人头辅助，结果映射回原图并收紧"""
+        small, scale = self._scale_frame(frame)
+        orig_h, orig_w = frame.shape[:2]
+
+        # 密度感知：当前已经高密度时强制启用密集参数
+        dense = self.dense_mode or self._density_level in ("medium", "high")
+
+        rects = []
+        # 1) 优先 DNN
+        dnn_rects = self._detect_dnn(small)
+        rects.extend(dnn_rects)
+
+        # 2) HOG 回退 / 补充
+        if not dnn_rects or self._density_level == "high":
+            hog_rects = self._detect_hog(small, dense)
+            rects = self._merge_sources(rects, [hog_rects], iou_thresh=0.35)
+
+        # 3) 教室人数偏少或高密度时，用背景差分 + 人头检测辅助
+        if len(rects) < 8 or self._density_level == "high":
+            bg_rois = self._detect_bg_rois(small)
+            head_rects = self._detect_heads(small)
+            rects = self._merge_sources(rects, [bg_rois, head_rects], iou_thresh=0.30)
+
+        # 4) 映射回原图、收紧、最终 NMS
+        orig_rects = [self._rect_to_orig(r, scale) for r in rects]
+        shrunk = [self._shrink_rect(r, orig_w, orig_h) for r in orig_rects]
+        return _soft_nms(shrunk, iou_thresh=0.35, sigma=0.5)
+
+    # ---------------- 跟踪 ----------------
+    def _greedy_assignment(self, cost):
+        """scipy 不可用时使用的贪婪最近邻匹配"""
+        rows, cols = cost.shape
+        row_ind, col_ind = [], []
+        remaining_rows = list(range(rows))
+        remaining_cols = list(range(cols))
+        while remaining_rows and remaining_cols:
+            best = 1e9
+            bi, bj = -1, -1
+            for i in remaining_rows:
+                for j in remaining_cols:
+                    if cost[i, j] < best:
+                        best = cost[i, j]
+                        bi, bj = i, j
+            if best >= 1e6:
+                break
+            row_ind.append(bi)
+            col_ind.append(bj)
+            remaining_rows.remove(bi)
+            remaining_cols.remove(bj)
+        return np.array(row_ind, dtype=int), np.array(col_ind, dtype=int)
+
+    def _match_and_update(self, rects, line_y):
+        """用匈牙利或贪婪最近邻把检测框匹配到已有轨迹"""
+        cents = [_centroid(r) for r in rects]
+        tracks = list(self._tracks.items())
+        n_tr, n_dt = len(tracks), len(rects)
+
+        assigned_tr = set()
+        assigned_dt = set()
+
+        if n_tr > 0 and n_dt > 0:
+            cost = np.zeros((n_tr, n_dt), dtype=float)
+            for i, (_, tr) in enumerate(tracks):
+                tcx, tcy = _centroid(tr.rect)
+                for j, (cx, cy) in enumerate(cents):
+                    d = math.hypot(cx - tcx, cy - tcy)
+                    cost[i, j] = d if d <= self.max_dist else 1e6
+
+            if _HAS_SCIPY:
+                row_ind, col_ind = linear_sum_assignment(cost)
+            else:
+                row_ind, col_ind = self._greedy_assignment(cost)
+
+            for i, j in zip(row_ind, col_ind):
+                if cost[i, j] >= 1e6:
                     continue
-                d = ((cx - tcx) ** 2 + (cy - tcy) ** 2) ** 0.5
-                if d < best_d:
-                    best, best_d = i, d
-            if best is not None:
-                used.add(best)
-                tr.rect = rects[best]
+                pid, tr = tracks[i]
+                tr.update_motion(rects[j])
                 tr.missed = 0
-                cx, cy = cents[best]
+                tr.last_seen_frame = self._frame_no
+                cx, cy = cents[j]
                 tr.centroids.append((cx, cy))
                 tr.heights.append(tr.rect[3])
                 tr.face_age += 1
-                # 跨线计数：上->下 或 下->上 都算一次触碰
                 side = tr._side(tr.rect, line_y)
                 if side != tr.prev_side:
                     tr.crosses += 1
                     tr.cross_epochs.append(cv2.getTickCount())
                     tr.prev_side = side
-            else:
-                tr.missed += 1
-                tr.face_age += 1
-                if tr.missed > self.max_missed:
-                    del self._tracks[pid]
+                assigned_tr.add(i)
+                assigned_dt.add(j)
 
-        # 2) 未匹配的检测框开新轨迹
-        for i, rect in enumerate(rects):
-            if i in used:
+        # 未匹配到的轨迹标记丢失
+        for i, (pid, tr) in enumerate(tracks):
+            if i in assigned_tr:
+                continue
+            tr.missed += 1
+            tr.face_age += 1
+            if tr.missed > self.max_missed:
+                del self._tracks[pid]
+
+        # 未匹配到的检测框开新轨迹
+        for j, rect in enumerate(rects):
+            if j in assigned_dt:
                 continue
             tr = _Track(self._next_pid, rect, line_y)
+            tr.last_seen_frame = self._frame_no
             self._tracks[self._next_pid] = tr
             self._next_pid += 1
+
+    def _predict_tracks(self, line_y):
+        """非检测帧：用匀速预测更新已有轨迹"""
+        for pid, tr in list(self._tracks.items()):
+            tr.rect = tr.predict()
+            tr.missed += 1
+            tr.face_age += 1
+            cx, cy = _centroid(tr.rect)
+            tr.centroids.append((cx, cy))
+            tr.heights.append(tr.rect[3])
+            side = tr._side(tr.rect, line_y)
+            if side != tr.prev_side:
+                tr.crosses += 1
+                tr.cross_epochs.append(cv2.getTickCount())
+                tr.prev_side = side
+            if tr.missed > self.max_missed:
+                del self._tracks[pid]
+
+    def update(self, frame, boundary_ratio=0.5):
+        """每帧调用：检测 -> 匹配/预测 -> 更新跨线计数，返回 tracks 列表"""
+        self._frame_no += 1
+        fh = frame.shape[0]
+        line_y = int(fh * boundary_ratio)
+
+        run_detect = ((self._frame_no - 1) % self.detect_stride) == 0
+        if run_detect:
+            rects = self._detect(frame)
+            self._match_and_update(rects, line_y)
+        else:
+            self._predict_tracks(line_y)
+
+        fw = frame.shape[1]
+        self._density_level = _density_level(len(self._tracks), fh * fw)
         return self._tracks
 
     # ---------------- 人脸 / 眼神（微表情近似） ----------------
-    def _face_analyze(self, frame, track):
+    def _face_analyze(self, frame, track, total_persons):
         """
-        在人框上半部分做人脸+人眼检测（每 4 帧一次，轨迹级缓存）。
+        在人框上半部分做人脸+人眼检测（每 6 帧一次，轨迹级缓存）。
+        密集场景默认跳过，除非 enable_face_dense=True 或 total_persons <= 20。
         返回 {"face": (fx,fy,fw,fh)|None, "eyes": n, "face_dx": 偏头量}
         """
         if self._face_cascade is None or self._eye_cascade is None:
             return None
-        if track.face_cache is not None and track.face_age < 4:
+        if track.face_cache is not None and track.face_age < 6:
             return track.face_cache
+        if total_persons > 20 and not self.enable_face_dense:
+            return None
+
         x, y, w, h = track.rect
-        fh, fw = frame.shape[:2]
         head_h = max(24, int(h * 0.45))          # 头部区域：人框上 45%
         roi = frame[y:y + head_h, x:x + w]
         if roi.size == 0:
@@ -209,7 +573,7 @@ class PersonTracker(object):
             eyes = self._eye_cascade.detectMultiScale(fgray, 1.1, 3,
                                                       minSize=(10, 10))
             face_cx = fx + fw2 // 2
-            face_dx = (face_cx - w / 2.0) / max(1.0, float(w))   # 人脸偏离人框中心比例
+            face_dx = (face_cx - w / 2.0) / max(1.0, float(w))
             track.face_cache = {"face": (x + fx, y + fy, fw2, fh2),
                                 "eyes": int(len(eyes)),
                                 "face_dx": face_dx}
@@ -275,7 +639,7 @@ class PersonTracker(object):
 
         # 8) 人脸/眼神微表情（有级联时才跑，失败不影响其它判定）
         try:
-            fa = self._face_analyze(frame, track)
+            fa = self._face_analyze(frame, track, len(self._tracks))
         except Exception:
             fa = None
         if fa and fa.get("face") is not None:
@@ -312,11 +676,24 @@ class PersonTracker(object):
                 uniq.append(b)
         return action, bad, uniq
 
+    # ---------------- 生命周期 ----------------
+    def stop(self):
+        """清空所有轨迹，停止/重置跟踪器"""
+        self._tracks.clear()
+        self._next_pid = 1
+        self._frame_no = 0
+        self._density_level = "low"
+
+    def start(self):
+        """启动/复位跟踪器（与 stop 后状态一致即可继续运行）"""
+        self.stop()
+
     # ---------------- 绘制 ----------------
     def draw(self, frame, boundary_ratio=0.5):
         """
         返回 (标记后的帧, 越界人数, 逐人信息列表)
-        逐人信息: {"pid", "rect", "action", "bad", "crosses", "behaviors"}
+        逐人信息: {"pid", "rect", "action", "bad", "crosses",
+                   "behaviors", "density_level"}
         """
         fh, fw = frame.shape[:2]
         line_y = int(fh * boundary_ratio)
@@ -328,7 +705,8 @@ class PersonTracker(object):
                                                   boundary_ratio=boundary_ratio)
             persons.append({"pid": pid, "rect": tr.rect, "action": action,
                             "bad": bad, "crosses": tr.crosses,
-                            "behaviors": behaviors})
+                            "behaviors": behaviors,
+                            "density_level": self._density_level})
             # 三色：红=越界/贴边，橙=异常行为未越界，绿=正常
             if bad:
                 color = (0, 0, 255)
@@ -337,7 +715,7 @@ class PersonTracker(object):
             else:
                 color = (0, 200, 0)
             x, y, w, h = tr.rect
-            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 1)  # 细框=更小的视觉占用
+            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 1)
             # 人脸小框（微表情辅助，青色）
             fa = getattr(tr, "face_cache", None)
             if fa and fa.get("face") is not None:
@@ -351,7 +729,7 @@ class PersonTracker(object):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(rgb)
         draw = ImageDraw.Draw(pil)
-        font = _load_font(15)
+        font = _load_font(13)
         for p in persons:
             if p["bad"]:
                 color = (0, 0, 255)
@@ -364,9 +742,9 @@ class PersonTracker(object):
             if p["crosses"] >= 2:
                 label += " ×%d" % p["crosses"]
             fill = (color[2], color[1], color[0])
-            ty = y - 20 if y > 24 else y + h + 2
+            ty = y - 18 if y > 24 else y + h + 2
             draw.text((x, ty), label, font=font, fill=fill)
-        draw.text((10, line_y - 22), "警戒线", font=font, fill=(255, 165, 0))
+        draw.text((10, line_y - 20), "警戒线", font=font, fill=(255, 165, 0))
         frame = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
         violations = sum(1 for p in persons if p["bad"])
         return frame, violations, persons

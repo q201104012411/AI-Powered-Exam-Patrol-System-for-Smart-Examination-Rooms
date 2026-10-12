@@ -86,8 +86,9 @@ def has_hog(py):
 
 def install_common(py):
     """安装 02/03/01 都需要的通用包（opencv-python 固定 4.x，5.x 已移除 HOGDescriptor）"""
-    log("安装/升级通用依赖：opencv-python<5、numpy、Pillow")
-    run([py, "-m", "pip", "install", "--upgrade", "opencv-python<5", "numpy", "Pillow"])
+    log("安装/升级通用依赖：opencv-python<5、numpy、Pillow、cryptography")
+    run([py, "-m", "pip", "install", "--upgrade",
+         "opencv-python<5", "numpy", "Pillow", "cryptography"])
 
 
 def install_face(py):

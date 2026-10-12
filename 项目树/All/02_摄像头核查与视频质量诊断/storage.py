@@ -14,6 +14,7 @@ import sqlite3
 import threading
 
 import config
+import data_crypto
 import models
 
 
@@ -76,6 +77,9 @@ class Store(object):
     # ---------------- 设备台账 ----------------
     def save_device(self, dev):
         row = dev.to_row()
+        # 敏感字段加密存储（name/position 可能含考场具体位置信息）
+        row["name"] = data_crypto.encrypt_field(row.get("name") or "")
+        row["position"] = data_crypto.encrypt_field(row.get("position") or "")
         with self._lock, self._conn() as c:
             existing = c.execute("SELECT device_id FROM devices WHERE device_id=?",
                                  (dev.device_id,)).fetchone()
@@ -89,12 +93,20 @@ class Store(object):
                 c.execute("INSERT INTO devices (%s) VALUES (%s)" % (cols, ph),
                           list(row.values()))
 
+    def _dec_device(self, r):
+        if r is None:
+            return None
+        d = dict(r)
+        d["name"] = data_crypto.decrypt_field(d.get("name") or "")
+        d["position"] = data_crypto.decrypt_field(d.get("position") or "")
+        return models.Device.from_row(d)
+
     def get_device(self, device_id=None, code=None):
         sql, arg = ("SELECT * FROM devices WHERE device_id=?", device_id) if device_id \
             else ("SELECT * FROM devices WHERE code=?", code)
         with self._lock, self._conn() as c:
             r = c.execute(sql, (arg,)).fetchone()
-        return models.Device.from_row(r) if r else None
+        return self._dec_device(r)
 
     def list_devices(self, room_id=None, site=None, session=None, enabled_only=True):
         sql = "SELECT * FROM devices WHERE 1=1"
@@ -113,7 +125,7 @@ class Store(object):
         sql += " ORDER BY room_id, code"
         with self._lock, self._conn() as c:
             rows = c.execute(sql, args).fetchall()
-        return [models.Device.from_row(r) for r in rows]
+        return [self._dec_device(r) for r in rows]
 
     def rooms(self):
         with self._lock, self._conn() as c:
@@ -213,17 +225,28 @@ class Store(object):
     # ---------------- 工单 ----------------
     def save_order(self, wo):
         row = wo.to_row()
+        # 敏感/自由文本字段加密
+        row["note"] = data_crypto.encrypt_field(row.get("note") or "")
+        row["review_note"] = data_crypto.encrypt_field(row.get("review_note") or "")
         cols = ",".join(row.keys())
         ph = ",".join("?" * len(row))
         with self._lock, self._conn() as c:
             c.execute("INSERT OR REPLACE INTO workorders (%s) VALUES (%s)" % (cols, ph),
                       list(row.values()))
 
+    def _dec_order(self, r):
+        if r is None:
+            return None
+        d = dict(r)
+        d["note"] = data_crypto.decrypt_field(d.get("note") or "")
+        d["review_note"] = data_crypto.decrypt_field(d.get("review_note") or "")
+        return models.WorkOrder.from_row(d)
+
     def get_order(self, order_id):
         with self._lock, self._conn() as c:
             r = c.execute("SELECT * FROM workorders WHERE order_id=?",
                           (order_id,)).fetchone()
-        return models.WorkOrder.from_row(r) if r else None
+        return self._dec_order(r)
 
     def list_orders(self, status=None, room_id=None, limit=500):
         sql = "SELECT * FROM workorders WHERE 1=1"
@@ -238,7 +261,7 @@ class Store(object):
         args.append(int(limit))
         with self._lock, self._conn() as c:
             rows = c.execute(sql, args).fetchall()
-        return [models.WorkOrder.from_row(r) for r in rows]
+        return [self._dec_order(r) for r in rows]
 
     def open_order_for(self, device_id, codes):
         """同设备同缺陷是否已有未关闭工单（避免重复派单）"""

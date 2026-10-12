@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 import config
+import data_crypto
 import pii
 from models import Candidate
 
@@ -234,10 +235,10 @@ class CandidateStore:
             keys = r.keys()
             out[r["candidate_id"]] = Candidate(
                 candidate_id=r["candidate_id"],
-                name=r["name"] or "",
-                ticket_no=r["ticket_no"] or "",
-                seat_no=r["seat_no"] or "",
-                reference_photo=r["reference_photo"] or "",
+                name=data_crypto.decrypt_field(r["name"] or ""),
+                ticket_no=data_crypto.decrypt_field(r["ticket_no"] or ""),
+                seat_no=data_crypto.decrypt_field(r["seat_no"] or ""),
+                reference_photo=data_crypto.decrypt_field(r["reference_photo"] or ""),
                 id_card_salt=r["id_card_salt"] or "",
                 id_card_hash=r["id_card_hash"] or "",
                 id_card_masked=r["id_card_masked"] or "",
@@ -304,6 +305,11 @@ class CandidateStore:
                     (old["consent_at"] if old else "") or (now if consent == "已同意" else ""))
                 retention = str(it.get("retention_until") or "").strip() or (
                     (old["retention_until"] if old else "") or self._default_retention(now))
+                # 敏感字段加密存储（兼容旧明文：encrypt_field 遇到已加密字符串会跳过）
+                enc_name = data_crypto.encrypt_field(str(it.get("name", "")).strip())
+                enc_ticket = data_crypto.encrypt_field(str(it.get("ticket_no", "")).strip())
+                enc_seat = data_crypto.encrypt_field(str(it.get("seat_no", "")).strip())
+                enc_photo = data_crypto.encrypt_field(str(it.get("reference_photo", "")).strip())
                 conn.execute("""
                     INSERT INTO candidates (candidate_id, name, id_card_salt, id_card_hash,
                         id_card_masked, ticket_no, seat_no, reference_photo,
@@ -324,11 +330,11 @@ class CandidateStore:
                         updated_by=excluded.updated_by
                 """, (
                     cid,
-                    str(it.get("name", "")).strip(),
+                    enc_name,
                     salt, h, masked,
-                    str(it.get("ticket_no", "")).strip(),
-                    str(it.get("seat_no", "")).strip(),
-                    str(it.get("reference_photo", "")).strip(),
+                    enc_ticket,
+                    enc_seat,
+                    enc_photo,
                     consent or "未登记",
                     consent_at,
                     retention,

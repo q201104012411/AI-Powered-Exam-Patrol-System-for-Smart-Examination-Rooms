@@ -15,7 +15,7 @@ if not defined PY (
 echo ============================================
 echo  [1/3] 编译检查
 echo ============================================
-"%PY%" -m py_compile config.py models.py storage.py access.py alerts.py review.py offline.py fleet.py clock.py bridge.py _face_bridge.py terminal_gui.py main.py
+"%PY%" -m py_compile config.py models.py storage.py data_crypto.py access.py alerts.py review.py offline.py fleet.py clock.py bridge.py _face_bridge.py person_detect.py terminal_gui.py main.py
 if errorlevel 1 (
     echo 编译未通过
     pause
@@ -25,7 +25,7 @@ echo 编译通过
 
 echo.
 echo ============================================
-echo  [2/3] 单元测试（76 项，临时数据目录）
+echo  [2/3] 单元测试（124 项，临时数据目录）
 echo ============================================
 "%PY%" -m unittest discover -s tests -t .
 if errorlevel 1 (

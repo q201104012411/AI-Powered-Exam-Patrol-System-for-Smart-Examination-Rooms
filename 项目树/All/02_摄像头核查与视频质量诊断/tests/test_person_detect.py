@@ -1,0 +1,207 @@
+# -*- coding: utf-8 -*-
+"""
+person_detect 密集教室优化版单元测试
+
+运行方式（在项目 02 根目录执行）：
+    python -m unittest discover -s tests -t .
+"""
+import unittest
+
+import cv2
+import numpy as np
+
+import person_detect as pd
+
+
+class TestPersonTracker(unittest.TestCase):
+
+    @staticmethod
+    def _make_blank(w=1280, h=720):
+        return np.full((h, w, 3), 128, dtype=np.uint8)
+
+    @staticmethod
+    def _draw_person(img, cx, cy, body_w=24, body_h=48, head=16):
+        """在 (cx,cy) 处画一个简化小人（头 + 身体），返回外接框"""
+        x = cx - body_w // 2
+        by = cy - body_h // 2 + head // 2
+        y = by - head
+        color = np.random.randint(40, 220, size=3, dtype=np.uint8).tolist()
+        # 身体
+        cv2.rectangle(img, (x, by), (x + body_w, by + body_h), color, -1)
+        # 头
+        hx = cx - head // 2
+        cv2.ellipse(img, (cx, y + head // 2), (head // 2, head // 2),
+                    0, 0, 360, color, -1)
+        return (x, y, body_w, body_h + head)
+
+    @staticmethod
+    def _draw_realistic_person(img, cx, cy, height=200):
+        """
+        画一个高对比度站立人形（椭圆身体 + 圆头），HOG 默认行人检测器可识别。
+        纯色小人召回率低，这里使用更接近真实行人轮廓的纵向椭圆，并在内部加
+        少量灰度渐变以提供梯度信息，返回外接框。
+        """
+        color = (0, 0, 0)
+        head_r = max(8, int(height * 0.12))
+        head_cy = cy - int(height * 0.32)
+        body_h = max(30, int(height * 0.78))
+        body_w = max(16, int(height * 0.28))
+        body_cy = cy + int(height * 0.05)
+
+        # 身体：纵向椭圆，提供与真实行人相似的宽高比（约 0.28）。
+        # 黑色填充与浅灰背景形成强边缘，椭圆反锯齿边缘本身即提供灰度渐变。
+        cv2.ellipse(img, (cx, body_cy), (body_w // 2, body_h // 2),
+                    0, 0, 360, color, -1)
+        # 头
+        cv2.circle(img, (cx, head_cy), head_r, color, -1)
+
+        x1 = cx - body_w // 2
+        y1 = head_cy - head_r
+        x2 = cx + body_w // 2
+        y2 = body_cy + body_h // 2
+        return (x1, y1, x2 - x1, y2 - y1)
+
+    def _make_person_scene(self, n=40, w=1920, h=1080, height=130, jitter=15):
+        """生成包含 n 个站立人形剪影的教室场景"""
+        img = np.full((h, w, 3), 235, dtype=np.uint8)  # 浅灰背景
+        cols = int(np.ceil(np.sqrt(n * w / h)))
+        rows = int(np.ceil(n / cols))
+        step_x = w // cols
+        step_y = h // rows
+        for idx in range(n):
+            r, c = divmod(idx, cols)
+            cx = step_x // 2 + c * step_x + np.random.randint(-jitter, jitter + 1)
+            cy = step_y // 2 + r * step_y + np.random.randint(-jitter, jitter + 1)
+            self._draw_realistic_person(img, cx, cy, height=height)
+        return img
+
+    def test_single_realistic_person_detected(self):
+        """单个较真实人形剪影应能被检测到"""
+        tracker = pd.PersonTracker(dense_mode=True, max_input_dim=1920)
+        img = np.full((720, 1280, 3), 235, dtype=np.uint8)
+        self._draw_realistic_person(img, 640, 360, height=220)
+        rects = tracker._detect(img)
+        self.assertGreater(len(rects), 0, "HOG 应能检出单个站立人形剪影")
+
+    def test_synthetic_40_persons_detected_without_exception(self):
+        """40 个合成小人：不抛异常、检测到若干人、密度等级为 high"""
+        tracker = pd.PersonTracker(dense_mode=True, detect_stride=1,
+                                   max_input_dim=1920)
+        img = self._make_person_scene(n=40)
+        _, violations, persons = tracker.draw(img, boundary_ratio=0.5)
+        self.assertIsInstance(violations, int)
+        # 合成样本不一定能让 HOG 召回全部 40 人，但应能召回一部分；
+        # 同时背景差分/人头辅助不应导致异常，density_level 应反映高密度。
+        self.assertGreaterEqual(len(persons), 1,
+                                "应至少检测到 1 个人（HOG/辅助检测至少触发）")
+        self.assertLessEqual(len(persons), 80,
+                             "不应产生离谱的重复检测")
+        for p in persons:
+            self.assertIn("density_level", p)
+            self.assertEqual(p["density_level"], "high")
+
+    def test_margin_tighter_than_old_default(self):
+        """收紧后的框应比原始 HOG 框小；5% 收紧程度应比 2% 更大（直接测试 _shrink_rect）"""
+        tracker = pd.PersonTracker(max_input_dim=1920)
+        raw_rect = (100, 100, 300, 500)
+        fw, fh = 1280, 720
+        raw_area = raw_rect[2] * raw_rect[3]
+        shrink_02 = tracker._shrink_rect(raw_rect, fw, fh)
+        tracker.margin_ratio = 0.05
+        shrink_05 = tracker._shrink_rect(raw_rect, fw, fh)
+        self.assertGreater(shrink_02[2] * shrink_02[3], 0)
+        self.assertGreater(shrink_05[2] * shrink_05[3], 0)
+        self.assertLess(shrink_02[2] * shrink_02[3], raw_area,
+                        "收紧后框应小于原始 HOG 框")
+        self.assertLess(shrink_05[2] * shrink_05[3], shrink_02[2] * shrink_02[3],
+                        "5% 边距应比 2% 边距收缩得更多")
+
+    def test_min_box_size_enforced(self):
+        """收紧后框不应低于 24×24"""
+        tracker = pd.PersonTracker(margin_ratio=0.02, max_input_dim=1920)
+        img = np.full((720, 1280, 3), 235, dtype=np.uint8)
+        self._draw_realistic_person(img, 100, 150, height=80)
+        rects = tracker._detect(img)
+        for r in rects:
+            self.assertGreaterEqual(r[2], 24)
+            self.assertGreaterEqual(r[3], 24)
+
+    def test_draw_returns_density_level(self):
+        """draw 返回的每个人必须包含 density_level 字段"""
+        tracker = pd.PersonTracker(max_input_dim=1920)
+        img = np.full((720, 1280, 3), 235, dtype=np.uint8)
+        self._draw_realistic_person(img, 640, 360, height=220)
+        _, _, persons = tracker.draw(img)
+        self.assertIsInstance(persons, list)
+        for p in persons:
+            self.assertIn("density_level", p)
+            self.assertIn(p["density_level"], ("low", "medium", "high"))
+
+    def test_high_density_no_exception(self):
+        """高密度场景连续多帧不会抛异常"""
+        tracker = pd.PersonTracker(dense_mode=True, detect_stride=2,
+                                   max_input_dim=1920)
+        for _ in range(5):
+            img = self._make_person_scene(n=40)
+            _, violations, persons = tracker.draw(img)
+            self.assertIsInstance(persons, list)
+
+    def test_stop_start_resets_tracker(self):
+        """stop / start 后跟踪器应清空并复位"""
+        tracker = pd.PersonTracker(max_input_dim=1920)
+        img = np.full((720, 1280, 3), 235, dtype=np.uint8)
+        self._draw_realistic_person(img, 640, 360, height=220)
+        tracker.draw(img)
+        self.assertGreater(len(tracker._tracks), 0)
+
+        tracker.stop()
+        self.assertEqual(len(tracker._tracks), 0)
+        self.assertEqual(tracker._next_pid, 1)
+
+        tracker.start()
+        self.assertEqual(len(tracker._tracks), 0)
+        self.assertEqual(tracker._next_pid, 1)
+
+    def test_detect_stride_prediction_frame(self):
+        """detect_stride > 1 时，非检测帧应通过预测维持轨迹"""
+        tracker = pd.PersonTracker(detect_stride=2, max_missed=5,
+                                   max_input_dim=1920)
+        img = np.full((720, 1280, 3), 235, dtype=np.uint8)
+        self._draw_realistic_person(img, 640, 360, height=220)
+        tracker.draw(img)
+        self.assertGreater(len(tracker._tracks), 0)
+        # 第二帧不检测，只预测；不应丢轨迹
+        tracker.draw(img)
+        self.assertGreater(len(tracker._tracks), 0)
+
+    def test_auxiliary_detectors_do_not_crash(self):
+        """背景差分、人头检测辅助分支至少不会崩溃，并返回 list"""
+        tracker = pd.PersonTracker(max_input_dim=1920)
+        img = self._make_person_scene(n=40)
+        # 背景差分需要若干帧历史，连续调用不应抛异常
+        for _ in range(3):
+            rois = tracker._detect_bg_rois(img)
+            self.assertIsInstance(rois, list)
+        heads = tracker._detect_heads(img)
+        self.assertIsInstance(heads, list)
+
+
+class TestHelpers(unittest.TestCase):
+
+    def test_iou(self):
+        self.assertAlmostEqual(pd._iou((0, 0, 10, 10), (5, 0, 10, 10)), 1 / 3, places=4)
+        self.assertEqual(pd._iou((0, 0, 10, 10), (20, 20, 10, 10)), 0.0)
+
+    def test_soft_nms(self):
+        rects = [(0, 0, 50, 50), (2, 2, 48, 48), (100, 100, 30, 30)]
+        scores = [0.9, 0.8, 0.7]
+        kept = pd._soft_nms(rects, scores, iou_thresh=0.5)
+        self.assertGreaterEqual(len(kept), 2)
+
+    def test_density_level(self):
+        self.assertEqual(pd._density_level(1, 1920 * 1080), "low")
+        self.assertEqual(pd._density_level(40, 1280 * 720), "high")
+
+
+if __name__ == "__main__":
+    unittest.main()

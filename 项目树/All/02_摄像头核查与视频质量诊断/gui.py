@@ -16,6 +16,7 @@
 
 运行：python gui.py      （隐藏命令行窗口见「切换命令行窗口.bat」）
 """
+import inspect
 import json
 import os
 import re
@@ -23,6 +24,12 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
+
+try:
+    import winsound
+    HAS_WINSOUND = True
+except Exception:
+    HAS_WINSOUND = False
 
 try:
     import cv2
@@ -69,6 +76,22 @@ CAM_COLORS = {
 CAM_AI_COLOR = "#c07000"     # AI 识别到越界时的橙色
 # 面板 AI 行文本：AI 识别中：N 人[，越界 M]（全局汇总从这里反解）
 CAM_AI_RE = re.compile(r"(\d+) 人(?:，越界 (\d+))?")
+
+# 密度等级：按每百万像素人数划分（与 AI 子Agent 新增 dense_mode 对应）
+DENSITY_LOW = "low"
+DENSITY_MED = "medium"
+DENSITY_HIGH = "high"
+DENSITY_TEXT = {DENSITY_LOW: "低", DENSITY_MED: "中", DENSITY_HIGH: "高"}
+DENSITY_COLOR = {DENSITY_LOW: "#0a7d28", DENSITY_MED: "#1f56b8", DENSITY_HIGH: "#e67e00"}
+
+# AI 设置默认配置
+AI_SETTINGS_PATH = config.DATA_ROOT / "ai_settings.json"
+AI_SETTINGS_DEFAULT = {
+    "mode": "standard",          # standard / dense / energy
+    "box_margin_pct": 2,         # 1 / 2 / 5 / 10
+    "haar_face": True,
+    "sound_beep": True,
+}
 
 # pythonw 隐藏窗口启动时 stdout/stderr 为 None，兜住避免任何 print 崩掉界面
 config.ensure_stdio("gui_console.log")
@@ -828,6 +851,235 @@ class App(object):
             return
         messagebox.showinfo("已设置", "%s\n标记文件：%s" % (msg, HIDE_CMD_FLAG))
 
+    # ---------------- AI 设置（全局） ----------------
+    def _load_ai_settings(self):
+        """从 data/ai_settings.json 读取 AI 设置，缺失字段用默认值补齐"""
+        try:
+            if AI_SETTINGS_PATH.exists():
+                data = json.loads(AI_SETTINGS_PATH.read_text(encoding="utf-8"))
+            else:
+                data = {}
+        except Exception:
+            data = {}
+        settings = dict(AI_SETTINGS_DEFAULT)
+        settings.update(data)
+        return settings
+
+    def _save_ai_settings(self, settings):
+        """保存 AI 设置到 data/ai_settings.json"""
+        try:
+            AI_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+            AI_SETTINGS_PATH.write_text(
+                json.dumps(settings, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+            return True
+        except Exception as e:
+            messagebox.showerror("保存失败", str(e))
+            return False
+
+    def _ai_margin_ratio(self):
+        """当前框边距百分比 -> 小数"""
+        return self._ai_settings.get("box_margin_pct", 2) / 100.0
+
+    def _ai_tracker_kwargs(self):
+        """构造 PersonTracker 初始化参数，兼容当前与 AI 优化子Agent 新增参数"""
+        sig = inspect.signature(pd_mod.PersonTracker.__init__)
+        params = sig.parameters
+        kw = {"margin_ratio": self._ai_margin_ratio()}
+        settings = self._ai_settings
+        # AI 子Agent 预期新增参数（按实际 person_detect.py 命名）
+        for key, val in (("dense_mode", settings.get("mode") == "dense"),
+                         ("max_input_dim", 1280 if settings.get("mode") == "energy" else 1920),
+                         ("detect_stride", 2 if settings.get("mode") == "energy" else 1),
+                         ("enable_face_dense", settings.get("haar_face", True))):
+            if key in params:
+                kw[key] = val
+        return kw
+
+    def _open_ai_settings(self):
+        """全局 AI 设置弹窗"""
+        win = tk.Toplevel(self.root)
+        win.title("AI 设置")
+        win.geometry("420x320")
+        win.transient(self.root)
+        win.grab_set()
+        f = ttk.Frame(win, padding=16)
+        f.pack(fill="both", expand=True)
+
+        settings = self._load_ai_settings()
+
+        ttk.Label(f, text="检测模式：").grid(row=0, column=0, sticky="e", pady=6)
+        mode_var = tk.StringVar(value=settings.get("mode", "standard"))
+        ttk.Combobox(f, textvariable=mode_var, state="readonly", width=18,
+                     values=["standard", "dense", "energy"]).grid(row=0, column=1, sticky="w")
+        ttk.Label(f, text="标准：常规考场；密集：40人考场；节能：隔帧检测", foreground="#888",
+                  font=FONT_SMALL).grid(row=0, column=2, sticky="w", padx=(8, 0))
+
+        ttk.Label(f, text="框边距：").grid(row=1, column=0, sticky="e", pady=6)
+        margin_var = tk.IntVar(value=settings.get("box_margin_pct", 2))
+        margin_bar = ttk.Frame(f)
+        margin_bar.grid(row=1, column=1, sticky="w")
+        for pct in (1, 2, 5, 10):
+            ttk.Radiobutton(margin_bar, text="%d%%" % pct, variable=margin_var,
+                            value=pct).pack(side="left", padx=(0, 8))
+
+        ttk.Label(f, text="Haar 人脸微表情：").grid(row=2, column=0, sticky="e", pady=6)
+        haar_var = tk.BooleanVar(value=settings.get("haar_face", True))
+        ttk.Checkbutton(f, text="启用", variable=haar_var).grid(row=2, column=1, sticky="w")
+
+        ttk.Label(f, text="异常声音提示：").grid(row=3, column=0, sticky="e", pady=6)
+        sound_var = tk.BooleanVar(value=settings.get("sound_beep", True))
+        ttk.Checkbutton(f, text="启用（异常行为时 beep）", variable=sound_var).grid(row=3, column=1, sticky="w")
+
+        msg = ttk.Label(f, text="", foreground="#c00")
+        msg.grid(row=4, column=0, columnspan=3, pady=(10, 0))
+
+        def apply():
+            new_settings = {
+                "mode": mode_var.get(),
+                "box_margin_pct": margin_var.get(),
+                "haar_face": haar_var.get(),
+                "sound_beep": sound_var.get(),
+            }
+            if self._save_ai_settings(new_settings):
+                self._ai_settings = new_settings
+                # 边距实时生效：重建检测器（下次 _cam_update 会按新设置创建）
+                self._person_detector = None
+                msg.config(text="已保存并生效", foreground="#0a7d28")
+                self.status.config(text="AI 设置已更新：模式=%s 边距=%d%%" % (
+                    new_settings["mode"], new_settings["box_margin_pct"]))
+                self._mon_log_line("AI 设置更新：%s" % new_settings)
+
+        bbar = ttk.Frame(f)
+        bbar.grid(row=5, column=0, columnspan=3, pady=(16, 0))
+        ttk.Button(bbar, text="保存", command=apply).pack(side="left", padx=6)
+        ttk.Button(bbar, text="关闭", command=win.destroy).pack(side="left", padx=6)
+
+    def _beep(self):
+        """异常时声音提示（优先 winsound，否则 tkinter bell）"""
+        if not self._ai_settings.get("sound_beep", True):
+            return
+        try:
+            if HAS_WINSOUND:
+                winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+            else:
+                self.root.bell()
+        except Exception:
+            try:
+                self.root.bell()
+            except Exception:
+                pass
+
+    # ---------------- 密度 / 提示 / 边框 / 信息条 辅助 ----------------
+    @staticmethod
+    def _density_level(persons, frame):
+        """按每百万像素人数返回密度等级 low/medium/high"""
+        if frame is None or not persons:
+            return DENSITY_LOW
+        h, w = frame.shape[:2]
+        mp = max(h * w / 1_000_000.0, 0.01)
+        d = len(persons) / mp
+        if d >= 30:
+            return DENSITY_HIGH
+        if d >= 15:
+            return DENSITY_MED
+        return DENSITY_LOW
+
+    def _cam_bind_tooltip(self, widget, code):
+        """给画面控件绑定悬停提示"""
+        tip = None
+
+        def enter(event):
+            nonlocal tip
+            self._cam_hide_tooltip(tip)
+            tip = self._cam_show_tooltip(code, event.x_root, event.y_root)
+
+        def leave(event):
+            nonlocal tip
+            self._cam_hide_tooltip(tip)
+            tip = None
+
+        widget.bind("<Enter>", enter)
+        widget.bind("<Leave>", leave)
+        widget.bind("<Motion>", lambda e: None if tip is None else tip.geometry("+%d+%d" % (e.x_root + 16, e.y_root + 16)))
+
+    def _cam_show_tooltip(self, code, x, y):
+        """显示一路摄像头的悬停提示"""
+        panel = self._mon_panels.get(code)
+        if panel is None:
+            return None
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.geometry("+%d+%d" % (x + 16, y + 16))
+        f = ttk.Frame(win, padding=6, relief="solid", borderwidth=1)
+        f.pack()
+        persons = panel.get("persons", []) or []
+        level = panel.get("density_level") or DENSITY_LOW
+        lines = ["路数：%s" % code,
+                 "人数：%d" % len(persons),
+                 "密度：%s" % DENSITY_TEXT.get(level, level)]
+        if persons:
+            behaviors = []
+            for p in persons:
+                for b in p.get("behaviors", []):
+                    behaviors.append("#%d %s" % (p.get("pid", 0), b))
+            if behaviors:
+                lines.append("异常：" + "、".join(behaviors[:6]))
+        txt = "\n".join(lines)
+        lbl = ttk.Label(f, text=txt, font=FONT_SMALL, background="#ffffe0",
+                        foreground="#333", justify="left")
+        lbl.pack()
+        return win
+
+    def _cam_hide_tooltip(self, tip):
+        if tip is not None and tip.winfo_exists():
+            try:
+                tip.destroy()
+            except tk.TclError:
+                pass
+
+    def _cam_set_border(self, code, state):
+        """根据状态设置面板边框颜色：正常绿 / 异常橙 / 越界红 / 未播放灰"""
+        panel = self._mon_panels.get(code)
+        if panel is None:
+            return
+        frame = panel.get("frame")
+        if frame is None or not frame.winfo_exists():
+            return
+        color = CAM_COLORS.get(state, CAM_COLORS["idle"])
+        try:
+            frame.config(highlightbackground=color)
+        except tk.TclError:
+            pass
+
+    def _cam_update_info_bar(self):
+        """刷新顶部信息条：播放路数/总路数、AI人数/越界/异常、高密度路数、最近异常"""
+        total = len(self._mon_panels)
+        playing = sum(1 for v in self._cam_running.values() if v)
+        ai_total = 0
+        cross_total = 0
+        abnormal_total = 0
+        high_count = 0
+        for panel in self._mon_panels.values():
+            persons = panel.get("persons", []) or []
+            ai_total += len(persons)
+            cross_total += sum(1 for p in persons if p.get("bad"))
+            abnormal_total += sum(len(p.get("behaviors", [])) for p in persons)
+            if panel.get("density_level") == DENSITY_HIGH:
+                high_count += 1
+        recent = []
+        for item in list(self._behavior_history)[-3:]:
+            recent.append("%s %s：%s" % (item["ts"][-8:], item["code"], item["text"]))
+        text = ("播放 %d/%d 路　｜　AI 总人数 %d　越界 %d　异常行为 %d　｜"
+                "　高密度机位 %d 路" % (playing, total, ai_total, cross_total,
+                                      abnormal_total, high_count))
+        if recent:
+            text += "　｜　最近异常：" + "　".join(recent)
+        try:
+            self.info_label.config(text=text)
+        except tk.TclError:
+            pass
+
     # ---------------- 总刷新 ----------------
     def refresh_all(self):
         self.refresh_devices()
@@ -854,16 +1106,20 @@ class App(object):
         self._cam_seen = {}         # code -> (generation, seq) 已渲染过的帧序号
         self._cam_render_after = {}  # code -> after id（渲染循环，避免重复排程）
         self._mon_log = config.LOG_DIR / "monitor_ui.log"
+        self._ai_settings = self._load_ai_settings()
+        self._behavior_history = []  # 最近异常行为摘要，每项 {"ts", "code", "text"}
 
-        # ---- 工具栏：左=操作按钮组，中=AI 开关，右=状态标签 ----
+        # ---- 工具栏：左=操作按钮组，中=AI 开关+设置，右=状态标签 ----
         bar = ttk.Frame(f)
         bar.pack(fill="x", pady=(PAD_BAR, 0))
         left = ttk.Frame(bar)
         left.pack(side="left")
-        ttk.Button(left, text="🔄 刷新设备", command=self.refresh_mon).pack(side="left")
+        ttk.Button(left, text="🔄 刷新设备", command=self.refresh_mon).pack(side="left", padx=PAD_BTN)
         ttk.Button(left, text="▶ 全部播放", command=self._mon_play_all
                    ).pack(side="left", padx=PAD_BTN)
-        ttk.Button(left, text="⏹ 全部停止", command=self._mon_stop_all).pack(side="left")
+        ttk.Button(left, text="⏹ 全部停止", command=self._mon_stop_all).pack(side="left", padx=PAD_BTN)
+        ttk.Button(left, text="⚙ AI 设置", command=self._open_ai_settings
+                   ).pack(side="left", padx=PAD_BTN)
 
         mid = ttk.Frame(bar)
         mid.pack(side="left", padx=(18, 12))
@@ -876,9 +1132,16 @@ class App(object):
         self.mon_status = ttk.Label(bar, text="就绪", foreground=GRAY_HINT)
         self.mon_status.pack(side="right")
 
+        # ---- 顶部信息条：全局状态一目了然 ----
+        self.info_bar = ttk.LabelFrame(f, text=" 实时状态 ", padding=6)
+        self.info_bar.pack(fill="x", pady=(PAD_BAR, PAD_BAR))
+        self.info_label = ttk.Label(self.info_bar, text="暂无摄像头",
+                                    font=FONT_SMALL, foreground="#333")
+        self.info_label.pack(anchor="w")
+
         # ---- 图例：颜色含义一目了然 ----
         ttk.Label(f, text="图例：绿框=行为正常　橙框=异常行为　红框=越界/贴线　"
-                          "青色小框=人脸",
+                          "青色小框=人脸　边框：绿=正常　橙=异常　红=越界　灰=未播放",
                   font=FONT_SMALL, foreground="#555").pack(anchor="w", pady=(4, PAD_BAR))
 
         self._person_detector = None
@@ -966,40 +1229,49 @@ class App(object):
             room = dev.room_id or "未分配考场"
             name = dev.name or dev.code or "未命名"
             code = dev.code
-            frame = ttk.LabelFrame(self.mon_grid, text=" %s · %s " % (room, name),
-                                   padding=4)
-            frame.grid(row=i // cols, column=i % cols, sticky="nsew", padx=4, pady=4)
+            # tk.LabelFrame 支持 highlightbackground，可做状态色边框
+            frame = tk.LabelFrame(self.mon_grid, text=" %s · %s " % (room, name),
+                                  bg="#f9f9f9", fg="#333", font=FONT_SMALL,
+                                  highlightthickness=2, highlightbackground=CAM_COLORS["idle"])
+            frame.grid(row=i // cols, column=i % cols, sticky="nsew", padx=6, pady=6)
             self.mon_grid.rowconfigure(i // cols, weight=1)
             self.mon_grid.columnconfigure(i % cols, weight=1)
             # 黑底画面区：先给一个初始高度，播放时按真实尺寸贴图
             lbl = tk.Label(frame, bg="#000", relief="sunken", cursor="hand2",
                            height=9)
-            lbl.pack(fill="both", expand=True)
+            lbl.pack(fill="both", expand=True, padx=2, pady=2)
             lbl.bind("<Button-1>", lambda _e, c=code: self._cam_enlarge(c))
-            # 状态行：播放状态（灰/蓝/绿/红）+ AI 检测人数（每路独立，不重复）
+            # 状态行：播放状态 + 密度等级 + AI 检测人数
             srow = ttk.Frame(frame)
-            srow.pack(fill="x", pady=(2, 0))
+            srow.pack(fill="x", pady=(2, 0), padx=2)
             status = ttk.Label(srow, text="未播放", foreground=CAM_COLORS["idle"],
                                font=FONT_SMALL)
             status.pack(side="left")
+            density = ttk.Label(srow, text="密度：-", foreground=GRAY_MUTED,
+                                font=FONT_SMALL)
+            density.pack(side="left", padx=(8, 0))
             ai = ttk.Label(srow, text="", foreground=GRAY_MUTED, font=FONT_SMALL)
             ai.pack(side="right")
             bbar = ttk.Frame(frame)
-            bbar.pack(fill="x", pady=(2, 0))
+            bbar.pack(fill="x", pady=(4, 2), padx=2)
             btn = ttk.Button(bbar, text="▶ 播放",
                              command=lambda c=code: self._cam_play(c))
-            btn.pack(side="left")
+            btn.pack(side="left", padx=(0, PAD_BTN), pady=(2, 2))
             stop = ttk.Button(bbar, text="⏹ 停止",
                               command=lambda c=code: self._cam_stop(c))
-            stop.pack(side="left", padx=PAD_BTN)
+            stop.pack(side="left", padx=(0, PAD_BTN), pady=(2, 2))
             big = ttk.Button(bbar, text="🔍 放大",
                              command=lambda c=code: self._cam_enlarge(c))
-            big.pack(side="left")
+            big.pack(side="left", padx=(0, PAD_BTN), pady=(2, 2))
             self._mon_panels[code] = {"label": lbl, "status": status, "ai": ai,
-                                      "btn": btn, "stop": stop, "big": big,
-                                      "frame": frame}
+                                      "density": density, "btn": btn,
+                                      "stop": stop, "big": big, "frame": frame,
+                                      "persons": [], "density_level": None,
+                                      "history": []}
+            # 悬停提示
+            self._cam_bind_tooltip(lbl, code)
             # 点标题/面板空白处同样可以放大（子控件的点击会冒泡到 LabelFrame）
-            for w in (frame, lbl, srow, status, ai):
+            for w in (frame, lbl, srow, status, ai, density):
                 w.bind("<Button-1>", lambda _e, c=code: self._cam_enlarge(c))
         self._mon_bind_wheel()
         self._mon_ai_summary()
@@ -1097,11 +1369,18 @@ class App(object):
             return
         try:
             self._cam_latest[code] = frame.copy()
+            viol = 0
+            persons = []
             # AI 越界检测：勾选了才跑，避免不必要的 CPU 占用
             if getattr(self, "mon_ai", None) and self.mon_ai.get():
                 if self._person_detector is None:
                     try:
-                        self._person_detector = pd_mod.PersonDetector()
+                        self._person_detector = pd_mod.PersonTracker(
+                            **self._ai_tracker_kwargs())
+                    except TypeError:
+                        # 兼容当前尚未升级 PersonTracker 的场景
+                        self._person_detector = pd_mod.PersonDetector(
+                            margin_ratio=self._ai_margin_ratio())
                     except Exception as e:
                         err = str(e)
                         self.mon_ai.set(False)
@@ -1114,15 +1393,41 @@ class App(object):
                             pass
                 if self._person_detector is not None:
                     frame, viol, persons = self._person_detector.draw(frame)
+                    # 密度等级
+                    level = self._density_level(persons, frame)
+                    panel["density_level"] = level
+                    panel["persons"] = persons
+                    self._cam_set_density(code, level)
+                    # 状态边框：越界红 > 异常橙 > 正常绿
+                    if viol:
+                        self._cam_set_border(code, "error")
+                    elif any(p.get("behaviors") for p in persons):
+                        self._cam_set_border(code, "stalled")
+                    else:
+                        self._cam_set_border(code, "playing")
                     # 逐路显示识别人数（每路独立，避免与全局状态重复）
                     self._cam_set_ai(code, len(persons), viol)
                     # 全局状态只给汇总，避免"最新一路"覆盖成误导信息
                     self._mon_ai_summary()
-                    # 逐人多次异常行为上报 03 智能终端
+                    self._cam_update_info_bar()
+                    # 逐人多次异常行为上报 03 智能终端 + 历史摘要
                     alerts = self._behavior_tracker.update(code, persons)
                     if alerts:
+                        self._beep()
                         dev = self._dev_by_code(code)
                         for a in alerts:
+                            text = "#%d %s" % (a["pid"], a["behavior"])
+                            if a["crosses"] >= 2:
+                                text += "（触线%d次）" % a["crosses"]
+                            self._behavior_history.append({
+                                "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                                "code": code, "text": text})
+                            # 保持最近 50 条，界面只展示 3 条
+                            self._behavior_history = self._behavior_history[-50:]
+                            # 放大窗口历史时间线
+                            panel["history"] = (panel.get("history", []) + [{
+                                "ts": time.strftime("%H:%M:%S"),
+                                "text": text}])[-10:]
                             try:
                                 import linkage_bridge
                                 linkage_bridge.report_behavior(
@@ -1135,6 +1440,9 @@ class App(object):
                                     operator=self.user.username if self.user else "02_ai")
                             except Exception:
                                 pass
+            else:
+                # AI 未开启时恢复绿色边框
+                self._cam_set_border(code, "playing")
             h = lbl.winfo_height()
             w = lbl.winfo_width()
             if h < 50:
@@ -1149,6 +1457,20 @@ class App(object):
             # 播放状态由 _cam_poll 统一维护（含 fps / 画面中断提示），这里不覆盖
         except Exception as e:
             self._cam_set_status(code, "渲染失败：%s" % e, CAM_COLORS["error"])
+
+    def _cam_set_density(self, code, level):
+        """更新单路密度显示"""
+        panel = self._mon_panels.get(code)
+        if panel is None:
+            return
+        density = panel.get("density")
+        if density is None or not density.winfo_exists():
+            return
+        try:
+            density.config(text="密度：%s" % DENSITY_TEXT.get(level, level),
+                           foreground=DENSITY_COLOR.get(level, GRAY_MUTED))
+        except tk.TclError:
+            pass
 
     def _cam_set_ai(self, code, n_person, n_cross):
         """逐路显示 AI 识别人数：正常绿、有越界橙红，未开 AI 时留空"""
@@ -1168,8 +1490,10 @@ class App(object):
             pass
 
     def _mon_ai_summary(self):
-        """全局状态标签：汇总已开启 AI 的机位人数与越界数"""
+        """全局状态标签：汇总已开启 AI 的机位人数、越界数、异常行为数、高密度机位数"""
         total_p, total_c, n = 0, 0, 0
+        abnormal = 0
+        high = 0
         for panel in self._mon_panels.values():
             ai = panel.get("ai")
             try:
@@ -1183,9 +1507,13 @@ class App(object):
             total_p += int(m.group(1))
             if m.group(2):
                 total_c += int(m.group(2))
+            for p in panel.get("persons", []) or []:
+                abnormal += len(p.get("behaviors", []))
+            if panel.get("density_level") == DENSITY_HIGH:
+                high += 1
         if n:
-            self.mon_status.config(text="AI 识别中：%d 路，共 %d 人，越界 %d"
-                                        % (n, total_p, total_c),
+            self.mon_status.config(text="AI：%d 路　%d 人　越界 %d　异常 %d　高密度 %d"
+                                        % (n, total_p, total_c, abnormal, high),
                                    foreground=GRAY_HINT)
         elif any(self._cam_running.values()):
             self.mon_status.config(text="AI 待命（画面播放中，尚未产出识别结果）",
@@ -1228,7 +1556,12 @@ class App(object):
             ai = panel.get("ai") if panel else None
             if ai is not None and ai.winfo_exists():
                 ai.config(text="", foreground=GRAY_MUTED)
+            self._cam_set_density(code, DENSITY_LOW)
+            panel["density_level"] = None
+            panel["persons"] = []
+            self._cam_set_border(code, "idle")
             self._mon_ai_summary()
+            self._cam_update_info_bar()
         except tk.TclError:
             pass
 
@@ -1259,21 +1592,69 @@ class App(object):
             pass
 
     def _cam_enlarge(self, code):
-        """点击摄像头画面：弹出放大窗口，继续显示该路最新帧"""
+        """点击摄像头画面：弹出放大窗口，左侧大图 + 右侧边栏"""
         dev = self._dev_by_code(code)
         title = "摄像头放大 - %s" % (dev.name or dev.code if dev else code)
         win = tk.Toplevel(self.root)
         win.title(title)
-        win.geometry("960x720")
+        win.geometry("1100x720")
         win.transient(self.root)
-        lbl = tk.Label(win, bg="#000", relief="sunken")
-        lbl.pack(fill="both", expand=True, padx=6, pady=6)
-        status = ttk.Label(win, text="就绪", foreground=GRAY_HINT)
-        status.pack(anchor="w", padx=6)
-        ttk.Button(win, text="关闭", command=win.destroy).pack(anchor="e", padx=6, pady=4)
-        self._cam_enlarge_tick(code, lbl, status, win)
 
-    def _cam_enlarge_tick(self, code, lbl, status, win):
+        paned = ttk.PanedWindow(win, orient="horizontal")
+        paned.pack(fill="both", expand=True, padx=6, pady=6)
+
+        left = ttk.Frame(paned)
+        paned.add(left, weight=3)
+        lbl = tk.Label(left, bg="#000", relief="sunken")
+        lbl.pack(fill="both", expand=True)
+        status = ttk.Label(left, text="就绪", foreground=GRAY_HINT)
+        status.pack(anchor="w", pady=(4, 0))
+
+        right = ttk.Frame(paned, padding=8, relief="ridge", borderwidth=1)
+        paned.add(right, weight=1)
+        ttk.Label(right, text="AI 辅助分析", font=FONT_TITLE).pack(anchor="w", pady=(0, 8))
+
+        # 人员列表
+        person_box = ttk.LabelFrame(right, text=" 人员列表 ", padding=6)
+        person_box.pack(fill="both", expand=True, pady=(0, 8))
+        person_txt = tk.Text(person_box, height=8, wrap="word", font=FONT_SMALL)
+        person_txt.pack(fill="both", expand=True)
+        person_txt.config(state="disabled")
+
+        # 历史异常时间线
+        hist_box = ttk.LabelFrame(right, text=" 最近 10 条异常 ", padding=6)
+        hist_box.pack(fill="both", expand=True, pady=(0, 8))
+        hist_txt = tk.Text(hist_box, height=8, wrap="word", font=FONT_SMALL)
+        hist_txt.pack(fill="both", expand=True)
+        hist_txt.config(state="disabled")
+
+        # AI 设置区（本机位临时调整，点保存会写全局配置）
+        set_box = ttk.LabelFrame(right, text=" AI 设置 ", padding=6)
+        set_box.pack(fill="x", pady=(0, 8))
+        margin_var = tk.IntVar(value=self._ai_settings.get("box_margin_pct", 2))
+        ttk.Label(set_box, text="框边距：").grid(row=0, column=0, sticky="e")
+        margin_cb = ttk.Combobox(set_box, textvariable=margin_var,
+                                 values=[1, 2, 5, 10], state="readonly", width=6)
+        margin_cb.grid(row=0, column=1, sticky="w", padx=(4, 0))
+        ttk.Label(set_box, text="%").grid(row=0, column=2, sticky="w")
+        haar_var = tk.BooleanVar(value=self._ai_settings.get("haar_face", True))
+        ttk.Checkbutton(set_box, text="Haar 人脸微表情分析", variable=haar_var
+                        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+
+        def apply_local():
+            self._ai_settings["box_margin_pct"] = margin_var.get()
+            self._ai_settings["haar_face"] = haar_var.get()
+            self._save_ai_settings(self._ai_settings)
+            self._person_detector = None
+            status.config(text="AI 设置已保存并生效", foreground=CAM_COLORS["playing"])
+
+        ttk.Button(set_box, text="保存到全局", command=apply_local).grid(
+            row=2, column=0, columnspan=3, pady=(8, 0), sticky="w")
+
+        ttk.Button(right, text="关闭", command=win.destroy).pack(anchor="e", pady=(4, 0))
+        self._cam_enlarge_tick(code, lbl, status, win, person_txt, hist_txt)
+
+    def _cam_enlarge_tick(self, code, lbl, status, win, person_txt, hist_txt):
         if not win.winfo_exists():
             return
         frame = self._cam_latest.get(code)
@@ -1292,7 +1673,32 @@ class App(object):
                 status.config(text="渲染失败：%s" % e, foreground=CAM_COLORS["error"])
         else:
             status.config(text="等待视频帧…", foreground=GRAY_MUTED)
-        self.root.after(100, lambda: self._cam_enlarge_tick(code, lbl, status, win))
+        # 更新侧边栏
+        panel = self._mon_panels.get(code)
+        if panel is not None:
+            persons = panel.get("persons", []) or []
+            p_lines = []
+            for p in persons:
+                acts = ", ".join(p.get("behaviors", [])) or p.get("action", "正常")
+                p_lines.append("#%d：%s" % (p.get("pid", 0), acts))
+            self._text_set(person_txt, "\n".join(p_lines) or "（暂无人员）")
+            history = panel.get("history", []) or []
+            h_lines = ["%s　%s" % (h["ts"], h["text"]) for h in history]
+            self._text_set(hist_txt, "\n".join(h_lines) or "（最近 10 条异常时间线）")
+        self.root.after(100, lambda: self._cam_enlarge_tick(code, lbl, status, win, person_txt, hist_txt))
+
+    @staticmethod
+    def _text_set(widget, text):
+        """安全设置 Text 控件内容"""
+        if widget is None or not widget.winfo_exists():
+            return
+        try:
+            widget.config(state="normal")
+            widget.delete("1.0", "end")
+            widget.insert("1.0", text)
+            widget.config(state="disabled")
+        except tk.TclError:
+            pass
 
     def _dev_by_code(self, code):
         for d in self.store.list_devices(enabled_only=False):
