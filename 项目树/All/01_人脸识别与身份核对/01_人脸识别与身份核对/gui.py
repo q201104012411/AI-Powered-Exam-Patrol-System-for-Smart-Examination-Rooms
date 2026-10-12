@@ -503,6 +503,12 @@ class FaceVerifyGUI:
         self.status.config(text="报名库 %d 人；特征索引 %d 人；未建档 %d 人"
                                 % (len(self.candidates), self.index.size, len(missing)))
         self.action_log.log("加载报名库", "共 %d 人，特征索引 %d 人" % (len(self.candidates), self.index.size))
+        # 库数据体检：参考照缺失/被多人共用会让核验"怎么都过不了"，
+        # 这种情况必须在界面上直接说清楚，而不是让操作员对着一堆 FAIL 猜。
+        try:
+            self._report_library_health(missing)
+        except Exception as e:                       # 体检失败不影响主流程
+            self._append("库数据体检跳过：%s" % str(e)[:80])
         for k, v in config.describe().items():
             self._append("  %-22s %s" % (k, v))
         self._append("  %-22s %s" % ("身份要素模式", accounts.identity_mode_text()))
@@ -510,6 +516,69 @@ class FaceVerifyGUI:
                                      if accounts.strict_mode_enabled() else "已关闭（允许本地图片，留痕）"))
         self._append("-" * 64)
         self._refresh_identity_mode()
+
+    def _report_library_health(self, missing_index):
+        """库数据体检：把"会让核验恒失败"的数据问题直接摆到界面上。
+
+        历史故障：data\\ref_photos\\ 里的参考照被删/被两人共用，结果无论谁核验
+        都是 FAIL 或 MANUAL，操作员完全看不出是数据问题。这里主动检查并给出
+        明确的修复指引（重建照片、重建索引、清理重复考生）。
+        """
+        import collections
+        no_photo, missing_file = [], []
+        by_photo = collections.defaultdict(list)
+        for cid, c in self.candidates.items():
+            raw = (c.reference_photo or "").strip()
+            if not raw:
+                no_photo.append(cid)
+                continue
+            p = str(config.resolve_photo(raw))
+            if not os.path.exists(p):
+                missing_file.append(cid)
+                continue
+            try:
+                key = os.path.normcase(os.path.abspath(p))
+            except OSError:
+                key = p.lower()
+            by_photo[key].append(cid)
+        shared = [v for v in by_photo.values() if len(v) > 1]
+        problem = bool(missing_file or shared)
+
+        self._append("  %-22s %d 人" % ("有独立参考照", len(by_photo) - len(shared)))
+        if no_photo:
+            self._append("  %-22s %d 人（没有照片无法建档/核验）" % ("未填参考照", len(no_photo)))
+        if missing_file:
+            self._append("  %-22s %d 人（照片文件已丢失）" % ("参考照缺失", len(missing_file)))
+        if shared:
+            self._append("  %-22s %d 组（同一张照片被多名考生共用）" % ("共用参考照", len(shared)))
+        if missing_index:
+            self._append("  %-22s %d 人（需重建索引）" % ("未建档", len(missing_index)))
+
+        if not problem and not no_photo and not missing_index:
+            return
+        # 有数据问题：状态栏标红 + 输出可执行的修复指引
+        hints = []
+        if missing_file or no_photo:
+            hints.append("补齐参考照：把照片放回 data\\ref_photos\\ 并按考生编号命名，"
+                         "或运行 python 工具\\生成测试考生.py 生成测试数据")
+        if shared:
+            examples = ["、".join(v) for v in shared[:3]]
+            self._append("  [!] 共用参考照示例：%s" % "；".join(examples))
+            hints.append("清理共用照片的考生：python 工具\\库数据体检.py（先体检，再 --delete 指定编号）")
+        if missing_index or shared or missing_file:
+            hints.append("重建特征索引：python enroll.py build --force")
+        for h in hints:
+            self._append("  [修复建议] %s" % h)
+        try:
+            self.status.config(text="⚠ 库数据有问题：参考照缺失 %d 人、共用 %d 组 —— 会导致核验不通过"
+                                    % (len(missing_file), len(shared)),
+                               foreground="#c00")
+        except tk.TclError:
+            pass
+        self.action_log.log("库数据体检",
+                            "参考照缺失=%d 共用=%d 未填=%d 未建档=%d"
+                            % (len(missing_file), len(shared), len(no_photo),
+                               len(missing_index)))
 
     def _on_candidate_change(self):
         self._refresh_consent()

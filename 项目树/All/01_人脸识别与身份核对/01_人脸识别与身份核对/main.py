@@ -36,6 +36,34 @@ def _photo_of(candidate):
     return str(config.resolve_photo(candidate.reference_photo))
 
 
+def _usable_candidates(candidates, index=None):
+    """筛出"参考照确实存在、且能读出来"的考生。
+
+    报名库里可能有脏数据（手填的编号、漏了扩展名的路径、照片已删），
+    旧版自检直接拿第一条去读图，一遇到这种就抛 FileNotFoundError 整个崩掉。
+    这里先过滤，自检只会用到可用的样本，并在开头如实报告被跳过了多少条。
+    """
+    from face_engine import imread_unicode
+    usable, skipped = [], []
+    for cid, c in sorted(candidates.items()):
+        path = _photo_of(c)
+        try:
+            if not os.path.exists(path):
+                skipped.append((cid, "参考照不存在"))
+                continue
+            if imread_unicode(path) is None:
+                skipped.append((cid, "参考照无法解码"))
+                continue
+        except Exception as e:                       # noqa: BLE001
+            skipped.append((cid, "参考照读取异常：%s" % str(e)[:40]))
+            continue
+        if index is not None and not index.has(cid):
+            skipped.append((cid, "未建档（索引中无特征）"))
+            continue
+        usable.append(c)
+    return usable, skipped
+
+
 def _simulate_live_capture(photo_path, quality=70, brightness=12):
     """
     模拟"同一个人、另一次抓拍"：轻微重压缩 + 亮度变化。
@@ -160,8 +188,22 @@ def main():
                             operator="self-check", enforce_consent=False,
                             four_element_checker=_selfcheck_four_elements)
 
-    c1 = candidates.get("C001") or list(candidates.values())[0]
-    others = [c for c in candidates.values() if c.candidate_id != c1.candidate_id]
+    usable, skipped = _usable_candidates(candidates, index)
+    if skipped:
+        print("跳过 %d 条不可用考生（参考照缺失/未建档），自检只用可用的 %d 条："
+              % (len(skipped), len(usable)))
+        for cid, why in skipped[:5]:
+            print("  [跳过] %s：%s" % (cid, why))
+        if len(skipped) > 5:
+            print("  … 其余 %d 条省略" % (len(skipped) - 5))
+    if len(usable) < 2:
+        print("可用考生不足 2 人（当前 %d 人），无法完成 本人vs他人 的自检场景。"
+              % len(usable))
+        print("请先补齐参考照并建档：python 工具\\生成测试考生.py 或 python enroll.py build")
+        return 2
+
+    c1 = next((c for c in usable if c.candidate_id == "C001"), usable[0])
+    others = [c for c in usable if c.candidate_id != c1.candidate_id]
     token = liveness.make_token(DEVICE, source="camera")       # 模拟现场抓拍令牌
     live_same = _simulate_live_capture(_photo_of(c1))
     results = []

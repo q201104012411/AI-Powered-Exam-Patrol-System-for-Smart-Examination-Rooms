@@ -246,9 +246,29 @@ def main():
     os.makedirs(str(config.PHOTO_DIR), exist_ok=True)
     items = build_items(rng, args.count, args.prefix, args.start)
     print("生成 %d 张合成人像 -> %s" % (len(items), config.PHOTO_DIR))
-    from face_engine import imwrite_unicode
+    from face_engine import imwrite_unicode, extract
+
+    def detectable(img):
+        """先把关：生成的图必须能被检测出人脸。
+
+        否则这张照片入了库也建不了档（enroll 报 NO_FACE），表现为"某个考生
+        怎么都核验不了"。重画几次直到可检出，避免把不可用的图写进报名库。
+        """
+        try:
+            extract(img)
+            return True
+        except Exception:
+            return False
+
+    undetectable = []
     for i, it in enumerate(items, 1):
         img = draw_face(rng)
+        tries = 1
+        while not detectable(img) and tries < 6:
+            img = draw_face(rng)          # 重画（继续推进 rng，保证可复现）
+            tries += 1
+        if tries >= 6 and not detectable(img):
+            undetectable.append(it["candidate_id"])
         p = photo_path(it["candidate_id"])
         if not imwrite_unicode(p, img, quality=88, encrypt=True):
             print("  写入失败：%s" % p)
@@ -256,6 +276,9 @@ def main():
         it["reference_photo"] = p
         if i % 50 == 0 or i == len(items):
             print("  已生成 %d/%d" % (i, len(items)))
+    if undetectable:
+        print("  [!] %d 张重画 6 次仍检不到人脸（这些考生建档会失败）：%s"
+              % (len(undetectable), "、".join(undetectable[:10])))
     with open(str(Path(config.DATA_ROOT) / "测试考生名单.csv"), "w",
               encoding="utf-8-sig") as f:
         f.write("考生编号,姓名,身份证号,准考证号,座位号,同意状态\n")

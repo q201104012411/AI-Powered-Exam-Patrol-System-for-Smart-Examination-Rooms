@@ -147,23 +147,42 @@ def migrate_legacy_layout(dry_run=False):
             "数据根目录": str(DATA_ROOT)}
 
 
+_PHOTO_EXTS = ("", ".jpg", ".jpeg", ".png", ".bmp", ".webp")
+
+
+def _with_photo_exts(path):
+    """给一个可能缺少扩展名的路径补上常见图片扩展名（含原样）。
+
+    实际数据里出现过 reference_photo 写成 "C002"（手填漏了 .jpg）的情况，
+    旧实现会解析成 ref_photos\\C002 找不到文件，最后表现为"建档失败/核验用不了"。
+    """
+    p = Path(str(path))
+    if p.suffix:
+        return [p]
+    return [p.with_name(p.name + ext) if ext else p for ext in _PHOTO_EXTS]
+
+
 def resolve_photo(p):
     """
-    解析参考照路径，兼容四种历史写法（数据目录搬迁后仍能工作）：
+    解析参考照路径，兼容五种历史写法（数据目录搬迁后仍能工作）：
       1) 绝对路径且文件存在 —— 原样返回；
       2) 绝对路径但文件已不在（数据目录被搬走）—— 去当前 ref_photos 找同名文件；
       3) 相对代码目录（旧版 data/ref_photos/xxx.jpg）—— 依次在 cwd / 代码目录 / 数据目录找；
-      4) 仅文件名 —— 直接在 ref_photos 下找。
+      4) 仅文件名 —— 直接在 ref_photos 下找；
+      5) 缺少扩展名（如 "C002"）—— 自动尝试补 .jpg/.jpeg/.png/.bmp/.webp。
     """
     if not p:
         return p
     raw = Path(str(p))
     if raw.is_absolute():
-        candidates = [raw, PHOTO_DIR / raw.name]
+        bases = [raw, PHOTO_DIR / raw.name]
         fallback = PHOTO_DIR / raw.name
     else:
-        candidates = [Path.cwd() / raw, BASE_DIR / raw, DATA_ROOT / raw, PHOTO_DIR / raw.name]
+        bases = [Path.cwd() / raw, BASE_DIR / raw, DATA_ROOT / raw, PHOTO_DIR / raw.name]
         fallback = BASE_DIR / raw
+    candidates = []
+    for b in bases:
+        candidates.extend(_with_photo_exts(b))
     for c in candidates:
         try:
             if c.exists():
