@@ -203,5 +203,97 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(pd._density_level(40, 1280 * 720), "high")
 
 
+class TestRenderFastPath(unittest.TestCase):
+    """渲染提速相关：绿色正常框、配色语义、标签位图缓存、分析/绘制解耦"""
+
+    @staticmethod
+    def _person(pid=1, rect=(10, 10, 40, 80), action="正常姿态",
+                bad=False, behaviors=None, crosses=0):
+        return {"pid": pid, "rect": rect, "action": action, "bad": bad,
+                "behaviors": list(behaviors or []), "crosses": crosses}
+
+    def test_person_color_semantics(self):
+        """绿=正常，橙=异常行为，红=越界"""
+        self.assertEqual(pd.PersonTracker.person_color(self._person()), pd.COLOR_OK)
+        self.assertEqual(
+            pd.PersonTracker.person_color(self._person(behaviors=["长时间低头"])),
+            pd.COLOR_WARN)
+        self.assertEqual(pd.PersonTracker.person_color(self._person(bad=True)),
+                         pd.COLOR_BAD)
+        # 正常框必须是绿色（BGR 中 G 分量最高）
+        g = pd.COLOR_OK
+        self.assertGreater(g[1], g[0])
+        self.assertGreater(g[1], g[2])
+
+    def test_draw_boxes_paints_green_for_normal_person(self):
+        """draw_boxes 应在正常人员位置画出绿色像素"""
+        tracker = pd.PersonTracker(max_input_dim=1920)
+        frame = np.full((200, 200, 3), 255, dtype=np.uint8)
+        tracker.draw_boxes(frame, [self._person(rect=(40, 40, 60, 100))],
+                           line_y=None, draw_line=False)
+        # 矩形上边 y=40 处应出现绿色像素
+        row = frame[40, 40:100]
+        greens = [tuple(int(v) for v in px) for px in row
+                  if px[1] > 100 and px[1] > px[0] and px[1] > px[2]]
+        self.assertTrue(greens, "正常人员应画出绿色框")
+
+    def test_draw_boxes_paints_red_for_out_of_bounds(self):
+        tracker = pd.PersonTracker(max_input_dim=1920)
+        frame = np.full((200, 200, 3), 255, dtype=np.uint8)
+        tracker.draw_boxes(frame, [self._person(bad=True, rect=(40, 40, 60, 100))],
+                           line_y=None, draw_line=False)
+        row = frame[40, 40:100]
+        reds = [tuple(int(v) for v in px) for px in row
+                if px[2] > 100 and px[2] > px[0] and px[2] > px[1]]
+        self.assertTrue(reds, "越界人员应画出红色框")
+
+    def test_draw_boxes_scales_from_analysis_to_display(self):
+        """分析分辨率 -> 显示分辨率的坐标映射必须生效"""
+        tracker = pd.PersonTracker(max_input_dim=1920)
+        frame = np.full((100, 100, 3), 255, dtype=np.uint8)
+        # 分析帧 200 宽，显示帧 100 宽 -> scale=0.5，框应落在 (10,10)
+        tracker.draw_boxes(frame, [self._person(rect=(20, 20, 40, 60))],
+                           line_y=None, scale=0.5, draw_line=False)
+        row = frame[10, 10:30]
+        self.assertTrue(any(int(px[1]) > 100 for px in row),
+                        "缩放后的框应画在显示坐标 (10,10) 附近")
+
+    def test_analyze_only_does_not_draw(self):
+        """analyze_only 不应在帧上落笔（贴图与绘制解耦）"""
+        tracker = pd.PersonTracker(dense_mode=True, max_input_dim=1920)
+        img = np.full((720, 1280, 3), 235, dtype=np.uint8)
+        TestPersonTracker._draw_realistic_person(img, 640, 360, height=220)
+        before = img.copy()
+        persons, violations, line_y = tracker.analyze_only(img)
+        self.assertIsInstance(persons, list)
+        self.assertIsInstance(violations, int)
+        self.assertIsInstance(line_y, int)
+        self.assertTrue(np.array_equal(before, img),
+                        "analyze_only 不应修改输入帧")
+
+    def test_text_patch_is_cached(self):
+        """同一串文字只渲染一次，返回同一个缓存对象"""
+        pd.clear_text_cache()
+        a = pd.text_patch("正常姿态", (0, 200, 0), 13)
+        b = pd.text_patch("正常姿态", (0, 200, 0), 13)
+        self.assertIsNotNone(a)
+        self.assertIs(a, b, "相同文字/颜色/字号应命中缓存")
+
+    def test_blend_patch_handles_out_of_bounds(self):
+        """标签贴到画面外不应抛出异常"""
+        frame = np.zeros((20, 20, 3), dtype=np.uint8)
+        patch = pd.text_patch("越界测试", (0, 0, 255), 13)
+        pd.blend_patch(frame, patch, 100, 100)   # 完全在画面外
+        pd.blend_patch(frame, patch, -5, -5)     # 部分在画面外
+        self.assertEqual(frame.shape, (20, 20, 3))
+
+    def test_draw_returns_same_array_in_place(self):
+        """draw 原地绘制并返回同一数组（界面层据此省掉大帧拷贝）"""
+        tracker = pd.PersonTracker(dense_mode=True, max_input_dim=1920)
+        img = np.full((360, 640, 3), 235, dtype=np.uint8)
+        out, violations, persons = tracker.draw(img)
+        self.assertIs(out, img)
+
+
 if __name__ == "__main__":
     unittest.main()

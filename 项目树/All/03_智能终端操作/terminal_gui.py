@@ -112,11 +112,14 @@ DENSITY_TEXT = {DENSITY_LOW: "低", DENSITY_MED: "中", DENSITY_HIGH: "高"}
 DENSITY_COLOR = {DENSITY_LOW: "#0a7d28", DENSITY_MED: "#1f56b8", DENSITY_HIGH: "#e67e00"}
 
 
-def _density_level(persons, frame):
-    """按每百万像素人数返回密度等级"""
-    if frame is None or not persons:
+def _density_level(persons, frame_or_shape):
+    """按每百万像素人数返回密度等级（可传帧或 (h, w) 元组）"""
+    if frame_or_shape is None or not persons:
         return DENSITY_LOW
-    h, w = frame.shape[:2]
+    shape = getattr(frame_or_shape, "shape", frame_or_shape)
+    if not shape or len(shape) < 2:
+        return DENSITY_LOW
+    h, w = shape[0], shape[1]
     mp = max(h * w / 1_000_000.0, 0.01)
     d = len(persons) / mp
     if d >= 30:
@@ -124,6 +127,18 @@ def _density_level(persons, frame):
     if d >= 15:
         return DENSITY_MED
     return DENSITY_LOW
+
+
+# ---------------- 渲染性能参数（解决"画面一多就卡"） ----------------
+RENDER_MS_FEW = 66
+RENDER_MS_MID = 90
+RENDER_MS_MANY = 130
+RENDER_MS_HUGE = 200
+AI_INTERVAL_MS = 300        # 单路 AI 分析最小间隔
+AI_INPUT_DIM = 480          # AI 分析用长边
+INFO_BAR_MS = 500           # 顶部状态条最小刷新间隔
+MAX_PANEL_W = 480
+MAX_PANEL_H = 300
 
 
 class TerminalApp(object):
@@ -417,6 +432,7 @@ class TerminalApp(object):
         self._cam_render_after = {}  # url -> after id（渲染循环，避免重复排程）
         self._person_detectors = {}  # url -> PersonTracker（仅考场路）
         self._behavior_tracker = _BehaviorTracker()
+        self._info_ts = 0.0         # 顶部状态条限频用
         self._ai_error_file = config.DATA_ROOT / "ai_detect_error.txt"
         self._mon_log = config.LOG_DIR / "monitor_ui.log"
 
@@ -512,11 +528,15 @@ class TerminalApp(object):
             url = cam.get("url", "")
             is_exam = cam.get("area", self.AREA_EXAM) == self.AREA_EXAM
             prefix = "🎓" if is_exam else "🚪"
-            frame = ttk.LabelFrame(grid, text=" %s %s · %s " % (prefix, room, device),
-                                   padding=4)
+            # tk.LabelFrame 支持 highlightbackground，可做状态色边框（绿=正常 橙=异常 红=越界）
+            frame = tk.LabelFrame(grid, text=" %s %s · %s " % (prefix, room, device),
+                                  bg="#f9f9f9", fg="#333", font=FONT,
+                                  highlightthickness=2, highlightbackground="#888")
             frame.grid(row=i // cols, column=i % cols, sticky="nsew", padx=4, pady=4)
             grid.rowconfigure(i // cols, weight=1)
             grid.columnconfigure(i % cols, weight=1)
+            cam["_frame"] = frame
+            cam["_border_state"] = None
 
             lbl = tk.Label(frame, bg="#000", relief="sunken")
             lbl.pack(fill="both", expand=True)
@@ -526,6 +546,8 @@ class TerminalApp(object):
             status = ttk.Label(srow, text=("未播放" if is_exam else "未播放（该区域无 AI）"),
                                foreground="#666")
             status.pack(side="left")
+            cam["_status"] = status
+            cam["_status_text"] = None
             if is_exam:
                 density = ttk.Label(srow, text="密度：-", foreground="#888", font=FONT)
                 density.pack(side="left", padx=(8, 0))
@@ -585,21 +607,43 @@ class TerminalApp(object):
         except (tk.TclError, RuntimeError):
             pass
 
+    def _render_interval(self):
+        """按当前播放路数自适应渲染间隔：路数越多，单路帧率越低"""
+        n = sum(1 for v in getattr(self, "_cam_running", {}).values() if v)
+        if n <= 2:
+            return RENDER_MS_FEW
+        if n <= 4:
+            return RENDER_MS_MID
+        if n <= 9:
+            return RENDER_MS_MANY
+        return RENDER_MS_HUGE
+
     def _cam_render(self, url):
-        """渲染循环：取最新帧贴图。帧序号不变就不重复渲染，画面中断时界面也不会卡"""
+        """渲染循环：取最新帧贴图。
+
+        性能要点：帧序号不变不重渲染；帧率按路数自适应；
+        AI 分析低频跑、中间帧复用缓存的框；缩图走 cv2（不再用 PIL LANCZOS）。
+        """
         try:
             reader = self._cam_readers.get(url)
             if reader is None or not self._cam_running.get(url):
+                self._cam_render_after.pop(url, None)
                 return
             snap = reader.snapshot()
             key = (snap["generation"], snap["seq"])
             if snap["frame"] is not None and snap["seq"] and self._cam_seen.get(url) != key:
                 self._cam_seen[url] = key
-                self._cam_update(url, snap["frame"])
+                self._cam_update(url, snap)
         except Exception as e:                       # noqa: BLE001
             self._cam_set_status(url, "渲染失败：%s" % str(e)[:60], "#c00")
-        self._cam_render_after[url] = self.root.after(
-            33, lambda u=url: self._cam_render(u))
+        if not self._cam_running.get(url):
+            self._cam_render_after.pop(url, None)
+            return
+        try:
+            self._cam_render_after[url] = self.root.after(
+                self._render_interval(), lambda u=url: self._cam_render(u))
+        except (tk.TclError, RuntimeError):
+            self._cam_render_after.pop(url, None)
 
     def _mon_log_line(self, text):
         """监控操作日志（取流问题事后可查）"""
@@ -609,61 +653,149 @@ class TerminalApp(object):
         except OSError:
             pass
 
-    def _cam_update(self, url, frame):
+    @staticmethod
+    def _fit_frame(frame, w, h):
+        """等比缩放到不超过 (w,h)（cv2.resize，下采样用 INTER_AREA）"""
+        fh, fw = frame.shape[:2]
+        if fw <= 0 or fh <= 0:
+            return frame
+        scale = min(w / float(fw), h / float(fh))
+        if scale >= 1.0 and fw <= MAX_PANEL_W and fh <= MAX_PANEL_H:
+            return frame
+        scale = min(scale, MAX_PANEL_W / float(fw), MAX_PANEL_H / float(fh))
+        nw = max(2, int(fw * scale))
+        nh = max(2, int(fh * scale))
+        interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+        return cv2.resize(frame, (nw, nh), interpolation=interp)
+
+    def _cam_update(self, url, snap):
+        """渲染一路监控：AI 分析与视频贴图解耦"""
         cam = self._cam_by_url(url)
         if cam is None:
             return
         lbl = cam.get("_label")
         if lbl is None or not lbl.winfo_exists():
             return
+        raw = snap.get("frame")
+        if raw is None or getattr(raw, "size", 0) == 0:
+            return
         try:
-            persons = []
-            viol = 0
-            # AI 框选识别：仅「考场监考」区域的摄像头生效；勾选才跑，省 CPU
-            if (HAS_PD and getattr(self, "mon_ai", None) and self.mon_ai.get()
-                    and cam.get("area", self.AREA_EXAM) == self.AREA_EXAM):
-                det = self._person_detectors.get(url)
-                if det is None:
-                    try:
-                        det = pd_mod.PersonTracker()
-                        self._person_detectors[url] = det
-                    except Exception as e:
-                        self.mon_ai.set(False)
-                        err = str(e)
-                        self.monitor_status.config(text="AI识别不可用：%s" % err)
-                        try:
-                            self._ai_error_file.write_text(err, encoding="utf-8")
-                        except Exception:
-                            pass
-                        det = None
-                if det is not None:
-                    frame, viol, persons = det.draw(frame)
-                    self.monitor_status.config(
-                        text="AI识别中：%d 人，越界 %d" % (len(persons), viol))
-                    self._ai_ingest_behaviors(url, cam, persons)
-                    # 密度等级
-                    level = _density_level(persons, frame)
-                    cam["_persons"] = persons
-                    cam["_density_level"] = level
-                    density = cam.get("_density")
-                    if density is not None and density.winfo_exists():
-                        density.config(text="密度：%s" % DENSITY_TEXT.get(level, level),
-                                       foreground=DENSITY_COLOR.get(level, "#888"))
             h = lbl.winfo_height()
             w = lbl.winfo_width()
             if h < 50:
                 h = 240
             if w < 50:
                 w = 320
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(rgb)
-            img.thumbnail((w, h), Image.Resampling.LANCZOS)
-            self._cam_photos[url] = ImageTk.PhotoImage(image=img)
+            disp = self._fit_frame(raw, w, h)
+
+            now_ms = time.time() * 1000.0
+            ai_on = (HAS_PD and getattr(self, "mon_ai", None) and self.mon_ai.get()
+                     and cam.get("area", self.AREA_EXAM) == self.AREA_EXAM)
+            persons = cam.get("_persons", []) or []
+            viol = cam.get("_viol", 0)
+
+            if ai_on:
+                due = (now_ms - cam.get("_ai_ts", 0.0)) >= AI_INTERVAL_MS
+                if due:
+                    rh, rw = raw.shape[:2]
+                    if max(rh, rw) > AI_INPUT_DIM:
+                        s = AI_INPUT_DIM / float(max(rh, rw))
+                        ai_frame = cv2.resize(raw, (max(2, int(rw * s)),
+                                                    max(2, int(rh * s))),
+                                              interpolation=cv2.INTER_AREA)
+                    else:
+                        ai_frame = raw
+                    det = self._person_detector_for(url)
+                    if det is not None:
+                        persons, viol, line_y = det.analyze_only(ai_frame)
+                        for p in persons:
+                            tr = getattr(det, "_tracks", {}).get(p["pid"])
+                            fa = getattr(tr, "face_cache", None) if tr is not None else None
+                            p["face"] = (fa or {}).get("face") if fa else None
+                        cam["_ai_ts"] = now_ms
+                        cam["_persons"] = persons
+                        cam["_viol"] = viol
+                        cam["_ai_line_y"] = line_y
+                        cam["_ai_shape"] = ai_frame.shape
+                        cam["_ai_scale"] = disp.shape[1] / float(ai_frame.shape[1])
+                        self._cam_ai_side_effects(url, cam, persons, viol)
+                scale = cam.get("_ai_scale")
+                if scale is None:
+                    scale = disp.shape[1] / float(raw.shape[1])
+                    cam["_ai_scale"] = scale
+                det = self._person_detectors.get(url)
+                if det is not None and persons:
+                    det.draw_boxes(disp, persons, line_y=cam.get("_ai_line_y"),
+                                   scale=scale, font_size=12)
+
+            rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
+            self._cam_photos[url] = ImageTk.PhotoImage(image=Image.fromarray(rgb))
             lbl.config(image=self._cam_photos[url])
             self._cam_set_status(url, "播放中", "#0a7d28")
-            self._monitor_update_info_bar()
         except Exception as e:
             self._cam_set_status(url, "渲染失败：%s" % e, "#c00")
+
+    def _person_detector_for(self, url):
+        """取（或创建）该路的 AI 检测器"""
+        det = self._person_detectors.get(url)
+        if det is not None:
+            return det
+        try:
+            det = pd_mod.PersonTracker(max_input_dim=1280)
+            self._person_detectors[url] = det
+        except Exception as e:
+            self.mon_ai.set(False)
+            self.monitor_status.config(text="AI识别不可用：%s" % e)
+            try:
+                self._ai_error_file.write_text(str(e), encoding="utf-8")
+            except Exception:
+                pass
+            return None
+        return det
+
+    def _cam_ai_side_effects(self, url, cam, persons, viol):
+        """AI 分析后的界面更新 + 异常上报本终端告警列表"""
+        level = _density_level(persons, cam.get("_ai_shape"))
+        cam["_density_level"] = level
+        density = cam.get("_density")
+        if density is not None and density.winfo_exists():
+            if cam.get("_density_text") != level:
+                cam["_density_text"] = level
+                try:
+                    density.config(text="密度：%s" % DENSITY_TEXT.get(level, level),
+                                   foreground=DENSITY_COLOR.get(level, "#888"))
+                except tk.TclError:
+                    pass
+        # 面板边框：越界红 > 异常橙 > 正常绿
+        self._cam_set_border(cam, "error" if viol else
+                             ("warn" if any(p.get("behaviors") for p in persons)
+                              else "ok"))
+        now_ms = time.time() * 1000.0
+        if (now_ms - getattr(self, "_info_ts", 0.0)) >= INFO_BAR_MS:
+            self._info_ts = now_ms
+            try:
+                self.monitor_status.config(
+                    text="AI识别中：%d 人，越界 %d" % (len(persons), viol))
+            except tk.TclError:
+                pass
+            self._monitor_update_info_bar()
+        # 异常上报：直接进本终端告警列表（可复核/可留痕）
+        self._ai_ingest_behaviors(url, cam, persons)
+
+    def _cam_set_border(self, cam, state):
+        """按状态给监控面板边框上色（绿=正常 橙=异常 红=越界）"""
+        frame = cam.get("_frame") if cam else None
+        if frame is None:
+            return
+        if cam.get("_border_state") == state:
+            return
+        cam["_border_state"] = state
+        color = {"ok": "#0a7d28", "warn": "#c07000",
+                 "error": "#c00", "idle": "#888"}.get(state, "#888")
+        try:
+            frame.config(highlightbackground=color)
+        except tk.TclError:
+            pass
 
     def _monitor_update_info_bar(self):
         """刷新顶部状态条和分区域标题人数"""
@@ -686,19 +818,24 @@ class TerminalApp(object):
         other_count = ai_total - exam_count
         text = ("播放 %d/%d 路　｜　AI 总人数 %d　越界 %d　异常行为 %d　｜"
                 "　高密度机位 %d 路" % (playing, total, ai_total, cross_total, abnormal, high_count))
-        try:
-            self.info_label.config(text=text)
-        except tk.TclError:
-            pass
+        # 文本没变就不碰控件（每路每轮都 config 会明显拖慢界面）
+        if getattr(self, "_info_text", None) != text:
+            self._info_text = text
+            try:
+                self.info_label.config(text=text)
+            except tk.TclError:
+                pass
         # 更新两个分区域标题旁的人数
-        try:
-            if getattr(self, "mon_nb", None) is not None:
-                self.mon_nb.tab(self.exam_tab,
-                                text=" 🎓 考场监考（%d 人） " % exam_count)
-                self.mon_nb.tab(self.other_tab,
-                                text=" 🚪 非考场监控（%d 人） " % other_count)
-        except tk.TclError:
-            pass
+        exam_tab_text = " 🎓 考场监考（%d 人） " % exam_count
+        other_tab_text = " 🚪 非考场监控（%d 人） " % other_count
+        if getattr(self, "_tab_text", None) != (exam_tab_text, other_tab_text):
+            self._tab_text = (exam_tab_text, other_tab_text)
+            try:
+                if getattr(self, "mon_nb", None) is not None:
+                    self.mon_nb.tab(self.exam_tab, text=exam_tab_text)
+                    self.mon_nb.tab(self.other_tab, text=other_tab_text)
+            except tk.TclError:
+                pass
 
     def _ai_ingest_behaviors(self, url, cam, persons):
         """逐人异常行为达到阈值后，直接在本终端生成告警（进 03 自己的告警列表）"""
@@ -717,10 +854,61 @@ class TerminalApp(object):
                                  room_id=cam.get("room", ""),
                                  device_id=cam.get("device", "") or url,
                                  source="terminal_ai")
+            created = False
             try:
-                self.hub.ingest(alert)
+                _, created = self.hub.ingest(alert)
             except Exception:
                 pass
+            if not created:
+                continue
+            # 上报留痕 + 界面提示，让"异常已上报到本终端"看得见
+            self._ai_report_history = (getattr(self, "_ai_report_history", []) + [{
+                "ts": time.strftime("%H:%M:%S"),
+                "room": cam.get("room", "-"),
+                "device": cam.get("device", "-"),
+                "text": "#%d %s" % (a["pid"], a["behavior"]),
+            }])[-30:]
+            try:
+                self._mon_log_line("AI 异常上报：%s %s #%d %s"
+                                   % (cam.get("room", "-"), cam.get("device", "-"),
+                                      a["pid"], a["behavior"]))
+            except Exception:
+                pass
+            self._show_ai_report(alert, cam, a)
+            # 告警列表页正在显示时刷新，避免"报了但看不到"
+            try:
+                if getattr(self, "session", None) is not None:
+                    self._refresh_alerts_if_visible()
+            except Exception:
+                pass
+
+    def _refresh_alerts_if_visible(self):
+        """若告警页签当前可见则刷新列表（不可见时不动，省 CPU）"""
+        try:
+            nb = getattr(self, "nb", None)
+            if nb is None:
+                return
+            if str(nb.select()) == str(self.tab_alerts):
+                self.refresh_alerts()
+        except Exception:
+            pass
+
+    def _show_ai_report(self, alert, cam, behavior):
+        """在监控页顶部状态条给出醒目的"已上报"提示"""
+        try:
+            room = cam.get("room", "-")
+            dev = cam.get("device", "-")
+            self.monitor_status.config(
+                text="⚠ AI 异常已上报：%s %s #%d %s → 告警 %s"
+                     % (room, dev, behavior["pid"], behavior["behavior"],
+                        alert.alert_id[-6:]),
+                foreground="#c00")
+        except tk.TclError:
+            pass
+        try:
+            self.root.bell()
+        except Exception:
+            pass
 
     def _cam_stop(self, url, quiet=False):
         """停止一路监控。立刻返回：句柄释放走后台线程（卡住的流 release 也会阻塞）"""
@@ -737,7 +925,12 @@ class TerminalApp(object):
                 pass
         self._cam_photos.pop(url, None)
         self._cam_seen.pop(url, None)
-        self._person_detectors.pop(url, None)   # 轨迹随停止清空，编号重新计
+        tracker = self._person_detectors.pop(url, None)   # 轨迹随停止清空，编号重新计
+        if tracker is not None:
+            try:
+                tracker.stop()
+            except Exception:
+                pass
         if not quiet:
             self._cam_stopped_ui(url)
 
@@ -751,10 +944,17 @@ class TerminalApp(object):
             self._cam_btn_text(url, "▶ 播放")
             self._cam_set_status(url, "已停止", "#666")
             cam["_persons"] = []
+            cam["_viol"] = 0
+            cam["_ai_ts"] = 0.0
+            cam["_ai_scale"] = None
+            cam["_ai_line_y"] = None
+            cam["_status_text"] = None
             cam["_density_level"] = DENSITY_LOW
+            cam["_density_text"] = None
             density = cam.get("_density")
             if density is not None and density.winfo_exists():
                 density.config(text="密度：-", foreground="#888")
+            self._cam_set_border(cam, "idle")
             self._monitor_update_info_bar()
         except tk.TclError:
             pass
@@ -767,8 +967,16 @@ class TerminalApp(object):
 
     def _cam_set_status(self, url, text, color):
         cam = self._cam_by_url(url)
-        if cam and cam.get("_status") and cam["_status"].winfo_exists():
-            cam["_status"].config(text=text, foreground=color)
+        if cam is None:
+            return
+        if cam.get("_status_text") == text:
+            return
+        cam["_status_text"] = text
+        if cam.get("_status") and cam["_status"].winfo_exists():
+            try:
+                cam["_status"].config(text=text, foreground=color)
+            except tk.TclError:
+                pass
 
     def _cam_btn_text(self, url, text):
         cam = self._cam_by_url(url)

@@ -93,6 +93,26 @@ AI_SETTINGS_DEFAULT = {
     "sound_beep": True,
 }
 
+# ---------------- 渲染性能参数（解决"画面一多就卡"） ----------------
+# 渲染与 AI 分析解耦：视频按下面这些频率贴图，AI 分析按更低频率跑并复用结果。
+RENDER_MS_FEW = 66          # ≤2 路：约 15fps
+RENDER_MS_MID = 90          # ≤4 路：约 11fps
+RENDER_MS_MANY = 130        # ≤9 路：约 8fps
+RENDER_MS_HUGE = 200        # >9 路：约 5fps
+AI_INTERVAL_MS = {          # 单路 AI 分析最小间隔（毫秒）
+    "standard": 250,
+    "dense": 400,           # 密集模式更慢，进一步降频
+    "energy": 800,          # 节能模式
+}
+AI_INPUT_DIM = {            # AI 分析用长边（越小越快）
+    "standard": 480,
+    "dense": 640,
+    "energy": 320,
+}
+INFO_BAR_MS = 500           # 顶部信息条/汇总的最小刷新间隔
+MAX_PANEL_W = 480           # 单路面板最大渲染宽度（超过就缩，省 CPU）
+MAX_PANEL_H = 300
+
 # pythonw 隐藏窗口启动时 stdout/stderr 为 None，兜住避免任何 print 崩掉界面
 config.ensure_stdio("gui_console.log")
 
@@ -887,14 +907,25 @@ class App(object):
         params = sig.parameters
         kw = {"margin_ratio": self._ai_margin_ratio()}
         settings = self._ai_settings
-        # AI 子Agent 预期新增参数（按实际 person_detect.py 命名）
+        # 界面层已按 AI_INPUT_DIM 缩放后再送进来，这里把内部再缩放阈值放高，
+        # 避免"缩两次"浪费 CPU（真实长边已经 <= 640）。
         for key, val in (("dense_mode", settings.get("mode") == "dense"),
-                         ("max_input_dim", 1280 if settings.get("mode") == "energy" else 1920),
+                         ("max_input_dim", 1280),
                          ("detect_stride", 2 if settings.get("mode") == "energy" else 1),
                          ("enable_face_dense", settings.get("haar_face", True))):
             if key in params:
                 kw[key] = val
         return kw
+
+    def _reset_ai_trackers(self):
+        """清空每路检测器（改设置/重播时调用，轨迹按新参数重建）"""
+        self._person_detector = None
+        for tracker in list(getattr(self, "_cam_trackers", {}).values()):
+            try:
+                tracker.stop()
+            except Exception:
+                pass
+        getattr(self, "_cam_trackers", {}).clear()
 
     def _open_ai_settings(self):
         """全局 AI 设置弹窗"""
@@ -943,8 +974,8 @@ class App(object):
             }
             if self._save_ai_settings(new_settings):
                 self._ai_settings = new_settings
-                # 边距实时生效：重建检测器（下次 _cam_update 会按新设置创建）
-                self._person_detector = None
+                # 边距/模式实时生效：清掉每路的检测器，下次分析按新设置重建
+                self._reset_ai_trackers()
                 msg.config(text="已保存并生效", foreground="#0a7d28")
                 self.status.config(text="AI 设置已更新：模式=%s 边距=%d%%" % (
                     new_settings["mode"], new_settings["box_margin_pct"]))
@@ -972,11 +1003,17 @@ class App(object):
 
     # ---------------- 密度 / 提示 / 边框 / 信息条 辅助 ----------------
     @staticmethod
-    def _density_level(persons, frame):
-        """按每百万像素人数返回密度等级 low/medium/high"""
-        if frame is None or not persons:
+    def _density_level(persons, frame_or_shape):
+        """按每百万像素人数返回密度等级 low/medium/high。
+
+        frame_or_shape 可以是帧（用 .shape），也可以是 (h, w) 元组。
+        """
+        if frame_or_shape is None or not persons:
             return DENSITY_LOW
-        h, w = frame.shape[:2]
+        shape = getattr(frame_or_shape, "shape", frame_or_shape)
+        if not shape or len(shape) < 2:
+            return DENSITY_LOW
+        h, w = shape[0], shape[1]
         mp = max(h * w / 1_000_000.0, 0.01)
         d = len(persons) / mp
         if d >= 30:
@@ -1046,6 +1083,9 @@ class App(object):
         frame = panel.get("frame")
         if frame is None or not frame.winfo_exists():
             return
+        if panel.get("border_state") == state:
+            return
+        panel["border_state"] = state
         color = CAM_COLORS.get(state, CAM_COLORS["idle"])
         try:
             frame.config(highlightbackground=color)
@@ -1102,9 +1142,12 @@ class App(object):
         self._cam_readers = {}      # code -> camera_stream.FrameReader（取流内核）
         self._cam_running = {}      # code -> bool
         self._cam_photos = {}
-        self._cam_latest = {}       # code -> 最新帧（用于放大窗口）
+        self._cam_latest = {}       # code -> 最新帧（用于放大窗口，仅放大时才存）
+        self._cam_enlarge_active = {}  # code -> bool（放大窗口是否打开）
         self._cam_seen = {}         # code -> (generation, seq) 已渲染过的帧序号
         self._cam_render_after = {}  # code -> after id（渲染循环，避免重复排程）
+        self._cam_trackers = {}     # code -> PersonTracker（每路独立，避免轨迹串号）
+        self._info_ts = 0.0         # 顶部信息条上次刷新时间（限频用）
         self._mon_log = config.LOG_DIR / "monitor_ui.log"
         self._ai_settings = self._load_ai_settings()
         self._behavior_history = []  # 最近异常行为摘要，每项 {"ts", "code", "text"}
@@ -1147,7 +1190,6 @@ class App(object):
         self._person_detector = None
         self._ai_error_file = config.DATA_ROOT / "ai_detect_error.txt"
         self._behavior_tracker = _BehaviorTracker()
-
         # ---- 可滚动摄像头网格（Canvas + 竖滚动条 + 鼠标滚轮） ----
         self.mon_canvas, self.mon_grid = self._make_scroll_area(f)
         self._mon_panels = {}       # code -> {label, status, ai, btn, ...}
@@ -1212,6 +1254,8 @@ class App(object):
         self._cam_readers.clear()
         self._cam_seen.clear()
         self._cam_latest.clear()
+        self._cam_enlarge_active.clear()
+        self._cam_trackers.clear()
         self._mon_panels.clear()
         for w in self.mon_grid.winfo_children():
             w.destroy()
@@ -1267,6 +1311,10 @@ class App(object):
                                       "density": density, "btn": btn,
                                       "stop": stop, "big": big, "frame": frame,
                                       "persons": [], "density_level": None,
+                                      "density_text": None, "border_state": None,
+                                      "ai_text": None, "ai_n": 0, "ai_cross": 0,
+                                      "ai_persons": [], "ai_viol": 0, "ai_ts": 0.0,
+                                      "ai_scale": None, "ai_line_y": None,
                                       "history": []}
             # 悬停提示
             self._cam_bind_tooltip(lbl, code)
@@ -1290,6 +1338,23 @@ class App(object):
         if not url or self._cam_running.get(code):
             return
         self._cam_stop(code, quiet=True)
+        # 重播清掉上一轮的检测器与 AI 缓存，避免轨迹/框残留
+        old = self._cam_trackers.pop(code, None)
+        if old is not None:
+            try:
+                old.stop()
+            except Exception:
+                pass
+        panel = self._mon_panels.get(code)
+        if panel is not None:
+            panel["ai_persons"] = []
+            panel["ai_viol"] = 0
+            panel["ai_ts"] = 0.0
+            panel["ai_text"] = None
+            panel["ai_scale"] = None
+            panel["ai_line_y"] = None
+            panel["persons"] = []
+            panel["status_text"] = None
         reader = camera_stream.FrameReader(url, label="%s/%s" % (code, camera_stream.short_url(url, 32)))
         self._cam_readers[code] = reader
         self._cam_running[code] = True
@@ -1332,25 +1397,47 @@ class App(object):
         except (tk.TclError, RuntimeError):
             pass
 
+    def _render_interval(self):
+        """按当前播放路数自适应渲染间隔：路数越多，单路帧率越低（总 CPU 才压得住）"""
+        n = sum(1 for v in getattr(self, "_cam_running", {}).values() if v)
+        if n <= 2:
+            return RENDER_MS_FEW
+        if n <= 4:
+            return RENDER_MS_MID
+        if n <= 9:
+            return RENDER_MS_MANY
+        return RENDER_MS_HUGE
+
     def _cam_render(self, code):
         """渲染循环：从 FrameReader 取最新帧贴图（非阻塞）。
 
-        关键点：帧序号 (generation, seq) 没变就**不重复渲染**，因此"画面中断"
-        时界面不会死转；同时这个循环是 after 排程的，不会出现多份循环叠加。
+        性能要点（原实现"路数一多就卡"的原因）：
+          1. 帧序号 (generation, seq) 没变就**不重复渲染**；
+          2. 渲染频率按播放路数自适应下调（_render_interval）；
+          3. 缩图用 cv2.resize（INTER_AREA），不再用 PIL 的 LANCZOS；
+          4. AI 分析按更低的固定间隔跑，中间帧复用上一次的框，不做重复检测；
+          5. 只有一个 after 循环，不会叠加。
         """
         try:
             reader = self._cam_readers.get(code)
             if reader is None or not self._cam_running.get(code):
+                self._cam_render_after.pop(code, None)
                 return
             snap = reader.snapshot()
             key = (snap["generation"], snap["seq"])
             if snap["frame"] is not None and snap["seq"] and self._cam_seen.get(code) != key:
                 self._cam_seen[code] = key
-                self._cam_update(code, snap["frame"])
+                self._cam_update(code, snap)
         except Exception as e:                       # noqa: BLE001
             self._cam_set_status(code, "渲染失败：%s" % str(e)[:60], CAM_COLORS["error"])
-        self._cam_render_after[code] = self.root.after(
-            33, lambda c=code: self._cam_render(c))
+        if not self._cam_running.get(code):
+            self._cam_render_after.pop(code, None)
+            return
+        try:
+            self._cam_render_after[code] = self.root.after(
+                self._render_interval(), lambda c=code: self._cam_render(c))
+        except (tk.TclError, RuntimeError):
+            self._cam_render_after.pop(code, None)
 
     def _mon_log_line(self, text):
         """监控操作日志（取流问题事后可查；写失败不影响运行）"""
@@ -1360,103 +1447,188 @@ class App(object):
         except OSError:
             pass
 
-    def _cam_update(self, code, frame):
+    @staticmethod
+    def _fit_frame(frame, w, h):
+        """把帧等比缩放到不超过 (w,h) 的尺寸（cv2.resize，下采样用 INTER_AREA 更快更好）"""
+        fh, fw = frame.shape[:2]
+        if fw <= 0 or fh <= 0:
+            return frame
+        scale = min(w / float(fw), h / float(fh))
+        if scale >= 1.0 and fw <= MAX_PANEL_W and fh <= MAX_PANEL_H:
+            return frame
+        scale = min(scale, MAX_PANEL_W / float(fw), MAX_PANEL_H / float(fh))
+        nw = max(2, int(fw * scale))
+        nh = max(2, int(fh * scale))
+        interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+        return cv2.resize(frame, (nw, nh), interpolation=interp)
+
+    def _cam_ai_interval_ms(self):
+        mode = (self._ai_settings or {}).get("mode", "standard")
+        return AI_INTERVAL_MS.get(mode, AI_INTERVAL_MS["standard"])
+
+    def _cam_ai_input_dim(self):
+        mode = (self._ai_settings or {}).get("mode", "standard")
+        return AI_INPUT_DIM.get(mode, AI_INPUT_DIM["standard"])
+
+    def _cam_tracker(self, code):
+        """每路一个独立的 PersonTracker（共用一个会让不同考场的轨迹互相串号）"""
+        tracker = self._cam_trackers.get(code)
+        if tracker is not None:
+            return tracker
+        try:
+            tracker = pd_mod.PersonTracker(**self._ai_tracker_kwargs())
+        except TypeError:
+            tracker = pd_mod.PersonDetector(margin_ratio=self._ai_margin_ratio())
+        except Exception as e:
+            err = str(e)
+            self.mon_ai.set(False)
+            self.mon_ai_chk.config(state="disabled")
+            self.mon_status.config(text="AI检测不可用：%s" % err,
+                                   foreground=CAM_COLORS["error"])
+            try:
+                self._ai_error_file.write_text(err, encoding="utf-8")
+            except Exception:
+                pass
+            return None
+        self._cam_trackers[code] = tracker
+        return tracker
+
+    def _cam_update(self, code, snap):
+        """把一帧渲染到单路面板上。
+
+        AI 分析（低频、按 AI_INPUT_DIM 缩放）+ 视频贴图（高频、按面板尺寸缩放）分离：
+        分析结果里保存的是**分析分辨率**下的框，贴图时按比例映射到显示分辨率。
+        """
         panel = self._mon_panels.get(code)
         if panel is None:
             return
         lbl = panel.get("label")
         if lbl is None or not lbl.winfo_exists():
             return
+        raw = snap.get("frame")
+        if raw is None or getattr(raw, "size", 0) == 0:
+            return
         try:
-            self._cam_latest[code] = frame.copy()
-            viol = 0
-            persons = []
-            # AI 越界检测：勾选了才跑，避免不必要的 CPU 占用
-            if getattr(self, "mon_ai", None) and self.mon_ai.get():
-                if self._person_detector is None:
-                    try:
-                        self._person_detector = pd_mod.PersonTracker(
-                            **self._ai_tracker_kwargs())
-                    except TypeError:
-                        # 兼容当前尚未升级 PersonTracker 的场景
-                        self._person_detector = pd_mod.PersonDetector(
-                            margin_ratio=self._ai_margin_ratio())
-                    except Exception as e:
-                        err = str(e)
-                        self.mon_ai.set(False)
-                        self.mon_ai_chk.config(state="disabled")
-                        self.mon_status.config(text="AI检测不可用：%s" % err,
-                                               foreground=CAM_COLORS["error"])
-                        try:
-                            self._ai_error_file.write_text(err, encoding="utf-8")
-                        except Exception:
-                            pass
-                if self._person_detector is not None:
-                    frame, viol, persons = self._person_detector.draw(frame)
-                    # 密度等级
-                    level = self._density_level(persons, frame)
-                    panel["density_level"] = level
-                    panel["persons"] = persons
-                    self._cam_set_density(code, level)
-                    # 状态边框：越界红 > 异常橙 > 正常绿
-                    if viol:
-                        self._cam_set_border(code, "error")
-                    elif any(p.get("behaviors") for p in persons):
-                        self._cam_set_border(code, "stalled")
-                    else:
-                        self._cam_set_border(code, "playing")
-                    # 逐路显示识别人数（每路独立，避免与全局状态重复）
-                    self._cam_set_ai(code, len(persons), viol)
-                    # 全局状态只给汇总，避免"最新一路"覆盖成误导信息
-                    self._mon_ai_summary()
-                    self._cam_update_info_bar()
-                    # 逐人多次异常行为上报 03 智能终端 + 历史摘要
-                    alerts = self._behavior_tracker.update(code, persons)
-                    if alerts:
-                        self._beep()
-                        dev = self._dev_by_code(code)
-                        for a in alerts:
-                            text = "#%d %s" % (a["pid"], a["behavior"])
-                            if a["crosses"] >= 2:
-                                text += "（触线%d次）" % a["crosses"]
-                            self._behavior_history.append({
-                                "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-                                "code": code, "text": text})
-                            # 保持最近 50 条，界面只展示 3 条
-                            self._behavior_history = self._behavior_history[-50:]
-                            # 放大窗口历史时间线
-                            panel["history"] = (panel.get("history", []) + [{
-                                "ts": time.strftime("%H:%M:%S"),
-                                "text": text}])[-10:]
-                            try:
-                                import linkage_bridge
-                                linkage_bridge.report_behavior(
-                                    device_code=code,
-                                    behavior=a["behavior"],
-                                    pid=a["pid"],
-                                    crosses=a["crosses"],
-                                    room_id=dev.room_id if dev else "",
-                                    seat_no="",
-                                    operator=self.user.username if self.user else "02_ai")
-                            except Exception:
-                                pass
-            else:
-                # AI 未开启时恢复绿色边框
-                self._cam_set_border(code, "playing")
+            # ---- 1) 计算显示尺寸并缩放（不修改原始帧，避免污染取流内核的缓存） ----
             h = lbl.winfo_height()
             w = lbl.winfo_width()
             if h < 50:
                 h = 240
             if w < 50:
                 w = 320
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(rgb)
-            img.thumbnail((w, h), Image.Resampling.LANCZOS)
-            self._cam_photos[code] = ImageTk.PhotoImage(image=img)
-            lbl.config(image=self._cam_photos[code])
-            # 播放状态由 _cam_poll 统一维护（含 fps / 画面中断提示），这里不覆盖
+            disp = self._fit_frame(raw, w, h)
+            # 放大窗口用原帧（引用即可，本方法不再改动它）
+            if self._cam_enlarge_active.get(code):
+                self._cam_latest[code] = raw
+
+            now_ms = time.time() * 1000.0
+            ai_on = bool(getattr(self, "mon_ai", None) and self.mon_ai.get())
+            viol = panel.get("ai_viol", 0)
+            persons = panel.get("ai_persons", []) or []
+
+            if ai_on:
+                due = (now_ms - panel.get("ai_ts", 0.0)) >= self._cam_ai_interval_ms()
+                if due:
+                    # ---- 2) AI 分析：在按 AI_INPUT_DIM 缩放的副本上跑 ----
+                    dim = self._cam_ai_input_dim()
+                    rh, rw = raw.shape[:2]
+                    if max(rh, rw) > dim:
+                        s = dim / float(max(rh, rw))
+                        ai_frame = cv2.resize(raw, (max(2, int(rw * s)),
+                                                    max(2, int(rh * s))),
+                                              interpolation=cv2.INTER_AREA)
+                    else:
+                        ai_frame = raw
+                    tracker = self._cam_tracker(code)
+                    if tracker is not None:
+                        persons, viol, line_y = tracker.analyze_only(ai_frame)
+                        panel["ai_ts"] = now_ms
+                        panel["ai_persons"] = persons
+                        panel["ai_viol"] = viol
+                        panel["ai_line_y"] = line_y
+                        panel["ai_shape"] = ai_frame.shape
+                        # 分析分辨率 -> 显示分辨率 的比例
+                        panel["ai_scale"] = disp.shape[1] / float(ai_frame.shape[1])
+                        # 人脸框带出来给 draw_boxes 画
+                        for p in persons:
+                            tr = getattr(tracker, "_tracks", {}).get(p["pid"])
+                            fa = getattr(tr, "face_cache", None) if tr is not None else None
+                            p["face"] = (fa or {}).get("face") if fa else None
+                        self._cam_ai_side_effects(code, panel, persons, viol,
+                                                  ai_frame.shape)
+                # ---- 3) 贴图：用缓存的框画在显示帧上（cv2 + 位图缓存，几乎零成本） ----
+                scale = panel.get("ai_scale")
+                if scale is None:
+                    scale = disp.shape[1] / float(raw.shape[1])
+                    panel["ai_scale"] = scale
+                tracker = self._cam_trackers.get(code)
+                if tracker is not None and persons:
+                    tracker.draw_boxes(disp, persons,
+                                       line_y=panel.get("ai_line_y"),
+                                       scale=scale, font_size=13)
+            else:
+                # AI 未开启时恢复绿色边框
+                self._cam_set_border(code, "playing")
+
+            # ---- 4) 转 RGB 贴到 Label ----
+            rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
+            photo = ImageTk.PhotoImage(image=Image.fromarray(rgb))
+            self._cam_photos[code] = photo
+            lbl.config(image=photo)
         except Exception as e:
             self._cam_set_status(code, "渲染失败：%s" % e, CAM_COLORS["error"])
+
+    def _cam_ai_side_effects(self, code, panel, persons, viol, ai_shape=None):
+        """AI 分析后的界面更新与异常上报（只在真正跑过分析的帧上执行）"""
+        level = self._density_level(persons, ai_shape or panel.get("ai_shape"))
+        panel["density_level"] = level
+        panel["persons"] = persons
+        self._cam_set_density(code, level)
+        # 状态边框：越界红 > 异常橙 > 正常绿
+        if viol:
+            self._cam_set_border(code, "error")
+        elif any(p.get("behaviors") for p in persons):
+            self._cam_set_border(code, "stalled")
+        else:
+            self._cam_set_border(code, "playing")
+        self._cam_set_ai(code, len(persons), viol)
+        # 顶部信息条与汇总限频刷新，避免每路每次分析都去改 Tk 控件
+        now_ms = time.time() * 1000.0
+        if (now_ms - getattr(self, "_info_ts", 0.0)) >= INFO_BAR_MS:
+            self._info_ts = now_ms
+            self._mon_ai_summary()
+            self._cam_update_info_bar()
+        # 逐人多次异常行为上报 03 智能终端 + 历史摘要
+        try:
+            alerts = self._behavior_tracker.update(code, persons)
+        except Exception:
+            alerts = []
+        if not alerts:
+            return
+        self._beep()
+        dev = self._dev_by_code(code)
+        for a in alerts:
+            text = "#%d %s" % (a["pid"], a["behavior"])
+            if a["crosses"] >= 2:
+                text += "（触线%d次）" % a["crosses"]
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            self._behavior_history.append({"ts": ts, "code": code, "text": text})
+            self._behavior_history = self._behavior_history[-50:]
+            panel["history"] = (panel.get("history", []) + [
+                {"ts": ts[-8:], "text": text}])[-10:]
+            try:
+                import linkage_bridge
+                linkage_bridge.report_behavior(
+                    device_code=code,
+                    behavior=a["behavior"],
+                    pid=a["pid"],
+                    crosses=a["crosses"],
+                    room_id=dev.room_id if dev else "",
+                    seat_no="",
+                    operator=self.user.username if self.user else "02_ai")
+            except Exception:
+                pass
+        self._cam_update_info_bar()
 
     def _cam_set_density(self, code, level):
         """更新单路密度显示"""
@@ -1466,6 +1638,9 @@ class App(object):
         density = panel.get("density")
         if density is None or not density.winfo_exists():
             return
+        if panel.get("density_text") == level:
+            return
+        panel["density_text"] = level
         try:
             density.config(text="密度：%s" % DENSITY_TEXT.get(level, level),
                            foreground=DENSITY_COLOR.get(level, GRAY_MUTED))
@@ -1484,6 +1659,12 @@ class App(object):
             text, color = "AI 识别中：%d 人，越界 %d" % (n_person, n_cross), CAM_AI_COLOR
         else:
             text, color = "AI 识别中：%d 人" % n_person, CAM_COLORS["playing"]
+        # 内容没变就不碰控件（Tk 的 config 会触发重绘，路数一多非常吃 CPU）
+        if panel.get("ai_text") == text:
+            return
+        panel["ai_text"] = text
+        panel["ai_n"] = n_person
+        panel["ai_cross"] = n_cross
         try:
             ai.config(text=text, foreground=color)
         except tk.TclError:
@@ -1495,18 +1676,11 @@ class App(object):
         abnormal = 0
         high = 0
         for panel in self._mon_panels.values():
-            ai = panel.get("ai")
-            try:
-                text = ai.cget("text") if ai is not None else ""
-            except tk.TclError:
-                continue
-            m = CAM_AI_RE.search(text or "")
-            if m is None:
+            if panel.get("ai_text") is None:
                 continue
             n += 1
-            total_p += int(m.group(1))
-            if m.group(2):
-                total_c += int(m.group(2))
+            total_p += panel.get("ai_n", 0)
+            total_c += panel.get("ai_cross", 0)
             for p in panel.get("persons", []) or []:
                 abnormal += len(p.get("behaviors", []))
             if panel.get("density_level") == DENSITY_HIGH:
@@ -1543,6 +1717,14 @@ class App(object):
                 pass
         self._cam_photos.pop(code, None)
         self._cam_seen.pop(code, None)
+        self._cam_latest.pop(code, None)
+        self._cam_enlarge_active.pop(code, None)
+        tracker = self._cam_trackers.pop(code, None)
+        if tracker is not None:
+            try:
+                tracker.stop()
+            except Exception:
+                pass
         if not quiet:
             self._cam_stopped_ui(code)
 
@@ -1553,12 +1735,21 @@ class App(object):
                 panel["label"].config(image="")
             self._cam_btn_text(code, "▶ 播放")
             self._cam_set_status(code, "未播放（已停止）", CAM_COLORS["idle"])
-            ai = panel.get("ai") if panel else None
+            ai = panel["ai"] if panel else None
             if ai is not None and ai.winfo_exists():
                 ai.config(text="", foreground=GRAY_MUTED)
+            if panel is not None:
+                panel["ai_text"] = None
+                panel["ai_n"] = 0
+                panel["ai_cross"] = 0
+                panel["ai_persons"] = []
+                panel["ai_viol"] = 0
+                panel["ai_ts"] = 0.0
+                panel["ai_scale"] = None
+                panel["ai_line_y"] = None
+                panel["density_level"] = None
+                panel["persons"] = []
             self._cam_set_density(code, DENSITY_LOW)
-            panel["density_level"] = None
-            panel["persons"] = []
             self._cam_set_border(code, "idle")
             self._mon_ai_summary()
             self._cam_update_info_bar()
@@ -1599,6 +1790,18 @@ class App(object):
         win.title(title)
         win.geometry("1100x720")
         win.transient(self.root)
+        # 只有放大窗口打开时才需要保留原帧，关闭后立刻释放，省内存也省拷贝
+        self._cam_enlarge_active[code] = True
+
+        def _on_close():
+            self._cam_enlarge_active.pop(code, None)
+            self._cam_latest.pop(code, None)
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+
+        win.protocol("WM_DELETE_WINDOW", _on_close)
 
         paned = ttk.PanedWindow(win, orient="horizontal")
         paned.pack(fill="both", expand=True, padx=6, pady=6)
@@ -1645,7 +1848,7 @@ class App(object):
             self._ai_settings["box_margin_pct"] = margin_var.get()
             self._ai_settings["haar_face"] = haar_var.get()
             self._save_ai_settings(self._ai_settings)
-            self._person_detector = None
+            self._reset_ai_trackers()
             status.config(text="AI 设置已保存并生效", foreground=CAM_COLORS["playing"])
 
         ttk.Button(set_box, text="保存到全局", command=apply_local).grid(
@@ -1656,24 +1859,26 @@ class App(object):
 
     def _cam_enlarge_tick(self, code, lbl, status, win, person_txt, hist_txt):
         if not win.winfo_exists():
+            self._cam_enlarge_active.pop(code, None)
+            self._cam_latest.pop(code, None)
             return
         frame = self._cam_latest.get(code)
         if frame is not None:
             try:
                 h = max(lbl.winfo_height(), 480)
                 w = max(lbl.winfo_width(), 640)
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                img = Image.fromarray(rgb)
-                img.thumbnail((w, h), Image.Resampling.LANCZOS)
-                photo = ImageTk.PhotoImage(image=img)
+                disp = self._fit_frame(frame, w, h)
+                rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
+                photo = ImageTk.PhotoImage(image=Image.fromarray(rgb))
                 lbl.photo_ref = photo
                 lbl.config(image=photo)
-                status.config(text="播放中", foreground=CAM_COLORS["playing"])
+                status.config(text="播放中（%dx%d）" % (disp.shape[1], disp.shape[0]),
+                              foreground=CAM_COLORS["playing"])
             except Exception as e:
                 status.config(text="渲染失败：%s" % e, foreground=CAM_COLORS["error"])
         else:
             status.config(text="等待视频帧…", foreground=GRAY_MUTED)
-        # 更新侧边栏
+        # 更新侧边栏（只在内容变化时写 Text，避免每 100ms 全量重写）
         panel = self._mon_panels.get(code)
         if panel is not None:
             persons = panel.get("persons", []) or []
@@ -1681,11 +1886,18 @@ class App(object):
             for p in persons:
                 acts = ", ".join(p.get("behaviors", [])) or p.get("action", "正常")
                 p_lines.append("#%d：%s" % (p.get("pid", 0), acts))
-            self._text_set(person_txt, "\n".join(p_lines) or "（暂无人员）")
+            p_text = "\n".join(p_lines) or "（暂无人员）"
+            if panel.get("_p_text") != p_text:
+                panel["_p_text"] = p_text
+                self._text_set(person_txt, p_text)
             history = panel.get("history", []) or []
-            h_lines = ["%s　%s" % (h["ts"], h["text"]) for h in history]
-            self._text_set(hist_txt, "\n".join(h_lines) or "（最近 10 条异常时间线）")
-        self.root.after(100, lambda: self._cam_enlarge_tick(code, lbl, status, win, person_txt, hist_txt))
+            h_lines = ["%s　%s" % (x["ts"], x["text"]) for x in history]
+            h_text = "\n".join(h_lines) or "（最近 10 条异常时间线）"
+            if panel.get("_h_text") != h_text:
+                panel["_h_text"] = h_text
+                self._text_set(hist_txt, h_text)
+        self.root.after(150, lambda: self._cam_enlarge_tick(code, lbl, status, win,
+                                                            person_txt, hist_txt))
 
     @staticmethod
     def _text_set(widget, text):
@@ -1708,8 +1920,17 @@ class App(object):
 
     def _cam_set_status(self, code, text, color):
         panel = self._mon_panels.get(code)
-        if panel is not None and panel.get("status") and panel["status"].winfo_exists():
+        if panel is None or panel.get("status") is None:
+            return
+        if not panel["status"].winfo_exists():
+            return
+        if panel.get("status_text") == text:
+            return
+        panel["status_text"] = text
+        try:
             panel["status"].config(text=text, foreground=color)
+        except tk.TclError:
+            pass
 
     def _cam_btn_text(self, code, text):
         panel = self._mon_panels.get(code)

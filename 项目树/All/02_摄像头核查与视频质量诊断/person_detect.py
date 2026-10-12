@@ -17,6 +17,7 @@
 import os
 import math
 from collections import deque
+from functools import lru_cache
 
 import cv2
 import numpy as np
@@ -54,9 +55,17 @@ _MOBILENET_PERSON_CLASS = 15
 _DNN_WARNED = False
 _MOG_WARNED = False
 
+# 三色语义（BGR）：绿=正常，橙=异常行为，红=越界/贴边
+COLOR_OK = (0, 200, 0)
+COLOR_WARN = (0, 165, 255)
+COLOR_BAD = (0, 0, 255)
+COLOR_FACE = (255, 255, 0)
+COLOR_LINE = (0, 165, 255)
 
+
+@lru_cache(maxsize=32)
 def _load_font(size=13):
-    """加载支持中文的字体，找不到则回退到默认字体"""
+    """加载支持中文的字体（带缓存，避免每帧都读字体文件）"""
     candidates = [
         os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "msyh.ttc"),
         os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts", "simhei.ttf"),
@@ -69,6 +78,79 @@ def _load_font(size=13):
             except Exception:
                 pass
     return ImageFont.load_default()
+
+
+# 中文标签位图缓存：同一串文字只渲染一次，之后只做小范围 alpha 混合。
+# 这是渲染提速的关键——原先每帧每人都要走一遍 PIL 全图转换 + 文字排版。
+_TEXT_PATCH_CACHE = {}
+_TEXT_PATCH_MAX = 512
+
+
+def text_patch(text, color_bgr, font_size=13):
+    """把一段文字渲染成 RGBA 小图并缓存。返回 (patch_rgba, w, h)；失败返回 None。"""
+    key = (text, tuple(color_bgr), int(font_size))
+    cached = _TEXT_PATCH_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        font = _load_font(font_size)
+        # 先量尺寸
+        tmp = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+        box = ImageDraw.Draw(tmp).textbbox((0, 0), text, font=font)
+        tw = max(1, box[2] - box[0] + 2)
+        th = max(1, box[3] - box[1] + 2)
+        img = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+        # PIL 用 RGB 顺序，调用方给的是 BGR
+        rgb = (int(color_bgr[2]), int(color_bgr[1]), int(color_bgr[0]), 255)
+        ImageDraw.Draw(img).text((-box[0] + 1, -box[1] + 1), text, font=font, fill=rgb)
+        patch = np.array(img, dtype=np.uint8)
+    except Exception:
+        return None
+    if len(_TEXT_PATCH_CACHE) >= _TEXT_PATCH_MAX:
+        _TEXT_PATCH_CACHE.clear()
+    _TEXT_PATCH_CACHE[key] = patch
+    return patch
+
+
+def clear_text_cache():
+    """清空标签位图缓存（切换字号/颜色方案后可调用）"""
+    _TEXT_PATCH_CACHE.clear()
+
+
+def blend_patch(frame_bgr, patch, x, y):
+    """把 RGBA 文字小图以 alpha 混合贴到 BGR 帧上（越界自动裁剪）。"""
+    if patch is None or frame_bgr is None:
+        return
+    fh, fw = frame_bgr.shape[:2]
+    ph, pw = patch.shape[:2]
+    x = int(x)
+    y = int(y)
+    if x >= fw or y >= fh:
+        return
+    x0 = max(0, x)
+    y0 = max(0, y)
+    x1 = min(fw, x + pw)
+    y1 = min(fh, y + ph)
+    if x1 <= x0 or y1 <= y0:
+        return
+    sub = patch[y0 - y:y1 - y, x0 - x:x1 - x]
+    alpha = sub[:, :, 3:4].astype(np.float32) / 255.0
+    if not alpha.any():
+        return
+    region = frame_bgr[y0:y1, x0:x1].astype(np.float32)
+    # sub 是 RGBA(RGB 序)，转成 BGR 再混合
+    region = region * (1.0 - alpha) + sub[:, :, :3][:, :, ::-1].astype(np.float32) * alpha
+    frame_bgr[y0:y1, x0:x1] = region.astype(np.uint8)
+
+
+def draw_label(frame_bgr, text, color_bgr, x, y, font_size=13):
+    """在 (x, y) 左上角贴一段中文标签（带黑底提高可读性）"""
+    patch = text_patch(text, color_bgr, font_size)
+    if patch is None:
+        return
+    ph, pw = patch.shape[:2]
+    blend_patch(frame_bgr, patch, x, y)
+    del ph, pw
 
 
 def _centroid(rect):
@@ -689,64 +771,91 @@ class PersonTracker(object):
         self.stop()
 
     # ---------------- 绘制 ----------------
+    def analyze_only(self, frame, boundary_ratio=0.5):
+        """只做检测/跟踪/行为分析，**不绘制**。
+
+        返回 (persons, violations, line_y)。persons[i]["rect"] 为像素坐标。
+        把"分析"与"落笔"拆开，界面层就能按低频率跑分析、按高频率贴图，
+        既省 CPU 又不会出现"框时有时无"的闪烁。
+        """
+        fh = frame.shape[0]
+        line_y = int(fh * boundary_ratio)
+        tracks = self.update(frame, boundary_ratio=boundary_ratio)
+        persons = []
+        for pid, tr in sorted(tracks.items()):
+            action, bad, behaviors = self.analyze(frame, tr,
+                                                 boundary_ratio=boundary_ratio)
+            persons.append({"pid": pid, "rect": tr.rect, "action": action,
+                            "bad": bad, "crosses": tr.crosses,
+                            "behaviors": behaviors,
+                            "density_level": self._density_level})
+        violations = sum(1 for p in persons if p["bad"])
+        return persons, violations, line_y
+
+    @staticmethod
+    def person_color(person):
+        """三色：红=越界/贴边，橙=异常行为未越界，绿=正常"""
+        if person.get("bad"):
+            return COLOR_BAD
+        if person.get("behaviors"):
+            return COLOR_WARN
+        return COLOR_OK
+
+    def draw_boxes(self, frame, persons, line_y=None, scale=1.0, offset=(0, 0),
+                   font_size=13, draw_line=True):
+        """把 analyze_only 的结果画到帧上（矩形用 cv2，中文标签走位图缓存）。
+
+        scale/offset 用于把"分析分辨率"下的坐标映射到"显示分辨率"。
+        """
+        fh, fw = frame.shape[:2]
+        if draw_line and line_y is not None:
+            ly = int(line_y * scale + offset[1])
+            if 0 <= ly < fh:
+                cv2.line(frame, (0, ly), (fw, ly), COLOR_LINE, 1)
+                draw_label(frame, "警戒线", COLOR_LINE,
+                           max(2, offset[0] + 6), max(0, ly - 18), font_size)
+        if not persons:
+            return
+        ox, oy = offset
+        for p in persons:
+            x, y, w, h = p["rect"]
+            color = self.person_color(p)
+            rx = int(x * scale + ox)
+            ry = int(y * scale + oy)
+            rw = max(2, int(w * scale))
+            rh = max(2, int(h * scale))
+            cv2.rectangle(frame, (rx, ry), (rx + rw, ry + rh), color, 1)
+            # 人脸小框（微表情辅助，青色）
+            fa = p.get("face")
+            if fa is not None:
+                fx, fy, fw2, fh2 = fa
+                cv2.rectangle(frame,
+                              (int(fx * scale + ox), int(fy * scale + oy)),
+                              (int((fx + fw2) * scale + ox),
+                               int((fy + fh2) * scale + oy)), COLOR_FACE, 1)
+            label = "#%d %s" % (p["pid"], p["action"])
+            if p.get("crosses", 0) >= 2:
+                label += " ×%d" % p["crosses"]
+            ty = ry - 17 if ry > 20 else ry + rh + 2
+            draw_label(frame, label, color, rx, ty, font_size)
+
     def draw(self, frame, boundary_ratio=0.5):
         """
         返回 (标记后的帧, 越界人数, 逐人信息列表)
         逐人信息: {"pid", "rect", "action", "bad", "crosses",
                    "behaviors", "density_level"}
+
+        注意：本方法会在传入的 frame 上**原地**绘制并返回同一个数组，
+        调用方若需要保留原图请先自行 copy。
         """
-        fh, fw = frame.shape[:2]
-        line_y = int(fh * boundary_ratio)
-        tracks = self.update(frame, boundary_ratio=boundary_ratio)
-
-        persons = []
-        for pid, tr in sorted(tracks.items()):
-            action, bad, behaviors = self.analyze(frame, tr,
-                                                  boundary_ratio=boundary_ratio)
-            persons.append({"pid": pid, "rect": tr.rect, "action": action,
-                            "bad": bad, "crosses": tr.crosses,
-                            "behaviors": behaviors,
-                            "density_level": self._density_level})
-            # 三色：红=越界/贴边，橙=异常行为未越界，绿=正常
-            if bad:
-                color = (0, 0, 255)
-            elif behaviors:
-                color = (0, 165, 255)
-            else:
-                color = (0, 200, 0)
-            x, y, w, h = tr.rect
-            cv2.rectangle(frame, (x, y), (x + w, y + h), color, 1)
-            # 人脸小框（微表情辅助，青色）
-            fa = getattr(tr, "face_cache", None)
-            if fa and fa.get("face") is not None:
-                fx, fy, fw2, fh2 = fa["face"]
-                cv2.rectangle(frame, (fx, fy), (fx + fw2, fy + fh2),
-                              (255, 255, 0), 1)
-
-        cv2.line(frame, (0, line_y), (fw, line_y), (0, 165, 255), 1)
-
-        # PIL 画中文标签
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        pil = Image.fromarray(rgb)
-        draw = ImageDraw.Draw(pil)
-        font = _load_font(13)
+        persons, violations, line_y = self.analyze_only(
+            frame, boundary_ratio=boundary_ratio)
+        # 人脸框一并带出来，交给 draw_boxes 统一绘制
         for p in persons:
-            if p["bad"]:
-                color = (0, 0, 255)
-            elif p["behaviors"]:
-                color = (0, 165, 255)
-            else:
-                color = (0, 200, 0)
-            x, y, w, h = p["rect"]
-            label = "#%d %s" % (p["pid"], p["action"])
-            if p["crosses"] >= 2:
-                label += " ×%d" % p["crosses"]
-            fill = (color[2], color[1], color[0])
-            ty = y - 18 if y > 24 else y + h + 2
-            draw.text((x, ty), label, font=font, fill=fill)
-        draw.text((10, line_y - 20), "警戒线", font=font, fill=(255, 165, 0))
-        frame = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-        violations = sum(1 for p in persons if p["bad"])
+            tr = self._tracks.get(p["pid"])
+            fa = getattr(tr, "face_cache", None) if tr is not None else None
+            p["face"] = (fa or {}).get("face") if fa else None
+        self.draw_boxes(frame, persons, line_y=line_y)
         return frame, violations, persons
 
 
