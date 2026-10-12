@@ -749,11 +749,18 @@ class TerminalApp(object):
             self._cam_set_status(url, "渲染失败：%s" % e, "#c00")
 
     def _person_detector_for(self, url):
-        """取（或创建）该路的 AI 检测器"""
+        """取（或创建）该路的 AI 检测器（与 02 的算法参数保持一致）"""
         det = self._person_detectors.get(url)
         if det is not None:
             return det
         try:
+            det = pd_mod.PersonTracker(max_input_dim=1280,
+                                       boundary_ratio=BOUNDARY_RATIO,
+                                       confirm_frames=4,
+                                       min_hits=2)
+            self._person_detectors[url] = det
+        except TypeError:
+            # 兼容尚未升级的 person_detect 版本
             det = pd_mod.PersonTracker(max_input_dim=1280)
             self._person_detectors[url] = det
         except Exception as e:

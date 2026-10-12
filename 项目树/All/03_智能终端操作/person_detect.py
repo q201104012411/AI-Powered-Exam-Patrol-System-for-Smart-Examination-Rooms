@@ -207,13 +207,14 @@ class _Track(object):
     """一个人的跟踪状态"""
     __slots__ = ("pid", "rect", "missed", "centroids", "heights", "aspects",
                  "prev_side", "crosses", "cross_epochs",
-                 "face_cache", "face_age", "action_hist",
+                 "face_cache", "face_age", "action_hist", "hits",
                  "vx", "vy", "last_seen_frame")
 
     def __init__(self, pid, rect, line_y):
         self.pid = pid
         self.rect = rect
         self.missed = 0
+        self.hits = 0                       # 累计被检测命中的次数（确认用）
         self.centroids = deque(maxlen=20)   # 最近 20 帧质心，用于东张西望判定
         self.heights = deque(maxlen=20)     # 最近 20 帧框高，用于低头判定
         self.aspects = deque(maxlen=8)      # 最近 8 帧宽高比，用于偏转/前倾确认
@@ -253,7 +254,8 @@ class PersonTracker(object):
                  max_input_dim=640, detect_stride=1, dense_mode=True,
                  enable_face_dense=False, dnn_threshold=0.5,
                  boundary_ratio=0.92, min_box_w=16, min_box_h=32,
-                 max_aspect=1.8, confirm_frames=3):
+                 max_aspect=1.8, confirm_frames=3,
+                 match_dist_ratio=0.12, min_hits=2):
         if not hasattr(cv2, "HOGDescriptor"):
             raise RuntimeError(
                 "当前 OpenCV 未包含 HOGDescriptor，无法运行 AI 框选识别。\n"
@@ -280,6 +282,12 @@ class PersonTracker(object):
         self.min_box_h = int(min_box_h)           # 最小框高（像素）
         self.max_aspect = float(max_aspect)       # 框宽/高超过此值视为误检（太扁）
         self.confirm_frames = max(1, int(confirm_frames))  # 行为需连续确认的帧数
+        # 匹配半径按画面宽度比例自适应（密集场景下固定 90px 会导致 ID 互抢）
+        self.match_dist_ratio = float(match_dist_ratio)
+        # 最少连续命中次数：只有命中的轨迹才算"确认的人"，
+        # 单帧噪声（反光/桌椅误检）不会计入人数
+        self.min_hits = max(1, int(min_hits))
+        self._last_frame_w = 0
 
         self._tracks = {}                         # pid -> _Track
         self._next_pid = 1
@@ -569,22 +577,47 @@ class PersonTracker(object):
             remaining_cols.remove(bj)
         return np.array(row_ind, dtype=int), np.array(col_ind, dtype=int)
 
-    def _match_and_update(self, rects, line_y):
+    def _match_dist(self, frame_w):
+        """匹配半径随画面宽度自适应。
+
+        原实现固定 90px：在 416px 宽的 AI 分析帧上，90px 接近画面宽度的 22%，
+        相邻两个考生会互相"抢"轨迹，表现为编号乱跳、人数忽多忽少。
+        这里改成按画面宽度取比例（默认 12%），并受 max_dist 作为上限约束。
+        """
+        adaptive = int(frame_w * self.match_dist_ratio)
+        return max(12, min(int(self.max_dist), adaptive))
+
+    @staticmethod
+    def _pair_cost(tr_rect, dt_rect, dist, max_dist):
+        """轨迹-检测框的关联代价：质心距离 + IoU 共同决定。
+
+        纯质心距离在密集场景里会把"隔壁同学"当成同一个人；加入 IoU 后，
+        重叠度高的候选会被优先匹配，ID 切换明显减少。
+        """
+        if dist > max_dist:
+            return 1e6
+        iou = _iou(tr_rect, dt_rect)
+        # 距离项归一化到 0~1，IoU 项取 1-iou；IoU 权重更大
+        d_norm = dist / float(max_dist)
+        return 0.35 * d_norm + 0.65 * (1.0 - iou)
+
+    def _match_and_update(self, rects, line_y, frame_w=None):
         """用匈牙利或贪婪最近邻把检测框匹配到已有轨迹"""
         cents = [_centroid(r) for r in rects]
         tracks = list(self._tracks.items())
         n_tr, n_dt = len(tracks), len(rects)
+        max_dist = self._match_dist(frame_w or (self._last_frame_w or 640))
 
         assigned_tr = set()
         assigned_dt = set()
 
         if n_tr > 0 and n_dt > 0:
-            cost = np.zeros((n_tr, n_dt), dtype=float)
+            cost = np.full((n_tr, n_dt), 1e6, dtype=float)
             for i, (_, tr) in enumerate(tracks):
                 tcx, tcy = _centroid(tr.rect)
                 for j, (cx, cy) in enumerate(cents):
                     d = math.hypot(cx - tcx, cy - tcy)
-                    cost[i, j] = d if d <= self.max_dist else 1e6
+                    cost[i, j] = self._pair_cost(tr.rect, rects[j], d, max_dist)
 
             if _HAS_SCIPY:
                 row_ind, col_ind = linear_sum_assignment(cost)
@@ -597,6 +630,7 @@ class PersonTracker(object):
                 pid, tr = tracks[i]
                 tr.update_motion(rects[j])
                 tr.missed = 0
+                tr.hits += 1
                 tr.last_seen_frame = self._frame_no
                 cx, cy = cents[j]
                 tr.centroids.append((cx, cy))
@@ -627,8 +661,66 @@ class PersonTracker(object):
                 continue
             tr = _Track(self._next_pid, rect, line_y)
             tr.last_seen_frame = self._frame_no
+            tr.hits = 1
             self._tracks[self._next_pid] = tr
             self._next_pid += 1
+
+        self._merge_duplicate_tracks()
+
+    @staticmethod
+    def _same_person(a, b):
+        """判断两个框是否"同一个人"。
+
+        不能用纯 IoU：小框对偏移极其敏感——26×40 的框偏移 6px，IoU 只有 0.49，
+        会被 0.55 的阈值判成两个人，于是同一人刷出两条轨迹、人数虚高、编号乱跳。
+        改用"中心距 + 尺寸相近"判据，对小框同样稳健。
+        """
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+        if ah <= 0 or bh <= 0 or aw <= 0 or bw <= 0:
+            return False
+        acx, acy = ax + aw / 2.0, ay + ah / 2.0
+        bcx, bcy = bx + bw / 2.0, by + bh / 2.0
+        dist = math.hypot(acx - bcx, acy - bcy)
+        # 中心距不超过较矮那个框的一半高度（且至少 10px）
+        limit = max(10.0, 0.5 * min(ah, bh))
+        if dist > limit:
+            return False
+        # 尺寸要相近（避免把大人和小孩/远近不同的人合并）
+        rw = aw / float(bw)
+        rh = ah / float(bh)
+        return 0.6 <= rw <= 1.67 and 0.6 <= rh <= 1.67
+
+    def _merge_duplicate_tracks(self, max_missed_for_merge=1):
+        """合并"同一个人被检出两个框"造成的重复轨迹。
+
+        HOG 在密集画面上经常对同一人给出两个略有偏移的框，于是同一个人占了
+        两个编号、人数虚高。这里把判定为同一人的两条轨迹合并：保留命中次数
+        多的那条，把跨线次数继承过来，删掉另一条。
+        """
+        items = [(pid, tr) for pid, tr in self._tracks.items()
+                 if tr.missed <= max_missed_for_merge and tr.hits >= self.min_hits]
+        if len(items) < 2:
+            return
+        removed = set()
+        for a in range(len(items)):
+            pid_a, tr_a = items[a]
+            if pid_a in removed:
+                continue
+            for b in range(a + 1, len(items)):
+                pid_b, tr_b = items[b]
+                if pid_b in removed:
+                    continue
+                if not self._same_person(tr_a.rect, tr_b.rect):
+                    continue
+                # 保留命中多、更早出现的轨迹
+                if (tr_b.hits, -pid_b) > (tr_a.hits, -pid_a):
+                    pid_a, tr_a, pid_b, tr_b = pid_b, tr_b, pid_a, tr_a
+                tr_a.crosses = max(tr_a.crosses, tr_b.crosses)
+                tr_a.hits = max(tr_a.hits, tr_b.hits)
+                removed.add(pid_b)
+        for pid in removed:
+            self._tracks.pop(pid, None)
 
     def _predict_tracks(self, line_y):
         """非检测帧：用匀速预测更新已有轨迹"""
@@ -652,6 +744,7 @@ class PersonTracker(object):
     def update(self, frame, boundary_ratio=None):
         """每帧调用：检测 -> 匹配/预测 -> 更新跨线计数，返回 tracks 列表"""
         self._frame_no += 1
+        self._last_frame_w = frame.shape[1]
         fh = frame.shape[0]
         if boundary_ratio is None:
             boundary_ratio = self.boundary_ratio
@@ -660,13 +753,23 @@ class PersonTracker(object):
         run_detect = ((self._frame_no - 1) % self.detect_stride) == 0
         if run_detect:
             rects = self._detect(frame)
-            self._match_and_update(rects, line_y)
+            self._match_and_update(rects, line_y, frame_w=self._last_frame_w)
         else:
             self._predict_tracks(line_y)
+            self._merge_duplicate_tracks()
 
         fw = frame.shape[1]
         self._density_level = _density_level(len(self._tracks), fh * fw)
         return self._tracks
+
+    def confirmed_tracks(self):
+        """只返回"连续命中达到 min_hits"的轨迹。
+
+        单次命中多半是噪声（反光、桌椅误检），把它们算进人数就是人数虚高的
+        直接来源。界面/告警都应以这里的结果为准。
+        """
+        return {pid: tr for pid, tr in self._tracks.items()
+                if tr.hits >= self.min_hits}
 
     # ---------------- 人脸 / 眼神（微表情近似） ----------------
     def _face_analyze(self, frame, track, total_persons):
@@ -835,6 +938,7 @@ class PersonTracker(object):
         self._density_level = "low"
         self._count_hist.clear()
         self._stable_count = 0
+        self._last_frame_w = 0
 
     def start(self):
         """启动/复位跟踪器（与 stop 后状态一致即可继续运行）"""
@@ -845,18 +949,23 @@ class PersonTracker(object):
         return self._stable_count
 
     # ---------------- 绘制 ----------------
-    def analyze_only(self, frame, boundary_ratio=None):
+    def analyze_only(self, frame, boundary_ratio=None, min_hits=None):
         """只做检测/跟踪/行为分析，**不绘制**。
 
         返回 (persons, violations, line_y)。persons[i]["rect"] 为像素坐标。
         把"分析"与"落笔"拆开，界面层就能按低频率跑分析、按高频率贴图，
         既省 CPU 又不会出现"框时有时无"的闪烁。
+
+        min_hits 可覆盖"最少连续命中次数"：视频流保持默认（滤掉单帧噪声），
+        对单张图片做分析时传 min_hits=1。
         """
         fh = frame.shape[0]
         if boundary_ratio is None:
             boundary_ratio = self.boundary_ratio
         line_y = int(fh * boundary_ratio)
-        tracks = self.update(frame, boundary_ratio=boundary_ratio)
+        self.update(frame, boundary_ratio=boundary_ratio)
+        need = self.min_hits if min_hits is None else max(1, int(min_hits))
+        tracks = {pid: tr for pid, tr in self._tracks.items() if tr.hits >= need}
         persons = []
         for pid, tr in sorted(tracks.items()):
             action, bad, behaviors = self.analyze(frame, tr,
@@ -920,7 +1029,7 @@ class PersonTracker(object):
             ty = ry - 17 if ry > 20 else ry + rh + 2
             draw_label(frame, label, color, rx, ty, font_size)
 
-    def draw(self, frame, boundary_ratio=0.5):
+    def draw(self, frame, boundary_ratio=0.5, min_hits=None):
         """
         返回 (标记后的帧, 越界人数, 逐人信息列表)
         逐人信息: {"pid", "rect", "action", "bad", "crosses",
@@ -928,9 +1037,10 @@ class PersonTracker(object):
 
         注意：本方法会在传入的 frame 上**原地**绘制并返回同一个数组，
         调用方若需要保留原图请先自行 copy。
+        单张图片分析请传 min_hits=1（默认要求连续命中，用于滤掉视频单帧噪声）。
         """
         persons, violations, line_y = self.analyze_only(
-            frame, boundary_ratio=boundary_ratio)
+            frame, boundary_ratio=boundary_ratio, min_hits=min_hits)
         # 人脸框一并带出来，交给 draw_boxes 统一绘制
         for p in persons:
             tr = self._tracks.get(p["pid"])

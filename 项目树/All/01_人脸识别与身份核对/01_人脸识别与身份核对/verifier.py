@@ -483,6 +483,15 @@ class FaceVerifier:
             self.logger.log(rec)
             return rec
 
+        # ---- 多帧融合预判（降低"本人被判不通过"）----
+        # 连拍多帧时，单帧可能因瞬间模糊/闭眼/侧脸而低于阈值；先把多帧特征
+        # 按画质加权融合成一个模板再比对。融合分只用于**提前通过**，不会用来
+        # 提前拒绝——拒绝仍走下面逐帧流程，保证不放过任何一帧可用的证据。
+        fused_rec = self._try_fused_pass(candidate_id, images, capture_token, thr,
+                                        candidate, id_checked, witness, auto_confirm)
+        if fused_rec is not None:
+            return fused_rec
+
         last = None
         for i, img in enumerate(images[:config.MAX_RETRY], start=1):
             live = liveness.check(capture_token, self.device_id, image=img)
@@ -543,6 +552,65 @@ class FaceVerifier:
                 return rec
             last = rec
         return last
+
+    def _try_fused_pass(self, candidate_id, images, capture_token, thr, candidate,
+                        id_checked, witness, auto_confirm):
+        """多帧融合预判：仅用于**提前通过**，绝不用来提前拒绝。
+
+        返回 PASS 的 VerifyRecord，或 None（表示融合分不够/不适用，继续逐帧流程）。
+        安全前提：
+          · 只有库中存在"其他人"且融合分明显高于最像的其他人时才自动放行，
+            避免把撞脸风险交给平均后的模板；
+          · 现场性（活体令牌）仍按原规则校验，不因融合而放宽；
+          · 至少需要 2 帧才做融合，单帧行为与旧版完全一致。
+        """
+        if len(images) < 2 or not hasattr(self.index, "score_multi"):
+            return None
+        # 现场性：融合不改变活体判定，严格模式下不通过就直接走原流程报错
+        live = liveness.check(capture_token, self.device_id, image=images[0])
+        age = liveness.capture_age(capture_token)
+        if live.status == liveness.STATUS_FAIL:
+            return None
+        relax = self._relax_note(live, capture_token)
+        if live.status != liveness.STATUS_PASS and relax is None:
+            return None
+
+        try:
+            score, info = self.index.score_multi(candidate_id, images)
+        except FaceError:
+            return None
+        except Exception:
+            return None
+
+        rep = (info or {}).get("quality")
+        result, code, reason, extra = self._judge(score, thr, config.GRAY_MARGIN_1TO1,
+                                                  info, self._pose_extreme(rep))
+        if result != RESULT_PASS:
+            return None
+        # 撞脸复核：融合分必须明显高于"最像的其他人"
+        other = (info or {}).get("best_other_score")
+        margin = float(getattr(config, "TWIN_MARGIN", 0.08))
+        if other is not None and (score - float(other)) < margin:
+            return None
+
+        kw = dict(extra, retry_count=int(info.get("fused_frames", len(images))),
+                  witness=witness)
+        kw.setdefault("manual_required", False)
+        rec = self._rec(candidate_id, "1:1", result, code,
+                        reason="%s（多帧融合，%d 帧；证件由人工目视核对）"
+                               % (reason, info.get("fused_frames", len(images))),
+                        score=round(score, 4), threshold=thr, liveness=live.status,
+                        capture_age_sec=age, consent_status=candidate.consent_status,
+                        gray_zone=False, **kw)
+        self._apply_quality(rec, info)
+        self._apply_edge(rec, info)
+        self._apply_document(rec, candidate)
+        self._apply_element_meta(rec, id_checked)
+        self._mark_relaxed(rec, relax)
+        self.logger.log(rec)
+        if auto_confirm:
+            self._auto_confirm(rec, candidate)
+        return rec
 
     def _auto_confirm(self, rec: VerifyRecord, candidate):
         """

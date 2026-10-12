@@ -929,7 +929,10 @@ class App(object):
                          ("detect_stride", 2 if settings.get("mode") == "energy" else 1),
                          ("enable_face_dense", settings.get("haar_face", True)),
                          ("boundary_ratio", self._ai_boundary_ratio()),
-                         ("confirm_frames", 4 if settings.get("mode") != "energy" else 3)):
+                         ("confirm_frames", 4 if settings.get("mode") != "energy" else 3),
+                         # 视频流要求连续两帧命中才算"确认的人"，滤掉单帧噪声
+                         ("min_hits", 2),
+                         ("match_dist_ratio", 0.12)):
             if key in params:
                 kw[key] = val
         return kw

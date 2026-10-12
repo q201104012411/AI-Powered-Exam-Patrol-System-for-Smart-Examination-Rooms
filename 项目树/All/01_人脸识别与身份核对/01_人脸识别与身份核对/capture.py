@@ -137,15 +137,29 @@ def capture_best(n=5, warmup=10, camera_index=0, device_id="GATE-A-01",
     留档失败**不阻断核验**：现场图与令牌照常返回，错误写进 token["save_error"]，
     由界面提示。这样即使磁盘/权限异常，也不至于"抓拍功能无法使用"。
     """
+    frame, _frames, token, path = capture_best_multi(
+        n=n, warmup=warmup, camera_index=camera_index, device_id=device_id,
+        save=save, timeout_sec=timeout_sec)
+    return frame, token, path
+
+
+def capture_best_multi(n=5, warmup=10, camera_index=0, device_id="GATE-A-01",
+                       save=True, timeout_sec=CAPTURE_TIMEOUT_SEC):
+    """同 capture_best，但**保留全部连拍帧**：返回 (最清晰帧, 全部帧, token, 留档路径)。
+
+    保留多帧是为了让核验器做"多帧特征融合"——单帧可能恰好模糊/闭眼/侧脸，
+    融合后能显著降低"本人被判不通过"的概率。
+    """
     frames, token = capture_frames(n=n, warmup=warmup, camera_index=camera_index,
                                    device_id=device_id, timeout_sec=timeout_sec)
     frame, score = best_frame(frames)
     token["sharpness"] = round(float(score), 2)
     token["frame_count"] = len(frames)
+    token["kept_frames"] = len(frames)
     path = None
     if save:
         try:
             path = save_capture(frame, device_id=device_id)
         except Exception as e:
             token["save_error"] = str(e)      # 留档失败不阻断核验，只记入令牌
-    return frame, token, path
+    return frame, frames, token, path

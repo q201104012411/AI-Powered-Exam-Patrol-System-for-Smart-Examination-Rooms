@@ -88,6 +88,8 @@ class TestPersonTracker(unittest.TestCase):
         tracker = pd.PersonTracker(dense_mode=True, detect_stride=1,
                                    max_input_dim=1920)
         img = self._make_person_scene(n=40)
+        # 视频流场景：连续两帧都检出才算"确认的人"（滤掉单帧噪声）
+        tracker.draw(img, boundary_ratio=0.5)
         _, violations, persons = tracker.draw(img, boundary_ratio=0.5)
         self.assertIsInstance(violations, int)
         # 合成样本不一定能让 HOG 召回全部 40 人，但应能召回一部分；
@@ -262,6 +264,107 @@ class TestAccuracyFixes(unittest.TestCase):
         tracker.stop()
         self.assertEqual(tracker.stable_count(), 0)
         self.assertEqual(len(tracker._count_hist), 0)
+
+
+class TestTrackingFramework(unittest.TestCase):
+    """跟踪框架：自适应匹配半径、IoU 关联、重复轨迹合并、单帧噪声抑制"""
+
+    def test_match_distance_scales_with_frame_width(self):
+        """匹配半径应随画面宽度自适应，且不超过 max_dist 上限"""
+        tracker = pd.PersonTracker(max_dist=90, match_dist_ratio=0.12)
+        self.assertEqual(tracker._match_dist(416), 49)    # 416*0.12 ≈ 49
+        self.assertEqual(tracker._match_dist(1920), 90)   # 受 max_dist 封顶
+        self.assertGreaterEqual(tracker._match_dist(100), 12)  # 有下限
+
+    def test_pair_cost_prefers_overlap(self):
+        """重叠度高的候选代价必须更低（否则密集场景会抢轨迹）"""
+        tr = (100, 100, 60, 150)
+        overlapping = (105, 105, 60, 150)   # 与轨迹高度重叠
+        far_but_close = (160, 100, 60, 150)  # 质心更近但不重叠
+        d_overlap = 7.1
+        d_far = 60.0
+        c_overlap = pd.PersonTracker._pair_cost(tr, overlapping, d_overlap, 90)
+        c_far = pd.PersonTracker._pair_cost(tr, far_but_close, d_far, 90)
+        self.assertLess(c_overlap, c_far,
+                        "重叠框的关联代价应低于只是质心近的框")
+
+    def test_pair_cost_rejects_beyond_max_dist(self):
+        cost = pd.PersonTracker._pair_cost((0, 0, 10, 10), (500, 500, 10, 10),
+                                           700.0, 90)
+        self.assertGreaterEqual(cost, 1e6)
+
+    def test_single_frame_noise_is_not_confirmed(self):
+        """只命中一次的轨迹不应计入人数（单帧反光/桌椅误检）"""
+        tracker = pd.PersonTracker(dense_mode=True, max_input_dim=1920, min_hits=2)
+        img = np.full((720, 1280, 3), 235, dtype=np.uint8)
+        TestPersonTracker._draw_realistic_person(img, 640, 360, height=220)
+        # 人为放一条只命中一次的轨迹
+        tracker._tracks[99] = pd._Track(99, (600, 300, 80, 200), 662)
+        tracker._tracks[99].hits = 1
+        self.assertNotIn(99, tracker.confirmed_tracks())
+        tracker._tracks[99].hits = 2
+        self.assertIn(99, tracker.confirmed_tracks())
+
+    def test_duplicate_tracks_are_merged(self):
+        """同一个人被检出两个框时应合并，避免人数虚高"""
+        tracker = pd.PersonTracker(max_input_dim=1920, min_hits=1)
+        tracker._tracks[1] = pd._Track(1, (100, 100, 60, 150), 662)
+        tracker._tracks[2] = pd._Track(2, (104, 103, 60, 150), 662)  # 几乎重合
+        tracker._tracks[1].hits = 5
+        tracker._tracks[2].hits = 5
+        tracker._tracks[2].crosses = 3
+        tracker._merge_duplicate_tracks()
+        self.assertEqual(len(tracker._tracks), 1, "重复轨迹应合并成一条")
+        left = list(tracker._tracks.values())[0]
+        self.assertEqual(left.crosses, 3, "合并时应继承跨线次数")
+
+    def test_small_box_offset_is_still_same_person(self):
+        """回归：小框偏移 6px 时 IoU 只有约 0.49，不能因此被判成两个人。
+
+        这是"人数虚高 + 编号乱跳"的直接成因（旧实现用 IoU>=0.55 判重，
+        26×40 的框偏移 6px 恰好漏判）。
+        """
+        a = (100, 100, 26, 40)
+        b = (106, 106, 26, 40)          # 中心偏移约 8.5px
+        self.assertLess(pd._iou(a, b), 0.55,
+                        "构造前提：这两个框的 IoU 低于旧阈值")
+        self.assertTrue(pd.PersonTracker._same_person(a, b),
+                        "小框小幅偏移必须判为同一个人")
+
+    def test_same_person_rejects_far_or_different_size(self):
+        """相距较远、或尺寸差异过大的框不能判为同一人"""
+        a = (100, 100, 26, 40)
+        self.assertFalse(pd.PersonTracker._same_person(a, (160, 100, 26, 40)))  # 太远
+        self.assertFalse(pd.PersonTracker._same_person(a, (102, 102, 26, 120)))  # 尺寸差太多
+        self.assertFalse(pd.PersonTracker._same_person(a, (100, 100, 0, 40)))    # 退化框
+
+    def test_duplicate_small_boxes_merged_end_to_end(self):
+        """端到端：同一人被检出两个偏移小框，人数不应翻倍"""
+        tracker = pd.PersonTracker(dense_mode=True, max_input_dim=1920, min_hits=1)
+        dupes = [(200, 300, 26, 40), (206, 306, 26, 40)]   # 同一个人的两个框
+        tracker._detect = lambda frame: list(dupes)
+        frame = np.zeros((234, 416, 3), dtype=np.uint8)
+        tracker.update(frame, boundary_ratio=0.92)
+        self.assertEqual(len(tracker.confirmed_tracks()), 1,
+                         "同一人的重复框应合并为一个人")
+
+    def test_distinct_persons_are_not_merged(self):
+        """相隔较远的两条轨迹不能被误合并"""
+        tracker = pd.PersonTracker(max_input_dim=1920, min_hits=1)
+        tracker._tracks[1] = pd._Track(1, (100, 100, 60, 150), 662)
+        tracker._tracks[2] = pd._Track(2, (500, 100, 60, 150), 662)
+        tracker._tracks[1].hits = 5
+        tracker._tracks[2].hits = 5
+        tracker._merge_duplicate_tracks()
+        self.assertEqual(len(tracker._tracks), 2)
+
+    def test_min_hits_can_be_overridden_for_single_image(self):
+        """单张图片分析可传 min_hits=1 立即得到结果"""
+        tracker = pd.PersonTracker(dense_mode=True, max_input_dim=1920)
+        img = np.full((720, 1280, 3), 235, dtype=np.uint8)
+        TestPersonTracker._draw_realistic_person(img, 640, 360, height=220)
+        persons, _, _ = tracker.analyze_only(img, min_hits=1)
+        self.assertIsInstance(persons, list)
 
 
 class TestHelpers(unittest.TestCase):

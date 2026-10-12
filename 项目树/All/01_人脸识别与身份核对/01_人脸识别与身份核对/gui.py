@@ -72,6 +72,7 @@ class FaceVerifyGUI:
         self._video_seq = -1            # 已显示的帧序号
         self._photo = None              # 防止 tkinter 回收图像对象
         self.live_image = None          # 内存中的现场图像（OpenCV BGR）
+        self.live_frames = []           # 连拍帧（多帧特征融合用）
         # 自动核验（仅所有者面板可开启）
         self.auto_verify = tk.BooleanVar(value=False)
         self._verifying = False         # 防止自动核验并发叠加
@@ -2398,6 +2399,7 @@ class FaceVerifyGUI:
                                    % (s.status_text() if s else ""))
             return
         self.live_image = frame
+        self.live_frames = [frame]      # 实时取帧只有一帧，走单帧流程
         self.live_token = liveness.make_token(self.device_var.get().strip() or "GATE-A-01",
                                               source="camera")
         self.live_desc = "实时视频取帧（%s）" % time.strftime("%H:%M:%S")
@@ -2505,21 +2507,24 @@ class FaceVerifyGUI:
             idx = 0
         def work():
             try:
-                frame, token, path = capture.capture_best(
+                # 保留全部连拍帧：核验时做多帧特征融合，降低"本人被判不通过"
+                frame, frames, token, path = capture.capture_best_multi(
                     camera_index=idx, device_id=self.device_var.get())
-                self.root.after(0, self._after_capture, frame, token, path, None)
+                self.root.after(0, self._after_capture, frame, token, path, None, frames)
             except Exception as e:
-                self.root.after(0, self._after_capture, None, None, None, str(e))
-        self.status.config(text="单帧抓拍中…请面向摄像头（多帧取最清晰）")
+                self.root.after(0, self._after_capture, None, None, None, str(e), None)
+        self.status.config(text="单帧抓拍中…请面向摄像头（多帧取最清晰 + 多帧融合核验）")
         threading.Thread(target=work, daemon=True).start()
 
-    def _after_capture(self, frame, token, path, err):
+    def _after_capture(self, frame, token, path, err, frames=None):
         if err:
             self.status.config(text="抓拍失败：%s" % err)
             self.action_log.log("抓拍失败", err)
             messagebox.showerror("抓拍失败", "%s\n\n请确认摄像头未被占用，且设备编号正确。" % err)
             return
         self.live_image = frame
+        # 多帧融合用：保留连拍帧（核验时按画质加权融合）
+        self.live_frames = [f for f in (frames or []) if f is not None] or [frame]
         self.live_token = token
         self.live_desc = "摄像头实拍（%d 帧取最清晰，清晰度 %.1f）" % (
             token.get("frame_count", 0), token.get("sharpness", 0))
@@ -2565,6 +2570,7 @@ class FaceVerifyGUI:
             messagebox.showerror("错误", "无法读取该图片：%s" % e.msg)
             return
         self.live_image = img
+        self.live_frames = [img]        # 文件来源只有一帧，不做融合
         self.live_token = liveness.make_token(self.device_var.get().strip() or "GATE-A-01",
                                               source="file")   # 文件来源：显式标记为非现场
         self.live_desc = "文件选择：%s（非现场来源，严格模式已关闭，将留痕）" % os.path.basename(path)
@@ -2610,8 +2616,10 @@ class FaceVerifyGUI:
             if mode == "1:1":
                 # 扫脸核验：身份要素按当前模式校验（大考模式必须身份证；常规模式以准考证号为准），
                 # 证件再由工作人员对照实物目视核对（confirm_document 留痕）
+                # 传入全部连拍帧：核验器会先做多帧特征融合（只用于提前通过，不用来提前拒绝）
                 rec = self.verifier.verify_face_first(
-                    cid, live_images=[self.live_image],
+                    cid, live_images=list(getattr(self, "live_frames", None)
+                                          or [self.live_image]),
                     capture_token=self.live_token, witness=witness,
                     id_card=elements[0], ticket_no=elements[1], seat_no=elements[2])
             else:
