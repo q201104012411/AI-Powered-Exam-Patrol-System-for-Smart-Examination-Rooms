@@ -1,0 +1,37 @@
+[
+  {
+    "name": "本机摄像头",
+    "url": "0",
+    "room": "本机",
+    "enabled": true,
+    "note": "没有网络摄像头时先用这个试通链路"
+  },
+  {
+    "name": "1考场 正门",
+    "url": "rtsp://192.168.1.64:554/Streaming/Channels/101",
+    "room": "1考场",
+    "enabled": true,
+    "note": "海康 RTSP 写法示例；主码流很吃 CPU，建议换子码流 .../Channels/102"
+  },
+  {
+    "name": "2考场 后排",
+    "url": "rtsp://admin:密码@192.168.1.65:554/cam/realmonitor?channel=1&subtype=1",
+    "room": "2考场",
+    "enabled": true,
+    "note": "大华 RTSP 写法示例，subtype=1 即子码流"
+  },
+  {
+    "name": "MJPEG 推流测试",
+    "url": "http://192.168.1.111:5000/video_feed",
+    "room": "演示",
+    "enabled": false,
+    "note": "HTTP 推流示例，默认停用"
+  },
+  {
+    "name": "本地录像回放",
+    "url": "D:\\videos\\room1.mp4",
+    "room": "演示",
+    "enabled": false,
+    "note": "没有摄像头时用本地视频走通识别链路"
+  }
+]

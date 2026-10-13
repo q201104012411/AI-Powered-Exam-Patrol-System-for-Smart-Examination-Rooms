@@ -1,0 +1,21 @@
+# 运行期数据不入库
+data/
+ai_cam_home.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 模型权重不入库（体积大，需自行获取；放到本目录或 models\ 即自动启用）
+*.onnx
+*.caffemodel
+*.prototxt
+models/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
