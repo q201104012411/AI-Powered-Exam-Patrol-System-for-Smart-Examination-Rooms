@@ -68,6 +68,7 @@ class App:
         self._cam_state = {}      # cam_id -> 渲染缓存
         self._ai_on = tk.BooleanVar(value=True)
         self._ai_backend_name = ""
+        self._phone_supported = False      # 手机识别是否可用（需 YOLO 模型）
         self._tick_id = None
         self._closing = False
         self._editing_id = None
@@ -521,7 +522,7 @@ class App:
             return
         now_ms = time.time() * 1000.0
         ai_on = bool(self._ai_on.get()) and HAS_PD
-        total_persons = total_viol = 0
+        total_persons = total_viol = total_phone = 0
         cfg = self.ai_cfg
         ai_dim = config.ai_input_dim(cfg)
         ai_interval = config.ai_interval_ms(cfg)
@@ -576,20 +577,29 @@ class App:
                                            draw_pose=draw_pose)
                     total_persons += int(st.get("count", len(persons)))
                     total_viol += int(viol)
+                    total_phone += sum(1 for x in persons if x.get("has_phone"))
 
                 self._show_frame(cid, disp)
                 self._set_panel_status(
                     cid, "播放中 %.1f fps" % (snap.get("fps") or 0.0), "#0a7d28")
-                p["info"].config(text="人数 %d ｜ 越界 %d ｜ %s"
-                                 % (st.get("count", len(persons)), viol,
+                phone_here = sum(1 for x in persons if x.get("has_phone"))
+                extra = ("　｜　📱 手机 %d" % phone_here) if phone_here else ""
+                p["info"].config(text="人数 %d ｜ 越界 %d%s ｜ %s"
+                                 % (st.get("count", len(persons)), viol, extra,
                                     snap.get("status") or ""))
             except Exception as e:
                 self._set_panel_status(cid, "渲染失败：%s" % str(e)[:50], "#c00")
 
         if ai_on:
+            tail = ""
+            if total_phone:
+                tail = "　｜　⚠ 手机 %d" % total_phone
+            elif not self._phone_supported:
+                tail = "　｜　手机识别需模型"
             self.status.config(
-                text="AI 识别中：共 %d 人，越界 %d ｜ 后端 %s"
-                     % (total_persons, total_viol, self._ai_backend_name or "—"),
+                text="AI 识别中：共 %d 人，越界 %d%s ｜ 后端 %s"
+                     % (total_persons, total_viol, tail,
+                        self._ai_backend_name or "—"),
                 foreground="#0a7d28")
         else:
             self.status.config(text="AI 识别已关闭（仅预览画面）", foreground="#666")
@@ -648,7 +658,12 @@ class App:
             return
         self._ai_backend_name = name
         try:
-            self.ai_backend_lbl.config(text="检测后端：%s" % name)
+            self._phone_supported = bool(getattr(tracker, "supports_phone", False))
+        except Exception:
+            self._phone_supported = False
+        try:
+            tag = "手机识别可用" if self._phone_supported else "手机识别需模型"
+            self.ai_backend_lbl.config(text="检测后端：%s（%s）" % (name, tag))
             (config.DATA_ROOT / "ai_backend.txt").write_text(name + "\n", encoding="utf-8")
         except Exception:
             pass

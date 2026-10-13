@@ -59,6 +59,14 @@ ACT_HEADTURN = "转脸偏头"    # 人脸明显偏向人框一侧
 ABNORMAL_ACTIONS = (ACT_CROSS, ACT_STAND, ACT_TURN, ACT_LEAN, ACT_LOOK, ACT_DOWN,
                     ACT_GAZE, ACT_SLEEPY, ACT_HEADTURN)
 
+# ---------------- 手机识别（考场违规使用手机） ----------------
+# 手机**只能靠模型检出**：HOG 是行人检测器、Haar 是人脸级联，都不认手机。
+# 因此这项能力依赖 YOLO ONNX（COCO 80 类，其中 67 = cell phone）。
+PHONE_CLASS_ID = 67              # COCO 类别编号：cell phone
+ACT_PHONE = "使用手机"           # 归到人身上的异常行为
+GLOBAL_PHONE_ALERT = "检测到手机"  # 手机未归属到具体人时的全局告警
+COLOR_PHONE = (0, 0, 255)
+
 # MobileNet-SSD 中 "person" 的类别编号
 _MOBILENET_PERSON_CLASS = 15
 
@@ -450,7 +458,7 @@ class PersonTracker(object):
                  match_dist_ratio=0.12, min_hits=2,
                  model_path=None, model_kind="auto", prefer_gpu=True,
                  allow_opencl=False, yolo_imgsz=None, yolo_conf=None,
-                 use_onnxruntime=False):
+                 use_onnxruntime=False, enable_phone=True, phone_conf=None):
         if not hasattr(cv2, "HOGDescriptor"):
             raise RuntimeError(
                 "当前 OpenCV 未包含 HOGDescriptor，无法运行 AI 框选识别。\n"
@@ -494,8 +502,14 @@ class PersonTracker(object):
         # YOLO 的置信度阈值与 MobileNet-SSD 分开：YOLO 召回高，阈值可略高
         self.yolo_conf = float(yolo_conf) if yolo_conf is not None else 0.30
         self.yolo_iou = 0.45
+        # 手机检测：只有 YOLO ONNX（COCO 80 类含 cell phone）检得出来。
+        # 阈值单独给，且**必须高于 person**——实测手机类在无关画面里也会刷出
+        # sigmoid≈0.50（等价于 logit 0，模型完全不确定）的候选，阈值低一点就满屏假手机。
+        self.enable_phone = bool(enable_phone)
+        self.phone_conf = float(phone_conf) if phone_conf is not None else 0.60
         self._ort_sess = None
         self._ort_input = None
+        self._last_phones = []                    # 最近一帧原始坐标的手机框
 
         self._tracks = {}                         # pid -> _Track
         self._next_pid = 1
@@ -506,6 +520,8 @@ class PersonTracker(object):
         self._model_dir = os.path.dirname(os.path.abspath(__file__))
         self._last_pose = None
         self._last_scores = None
+        self._last_phones = []
+        self._last_unassigned_phones = []
 
         # 检测后端状态（供 backend_name() / 自检读取）
         self._backend_kind = "hog"                # hog / caffe-ssd / onnx-yolo
@@ -543,6 +559,48 @@ class PersonTracker(object):
             self._face_cascade = None
             self._eye_cascade = None
             self._head_cascade = None
+
+    def _open_onnxruntime_any(self, path):
+        """用 onnxruntime 装载模型：优先 GPU provider，没有就用 CPU。
+
+        与 _open_onnxruntime_gpu 的区别：这里**不要求**必须有 GPU——
+        因为 cv2.dnn 装载 YOLO11 会失败，CPU 版 onnxruntime 是唯一可行的兜底。
+        """
+        global _ORT_WARNED
+        try:
+            import onnxruntime as ort
+        except Exception:
+            if not _ORT_WARNED:
+                print("[person_detect] 未安装 onnxruntime，无法用它兜底 ONNX")
+                _ORT_WARNED = True
+            return None
+        try:
+            avail = ort.get_available_providers()
+        except Exception:
+            avail = []
+        gpu, _ = _ort_providers()
+        providers = gpu if gpu else (["CPUExecutionProvider"] if
+                                     "CPUExecutionProvider" in avail else avail)
+        try:
+            sess = ort.InferenceSession(path, providers=providers)
+            inps = sess.get_inputs()
+            if not inps:
+                return None
+            self._ort_input = inps[0].name
+            # 把输入边长按模型真实形状校准（有些导出是 640x640 固定）
+            try:
+                shape = inps[0].shape
+                hw = [int(v) for v in shape[2:4] if isinstance(v, int) and v > 0]
+                if hw:
+                    self._net_input_size = (max(hw), max(hw))
+            except Exception:
+                pass
+            return sess
+        except Exception as e:
+            if not _ORT_WARNED:
+                print("[person_detect] onnxruntime 装载失败：%s" % str(e)[:90])
+                _ORT_WARNED = True
+            return None
 
     def _open_onnxruntime_gpu(self, path):
         """尝试用 onnxruntime 的 GPU provider 加载模型；不行返回 None。
@@ -637,22 +695,53 @@ class PersonTracker(object):
             self._backend_file = ""
 
     def _load_yolo(self, path):
-        """装载 YOLO ONNX（YOLOv5/v8/v11 导出的 detect 或 pose 头）。"""
+        """装载 YOLO ONNX（YOLOv5/v8/v11 导出的 detect 或 pose 头）。
+
+        【重要】cv2.dnn 对 **YOLO11** 的 ONNX 支持不好：实测 OpenCV 4.14 在
+        `Concat` 节点上报 "Inconsistent shape for ConcatLayer" 直接装载失败
+        （YOLOv8 导出通常没问题）。因此这里改成**自动回退**：
+          1) 先试 cv2.dnn.readNetFromONNX；
+          2) 失败则自动改用 onnxruntime（本机已装 CPU 版即可用）；
+          3) 两者都失败才抛异常，由上层回退 HOG。
+        这样用户不用懂"该用哪个后端"，把模型丢进去就能用。
+        """
         dim = self.yolo_imgsz or self._onnx_input_dim(path)
         self._net_input_size = (dim, dim)
-        self._net = cv2.dnn.readNetFromONNX(path)
-        self._backend_target = _apply_net_backend(
-            self._net, prefer_gpu=self.prefer_gpu, allow_opencl=self.allow_opencl)
-        if self.use_onnxruntime:
-            self._ort_sess = self._open_onnxruntime_gpu(path)
-            if self._ort_sess is not None:
-                self._backend_target = "ort-gpu"
         self._backend_kind = "onnx-yolo"
         self._backend_file = path
         self._pose_enabled = "pose" in os.path.basename(path).lower()
-        print("[person_detect] 已装载 YOLO 模型：%s（输入 %d，姿态=%s，后端=%s）"
+        self._ort_sess = None
+        self._net = None
+
+        # 1) onnxruntime：显式要求，或 cv2.dnn 装载失败时自动用它
+        want_ort_first = bool(self.use_onnxruntime)
+        if want_ort_first:
+            self._ort_sess = self._open_onnxruntime_any(path)
+            if self._ort_sess is not None:
+                self._backend_target = "ort-gpu" if _ort_providers()[0] else "ort-cpu"
+
+        # 2) cv2.dnn
+        if self._ort_sess is None:
+            try:
+                self._net = cv2.dnn.readNetFromONNX(path)
+                self._backend_target = _apply_net_backend(
+                    self._net, prefer_gpu=self.prefer_gpu,
+                    allow_opencl=self.allow_opencl)
+            except Exception as e:
+                self._net = None
+                print("[person_detect] cv2.dnn 装载 ONNX 失败（%s），改用 onnxruntime"
+                      % str(e)[:90])
+                self._ort_sess = self._open_onnxruntime_any(path)
+                if self._ort_sess is not None:
+                    self._backend_target = ("ort-gpu" if _ort_providers()[0]
+                                            else "ort-cpu")
+        if self._net is None and self._ort_sess is None:
+            raise RuntimeError("cv2.dnn 与 onnxruntime 都无法装载该 ONNX 模型")
+
+        print("[person_detect] 已装载 YOLO 模型：%s（输入 %d，姿态=%s，后端=%s，手机识别=%s）"
               % (os.path.basename(path), self._net_input_size[0],
-                 "是" if self._pose_enabled else "否", self._backend_target))
+                 "是" if self._pose_enabled else "否", self._backend_target,
+                 "可用" if self.supports_phone else "不可用"))
 
     def _load_caffe(self, prototxt, caffemodel):
         """装载 MobileNet-SSD（Caffe）。"""
@@ -696,6 +785,31 @@ class PersonTracker(object):
                 "name": self.backend_name(),
                 "input": self._net_input_size[0]}
 
+    @property
+    def supports_phone(self):
+        """当前后端能否检出手机。
+
+        只有 YOLO ONNX（COCO 80 类，含 cell phone=67）可以；
+        HOG 是行人检测器、Haar 是人脸级联、MobileNet-SSD 只有 20 类（无手机），
+        这三者都检不出手机——界面应如实告知"手机识别需要模型"，不要假装检过。
+        """
+        return bool(self._backend_kind == "onnx-yolo"
+                    and self._net_input_size[0] >= _YOLO_DEFAULT_IMGSZ * 0.5)
+
+    def detect_phones(self, frame):
+        """对外接口：检出手机，返回 (phones, supports)。
+
+        phones: [{"rect","score"}]，原图坐标；supports=False 表示当前后端不支持。
+        """
+        if not self.enable_phone:
+            return [], False
+        if not self.supports_phone:
+            self._last_phones = []
+            return [], False
+        found = self._detect_phones(frame)
+        self._last_phones = [{"rect": r, "score": float(s)} for r, s in found]
+        return self._last_phones, True
+
     # ---------------- 辅助 ----------------
     def _scale_frame(self, frame):
         """若长边超过 max_input_dim 则等比缩小，返回（缩放图，缩放系数）"""
@@ -712,6 +826,13 @@ class PersonTracker(object):
     def _rect_to_orig(rect, scale):
         """把缩放图上的矩形映射回原图坐标"""
         return tuple(int(round(v / scale)) for v in rect)
+
+    @staticmethod
+    def _orig_to_rect(rect, scale):
+        """把原图坐标的矩形映射到缩放图上（_rect_to_orig 的逆运算）。"""
+        if not scale:
+            return tuple(int(v) for v in rect)
+        return tuple(int(round(v * scale)) for v in rect)
 
     def _shrink_rect(self, rect, fw, fh):
         """按 margin_ratio 收紧矩形，并保证最小 24×24"""
@@ -756,13 +877,140 @@ class PersonTracker(object):
 
     # ---------------- 检测：YOLO ONNX ----------------
     @staticmethod
-    def _postprocess_yolo(out, conf_thres, pose=False):
-        """YOLO 头后处理 -> (boxes[N,4], scores[N], keypoints[N,17,3]|None)
+    def _postprocess_yolo_full(out, conf_thres, phone_conf, want_phone=True):
+        """YOLO 后处理（多类版）：返回 (person_boxes, person_scores, kps, phones)。
 
-        自动适配两种常见导出布局：
-          · [1, C, N]  YOLOv8/v11 风格（C = 4+nc 或 4+3*17）
-          · [1, N, C]  YOLOv5/tf 风格
-        C 里前 4 个是 cx,cy,w,h（输入像素尺度）。
+        phones = [(box, score)]，box 为 cx,cy,w,h 的**输入尺度**坐标。
+
+        【类别分数已经是概率，不要再 sigmoid】
+        实测 ultralytics 导出的 yolo11n.onnx：类别通道取值 0.000~0.776，
+        既没有负数也没有 >1 的值——说明导出时已含 sigmoid。
+        一开始我按"logits"又做了一次 sigmoid，结果 0.0 被抬到 0.50、
+        0.776 被压到 0.68，凭空造出大量虚警（全黑图都能报 561 个人）。
+        所以这里**直接用原始值**比阈值。
+        """
+        a = np.asarray(out)
+        if a.ndim == 3 and a.shape[0] == 1:
+            a = np.squeeze(a, axis=0)
+        if a.ndim != 2 or a.shape[1] < 5:
+            return (np.zeros((0, 4), np.float32), np.zeros((0,), np.float32),
+                    None, [])
+        if a.shape[0] < a.shape[1]:
+            a = a.T
+        cx, cy, bw, bh = a[:, 0], a[:, 1], a[:, 2], a[:, 3]
+        rest = a[:, 4:]
+        nz = rest.shape[1]
+        kp = None
+        if nz >= 51 and nz < 80:
+            # 姿态模型：关键点通道里已带 conf
+            kp = rest[:, :51].reshape(-1, 17, 3)
+            scores = np.clip(kp[:, :, 2].mean(axis=1), 0.0, 1.0)
+            cls_ids = np.zeros(len(scores), np.int32)
+        elif nz >= 80:
+            # 类别分数已是概率：逐列取最强类
+            cls_ids = np.argmax(rest, axis=1).astype(np.int32)
+            scores = rest[np.arange(len(cls_ids)), cls_ids].astype(np.float32)
+        else:
+            cls_ids = np.zeros(a.shape[0], np.int32)
+            scores = (rest.max(axis=1).astype(np.float32) if nz
+                      else np.zeros(a.shape[0], np.float32))
+
+        boxes_all = np.stack([cx - bw / 2.0, cy - bh / 2.0, bw, bh], axis=1).astype(np.float32)
+
+        pkeep = (cls_ids == 0) & (scores >= conf_thres)
+        p_boxes = boxes_all[pkeep]
+        p_scores = scores[pkeep]
+        p_kps = kp[pkeep] if kp is not None else None
+
+        phones = []
+        if want_phone and nz >= 80:
+            tkeep = (cls_ids == PHONE_CLASS_ID) & (scores >= phone_conf)
+            for i in np.where(tkeep)[0]:
+                phones.append((tuple(float(v) for v in boxes_all[i]), float(scores[i])))
+
+        # 手机也要做 NMS：ONNX 导出没有内置 NMS，实测同一部手机会出几十个重叠框
+        # （一张图能刷出 200+ 个"手机"）。按 IoU 去重，只留最确定的那个。
+        if len(phones) > 1:
+            phones.sort(key=lambda x: -x[1])
+            kept = []
+            for box, sc in phones:
+                if all(_iou((box[0] - box[2] / 2, box[1] - box[3] / 2, box[2], box[3]),
+                            (k[0][0] - k[0][2] / 2, k[0][1] - k[0][3] / 2,
+                             k[0][2], k[0][3])) <= 0.45 for k in kept):
+                    kept.append((box, sc))
+            phones = kept
+        return p_boxes, p_scores, p_kps, phones
+
+    @staticmethod
+    def _letterbox_params(fw, fh, imgsz):
+        """letterbox 参数：(缩放比, 左边距, 上边距, 新宽, 新高)。"""
+        scale = min(imgsz / float(fw), imgsz / float(fh))
+        nw, nh = int(round(fw * scale)), int(round(fh * scale))
+        dw, dh = (imgsz - nw) // 2, (imgsz - nh) // 2
+        return scale, dw, dh, nw, nh
+
+    def _yolo_forward(self, frame):
+        """跑一次 YOLO 前向，返回原始输出张量（None 表示后端不可用）。"""
+        if self._net is None and self._ort_sess is None:
+            return None
+        fh, fw = frame.shape[:2]
+        imgsz = self._net_input_size[0] or _YOLO_DEFAULT_IMGSZ
+        scale, dw, dh, nw, nh = self._letterbox_params(fw, fh, imgsz)
+        resized = cv2.resize(frame, (nw, nh))
+        canvas = np.full((imgsz, imgsz, 3), 114, dtype=np.uint8)
+        canvas[dh:dh + nh, dw:dw + nw] = resized
+        blob = cv2.dnn.blobFromImage(canvas, 1 / 255.0, (imgsz, imgsz),
+                                     swapRB=True, crop=False)
+        if self._ort_sess is not None:
+            outs = self._ort_sess.run(None, {self._ort_input: blob})
+            return outs[0]
+        self._net.setInput(blob)
+        return self._net.forward()
+
+    def _detect_phones(self, frame):
+        """手机检测（仅 YOLO-ONNX 后端可用）；返回 [(rect, score)] 原图坐标。
+
+        **说明**：HOG / Haar / MobileNet-SSD 都检不出手机，此时返回空列表，
+        界面会显示"手机识别需要模型"，而不是假装检过。
+        """
+        if self._backend_kind != "onnx-yolo" or not self.supports_phone:
+            return []
+        try:
+            out = self._yolo_forward(frame)
+            if out is None:
+                return []
+            _pb, _ps, _kp, phones = self._postprocess_yolo_full(
+                out, self.yolo_conf, self.phone_conf, want_phone=True)
+        except Exception:
+            return []
+        if not phones:
+            return []
+        fh, fw = frame.shape[:2]
+        imgsz = self._net_input_size[0] or _YOLO_DEFAULT_IMGSZ
+        scale, dw, dh, _nw, _nh = self._letterbox_params(fw, fh, imgsz)
+        out_list = []
+        for (x, y, w, h), sc in phones:
+            x1 = int(round((x - dw) / scale))
+            y1 = int(round((y - dh) / scale))
+            rw = int(round(w / scale))
+            rh = int(round(h / scale))
+            # 去掉明显不合理的小碎片（手机在画面里通常至少 8px）
+            if rw < 8 or rh < 8:
+                continue
+            x1 = max(0, min(x1, fw - 2))
+            y1 = max(0, min(y1, fh - 2))
+            rw = min(rw, fw - x1)
+            rh = min(rh, fh - y1)
+            if rw < 8 or rh < 8:
+                continue
+            out_list.append(((x1, y1, rw, rh), sc))
+        return out_list
+
+    def _postprocess_pose(self, out, conf_thres):
+        """仅姿态模型的后处理（保留给外部/测试直接调用）。
+
+        日常检测走 _postprocess_yolo_full（多类 + 手机），本方法只处理
+        "只剩 51 个关键点通道"的 pose 导出，不做类别判定。
         """
         a = np.asarray(out)
         if a.ndim == 3 and a.shape[0] == 1:
@@ -770,28 +1018,19 @@ class PersonTracker(object):
         if a.ndim != 2:
             return np.zeros((0, 4), np.float32), np.zeros((0,), np.float32), None
         if a.shape[0] < a.shape[1]:
-            a = a.T                      # -> [N, C]
+            a = a.T
         if a.shape[1] < 5:
             return np.zeros((0, 4), np.float32), np.zeros((0,), np.float32), None
 
         cx, cy, bw, bh = a[:, 0], a[:, 1], a[:, 2], a[:, 3]
         rest = a[:, 4:]
         nz = rest.shape[1]
-        # 姿态模型：剩余通道 = 17*3（x,y,conf）
-        is_pose = bool(pose) or nz == 51
         kp = None
-        if is_pose and nz >= 51:
+        if nz >= 51:
             kp = rest[:, :51].reshape(-1, 17, 3)
-            scores = kp[:, :, 2].mean(axis=1) if kp.shape[0] else np.zeros(0, np.float32)
-            scores = np.clip(scores, 0.0, 1.0)
+            scores = np.clip(kp[:, :, 2].mean(axis=1), 0.0, 1.0)
         else:
-            # 检测模型：单类取通道最大值；多类（含 80 类 COCO）取第 0 类 person
-            if nz <= 2:
-                scores = rest.max(axis=1)
-            elif nz >= 80:
-                scores = rest[:, 0]
-            else:
-                scores = rest.max(axis=1)
+            scores = rest.max(axis=1) if nz else np.zeros(a.shape[0], np.float32)
 
         keep = scores >= conf_thres
         if not np.any(keep):
@@ -802,21 +1041,48 @@ class PersonTracker(object):
         kps = kp[keep].astype(np.float32) if kp is not None else None
         return boxes, sc, kps
 
-    def _detect_yolo(self, frame):
-        """YOLO ONNX 行人检测；返回 (rects, scores, keypoints|None)。
+    def _postprocess_yolo(self, out, conf_thres, pose=False):
+        """【已废弃，保留仅为兼容外部调用】请用 _postprocess_yolo_full。
 
-        坐标已映射回传入 frame 的像素坐标系。
+        旧实现在多类模型上取"第 0 类 person"，且没有手机支持；
+        与 _postprocess_yolo_full 重复容易混用，内部已不再调用它。
+        """
+        return self._postprocess_yolo_full(out, conf_thres, 1.0,
+                                          want_phone=False)[:3]
+
+    def _normalize_phones(self, phones_in, fw, fh, scale, dw, dh):
+        """把 YOLO 后处理的手机框（输入尺度 cx,cy,w,h）映射到原图像素并做合理性过滤。"""
+        out = []
+        for (x, y, w, h), sc in phones_in:
+            x1 = int(round((x - dw) / scale))
+            y1 = int(round((y - dh) / scale))
+            rw = int(round(w / scale))
+            rh = int(round(h / scale))
+            if rw < 8 or rh < 8:
+                continue
+            x1 = max(0, min(x1, fw - 2))
+            y1 = max(0, min(y1, fh - 2))
+            rw = min(rw, fw - x1)
+            rh = min(rh, fh - y1)
+            if rw < 8 or rh < 8:
+                continue
+            out.append({"rect": (x1, y1, rw, rh), "score": float(sc)})
+        return out
+
+    def _detect_yolo(self, frame):
+        """YOLO ONNX 检测；返回 (rects, scores, keypoints|None, phones)。
+
+        一次前向同时产出"人"与"手机"（手机来自 COCO 的 cell phone 类），
+        避免为了手机再跑一遍网络。phones 已被映射回**原图**像素坐标。
         """
         if self._net is None and self._ort_sess is None:
-            return [], [], None
+            return [], [], None, []
         fh, fw = frame.shape[:2]
         imgsz = self._net_input_size[0] or _YOLO_DEFAULT_IMGSZ
-        # letterbox：保持长宽比，避免密集教室被拉伸后小目标变形
-        scale = min(imgsz / float(fw), imgsz / float(fh))
-        nw, nh = int(round(fw * scale)), int(round(fh * scale))
+        scale, dw, dh, nw, nh = self._letterbox_params(fw, fh, imgsz)
         resized = cv2.resize(frame, (nw, nh))
+
         canvas = np.full((imgsz, imgsz, 3), 114, dtype=np.uint8)
-        dw, dh = (imgsz - nw) // 2, (imgsz - nh) // 2
         canvas[dh:dh + nh, dw:dw + nw] = resized
 
         blob = cv2.dnn.blobFromImage(canvas, 1 / 255.0, (imgsz, imgsz),
@@ -828,10 +1094,30 @@ class PersonTracker(object):
             self._net.setInput(blob)
             out = self._net.forward()
 
-        boxes, scores, kps = self._postprocess_yolo(
-            out, self.yolo_conf, pose=self._pose_enabled)
+        want_phone = bool(self.enable_phone)
+        boxes, scores, kps, phones_in = self._postprocess_yolo_full(
+            out, self.yolo_conf, self.phone_conf, want_phone=want_phone)
+        phones = (self._normalize_phones(phones_in, fw, fh, scale, dw, dh)
+                  if want_phone else [])
         if boxes.shape[0] == 0:
-            return [], [], None
+            return [], [], None, phones
+
+        # 【必须做 NMS】ONNX 导出没有内置 NMS：实测同一张单人画面会输出 10 个高度重叠的框，
+        # 不去重就会变成"单人 10 条轨迹"。自己按 IoU 做一遍，并同步保留关键点。
+        order = np.argsort(-scores)
+        keep_idx = []
+        while order.size > 0:
+            i = int(order[0])
+            keep_idx.append(i)
+            if order.size == 1:
+                break
+            rest = order[1:]
+            ious = np.array([_iou(tuple(boxes[i]), tuple(boxes[int(j)])) for j in rest])
+            order = rest[ious <= self.yolo_iou]
+        boxes = boxes[keep_idx]
+        scores = scores[keep_idx]
+        if kps is not None:
+            kps = kps[keep_idx]
 
         # 去掉 letterbox 边距并映射回原图
         boxes[:, 0] = (boxes[:, 0] - dw) / scale
@@ -861,9 +1147,10 @@ class PersonTracker(object):
                 k[:, 1] = (k[:, 1] - dh) / scale
                 kept_kps.append(k)
         if not rects:
-            return [], [], None
+            return [], [], None, phones
         return (rects, kept_scores,
-                np.asarray(kept_kps, dtype=np.float32) if kept_kps else None)
+                np.asarray(kept_kps, dtype=np.float32) if kept_kps else None,
+                phones)
 
     def _detect_hog(self, frame, dense):
         """HOG 行人检测（兼容旧调用：只返回矩形列表）。
@@ -949,29 +1236,58 @@ class PersonTracker(object):
             rois.append((bx, by, bw, bh))
         return rois
 
+    # 由人脸框推算"头+肩+躯干"框的比例（经验值，按上半身立姿/坐姿）。
+    # 【为什么必须放大】旧值 body_w=脸宽*2.2、body_h=脸高*3.5 偏小太多：
+    # 实测一张 406x310 的摄像头画面里人脸框是 110x110（头就占画面宽 27%），
+    # 乘 2.2 只有 242px 宽——把肩膀砍掉了一半；乘 3.5 只有 385px 高，而画幅只有
+    # 310px。结果框只圈住"脸 + 一点衣领"，低头/前倾/起立这些动作几何量全拿不到，
+    # 表现就是"好多动作识别不了"。
+    # 新比例：肩宽约 3 倍脸宽，头到躯干（含胸腹）约 4.5 倍脸高。
+    FACE_BODY_W_RATIO = 3.0
+    FACE_BODY_H_RATIO = 4.5
+
     def _detect_heads(self, frame):
-        """在上半画面用 Haar frontalface 找头并推断人身框"""
+        """用 Haar 正脸定位，并**按人体比例推算"头+肩+躯干"框**。
+
+        与旧实现的三点不同：
+          1. 扫描范围由"上半 65%"放宽到"上半 80%"（坐着的人脸可能偏下）；
+          2. 参数放宽一档（scaleFactor 1.03 / minNeighbors 2 / minSize 20），
+             实测同一张图旧参数能检出、但小脸画幅上更稳；
+          3. 推算比例放大到肩宽≈3×脸宽、身高≈4.5×脸高（见 FACE_BODY_*_RATIO）。
+        """
         if self._head_cascade is None:
             return []
         h, w = frame.shape[:2]
-        roi = frame[:int(h * 0.65), :]
+        roi = frame[:max(1, int(h * 0.80)), :]
         if roi.size == 0:
             return []
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        gray = cv2.equalizeHist(gray)          # 逆光/偏暗时更稳
         heads = self._head_cascade.detectMultiScale(
-            gray, scaleFactor=1.05, minNeighbors=2,
-            minSize=(16, 16), maxSize=(w // 4, h // 3))
+            gray, scaleFactor=1.03, minNeighbors=2,
+            minSize=(20, 20), maxSize=(w // 2, int(h * 0.7)))
         out = []
         for hx, hy, hw, hh in heads:
-            body_w = int(hw * 2.2)
-            body_h = int(hh * 3.5)
-            bx = max(0, hx + hw // 2 - body_w // 2)
-            by = max(0, hy)
-            bw = min(w - bx, body_w)
-            bh = min(h - by, body_h)
-            if bw >= 24 and bh >= 24:
-                out.append((bx, by, bw, bh))
-        return out
+            out.append(self._body_from_face((hx, hy, hw, hh), w, h))
+        return [r for r in out if r is not None]
+
+    def _body_from_face(self, face_rect, w, h):
+        """把 Haar 人脸框按人体比例扩成"头+肩+躯干"框；不合理则返回 None。"""
+        fx, fy, fw, fh = [int(v) for v in face_rect]
+        if fw <= 0 or fh <= 0:
+            return None
+        body_w = int(fw * self.FACE_BODY_W_RATIO)
+        body_h = int(fh * self.FACE_BODY_H_RATIO)
+        # 水平居中于脸；竖直从脸顶往上留一点额头，向下延伸出躯干
+        bx = int(fx + fw / 2 - body_w / 2)
+        by = int(fy - fh * 0.15)
+        bx = max(0, min(bx, max(0, w - 8)))
+        by = max(0, by)
+        bw = min(w - bx, body_w)
+        bh = min(h - by, body_h)
+        if bw < 24 or bh < 32:
+            return None
+        return (bx, by, bw, bh)
 
     def _merge_sources(self, primary, aux_list, iou_thresh=0.35):
         """把主检测框与辅助来源框合并，去除重复"""
@@ -1060,8 +1376,10 @@ class PersonTracker(object):
             # 铺满整个画面的框一定是误检
             if (w * h) > frame_area * 0.6:
                 continue
-            # 辅助来源（人脸推算框 / 运动剪影）：框内太平坦就否决
-            if src >= self.SRC_FACE:
+            # 辅助来源（人脸推算框 / 运动剪影）：框内太平坦就否决。
+            # 但**大框豁免**：占了画面 25% 以上的框不该被判成"墙"——
+            # 否则"穿素色衣服、离镜头近"的人会被误杀。
+            if src >= self.SRC_FACE and (w * h) < frame_area * 0.25:
                 if self._flat_region_ratio(frame, rect) > 0.72:
                     continue
             out.append(((int(x), int(y), int(w), int(h)), float(score), int(src)))
@@ -1114,39 +1432,54 @@ class PersonTracker(object):
 
         use_net = (self._net is not None) or (self._ort_sess is not None)
 
+        # 0) 人脸锚框：**在原始分辨率上**跑 Haar 正脸，再按人体比例扩成"头+肩+躯干"框。
+        #    为什么放在最前面、且用原图而不是缩放图：
+        #      · 缩放会把脸变小，Haar 在小脸上明显不稳（实测同一张 406x310 画面，
+        #        原图上稳定检出 110x110 的人脸，缩放后才勉强）；
+        #      · 人脸框是**质量最高**的人体锚点——HOG 在低分辨率下会给"只到衣领"
+        #        的小框，行为识别（低头/前倾/起立）全废；
+        #      · 让它作为高优先候选直接参与竞争（SRC_FACE 分数高于 HOG 实际响应），
+        #        而不是等 HOG 先占坑再补，第一帧就能得到正确的框。
+        face_orig = self._detect_heads(frame) if (self._face_cascade is not None) else []
+        face_small = [self._orig_to_rect(r, scale) for r in face_orig]
+
         # 1) 有模型：模型结果即主检测，不再叠加 HOG，避免两套框互相污染；
-        #    仅在"人数偏少"时用 Haar 人头补框（模型漏检场景）
+        #    人脸的锚框作为补充（模型漏检时兜底）
         if use_net:
-            rects, scores, kps = self._detect_net(small)
+            rects, scores, kps, phones = self._detect_net(small)
+            # 手机框：small 尺度 -> 原图尺度
+            self._last_phones = [
+                {"rect": self._rect_to_orig(ph["rect"], scale),
+                 "score": ph["score"]} for ph in (phones or [])]
+            # 人脸锚框只在**模型完全没检出人**时兜底（例如只剩画面边缘的人）。
+            # 用 len(rects) < 8 会过于激进：Haar 会把空场景的纹理也算进来，
+            # 实测单人的图被补成 5 条轨迹。模型能用时就别用人脸去"凑数"。
+            if face_small and not rects:
+                for fr in face_small:
+                    if all(_iou(fr, m) < 0.3 for m in rects):
+                        rects.append(fr)
+                        scores.append(0.55)
             orig_rects = [self._rect_to_orig(r, scale) for r in rects]
             shrunk = [self._shrink_rect(r, orig_w, orig_h) for r in orig_rects]
             shrunk = self._sanitize_boxes(shrunk, orig_w, orig_h)
 
             pose = None
             if kps is not None and len(kps):
-                keep_idx = [i for i in range(len(shrunk))]
                 pose = []
-                for i in keep_idx:
+                for i in range(len(shrunk)):
                     if i >= len(kps):
                         break
                     kk = kps[i].copy()
                     kk[:, 0] = kk[:, 0] / scale
                     kk[:, 1] = kk[:, 1] / scale
                     pose.append(kk)
-                if len(shrunk) < 8:
-                    heads = [self._rect_to_orig(r, scale)
-                             for r in self._detect_heads(small)]
-                    for hrect in heads:
-                        if all(_iou(hrect, m) < 0.3 for m in shrunk):
-                            shrunk.append(hrect)
-                            scores.append(self.yolo_conf)
-                            pose.append(np.zeros((17, 3), np.float32))
             self._last_scores = scores
             self._last_pose = pose
             return shrunk
 
         # 2) 没有模型：HOG 主检测 + 人脸/运动辅助（带来源标签，便于压重复框）
         self._last_pose = None
+        self._last_phones = []        # HOG 后端检不出手机
         cands = []          # [(rect, score, src)]，坐标均在 small 上
 
         # 2.1) MobileNet-SSD（配置成 caffe 但装载失败时 _net 为 None，此支不生效）
@@ -1159,19 +1492,19 @@ class PersonTracker(object):
             for r, s in self._detect_hog_scored(small, dense):
                 cands.append((r, s, self.SRC_HOG))
 
-        # 2.3) 先压一遍重复框：这一步就把"同一目标多个大小圈"合并掉，
+        # 2.3) 人脸锚框：分数 0.55 高于 HOG 的归一化响应，且 SRC_FACE 排序更可靠，
+        #      所以"人脸推出来的完整框"会赢过 HOG 的"只到衣领的小框"。
+        for fr in face_small:
+            cands.append((fr, 0.55, self.SRC_FACE))
+
+        # 2.4) 先压一遍重复框：这一步就把"同一目标多个大小圈"合并掉，
         #      后续再决定要不要开新轨迹时，看到的已经是干净候选。
         cands = self._suppress_duplicates(cands, iou_thresh=0.30)
 
-        # 2.4) 只在"人确实少"时，才用 Haar 人脸与运动剪影补框；
-        #      且必须与已有框重叠才采纳（空场景里的孤立剪影一律丢弃）——
-        #      这是"单人场景 14 条轨迹"的根因所在。
+        # 2.5) 只在"人确实少"时，才用运动剪影补框；且必须与已有框重叠才采纳
+        #      （空场景里的孤立剪影一律丢弃）——这是"单人场景 14 条轨迹"的根因所在。
         if len(cands) < 8 or self._density_level == "high":
-            aux = []
-            for r in self._detect_heads(small):
-                aux.append((r, 0.45, self.SRC_FACE))
-            for r in self._detect_bg_rois(small):
-                aux.append((r, 0.35, self.SRC_MOTION))
+            aux = [(r, 0.35, self.SRC_MOTION) for r in self._detect_bg_rois(small)]
             added = 0
             for rect, score, src in aux:
                 if any(_iou(rect, c[0]) > 0.10 for c in cands):
@@ -1180,7 +1513,7 @@ class PersonTracker(object):
             if added:
                 cands = self._suppress_duplicates(cands, iou_thresh=0.30)
 
-        # 2.5) 映射回原图、收紧、剔除不合理框、最终 NMS
+        # 2.6) 映射回原图、收紧、剔除不合理框、最终 NMS
         mapped = []
         for rect, score, src in cands:
             o = self._rect_to_orig(rect, scale)
@@ -1193,14 +1526,17 @@ class PersonTracker(object):
         return rects
 
     def _detect_net(self, frame):
-        """统一入口：按已装载的模型族调用对应检测器。"""
+        """统一入口：按已装载的模型族调用对应检测器。
+
+        返回 (rects, scores, keypoints|None, phones)；phones 只在 YOLO 后端有值。
+        """
         if self._backend_kind == "onnx-yolo" and (self._net is not None
                                                   or self._ort_sess is not None):
             return self._detect_yolo(frame)
         if self._backend_kind == "caffe-ssd" and self._net is not None:
             rects = self._detect_dnn(frame)
-            return rects, [1.0] * len(rects), None
-        return [], [], None
+            return rects, [1.0] * len(rects), None, []
+        return [], [], None, []
 
     # ---------------- 跟踪 ----------------
     def _greedy_assignment(self, cost):
@@ -1612,8 +1948,11 @@ class PersonTracker(object):
                 if action in (ACT_NORMAL, ACT_SIT):
                     action = ACT_LEAN
                 behaviors.append(ACT_LEAN)
-            # 5) 起立/站立：框很高且底部越过警戒线
-            if h > fh * 0.55 and bad:
+            # 5) 起立/站立：框很高 + 框底越过警戒线 + **头顶位于画面上部**
+            # 最后一条是必须的：实测"坐姿近景"时人框本身就占画面高 67% 且框底越过
+            # 那条 92% 警戒线，只按"高且越界"会把人坐着误判成站立。
+            # 站着的人头顶一定靠画面上方（实测站立 <0.20 画面高、坐姿约 0.35）。
+            if h > fh * 0.55 and bad and y < fh * 0.30:
                 if action in (ACT_NORMAL, ACT_SIT):
                     action = ACT_STAND
                 behaviors.append(ACT_STAND)
@@ -1644,8 +1983,9 @@ class PersonTracker(object):
             if wide_hits >= max(2, self.confirm_frames - 1):
                 action = ACT_TURN
                 behaviors.append(ACT_TURN)
-            # 3) 起立/站立：框很高且底部越过警戒线（起立才会越过 92% 线）
-            elif h > fh * 0.55 and bad:
+            # 3) 起立/站立：框很高 + 框底越过警戒线 + 头顶在画面上部
+            # （理由同上：坐姿近景也满足前两条，必须加头部位置约束）
+            elif h > fh * 0.55 and bad and y < fh * 0.30:
                 action = ACT_STAND
                 behaviors.append(ACT_STAND)
             # 4) 前倾/趴桌：连续多次宽高比 > 0.68 且高度在收缩
@@ -1697,14 +2037,19 @@ class PersonTracker(object):
                     if action in (ACT_NORMAL, ACT_SIT):
                         action = ACT_GAZE
 
-        # 9) 贴边（只有真正贴到画面边缘才算，不再和"越界"混为一谈）
-        if (x < edge_margin or y < edge_margin
-                or x + w > fw - edge_margin or y + h > fh - edge_margin):
-            if x < edge_margin or x + w > fw - edge_margin:
+        # 9) 贴边：判据是**框心**靠近画面边缘，而不是"框的边缘越界"。
+        #    历史缺陷：原来用 x < edge_margin(20px) 判定，而人脸推出来的框往往很宽
+        #    （实测 321x207 的框左边缘在 x=43），正常站着也会被判「靠左 + 越界」。
+        margin_x = max(2.0, fw * 0.04)
+        margin_y = max(2.0, fh * 0.04)
+        cx = x + w / 2.0
+        cy = y + h / 2.0
+        if cx < margin_x or cx > fw - margin_x or cy < margin_y or cy > fh - margin_y:
+            if cx < margin_x or cx > fw - margin_x:
                 bad = True
-            if x < fw * 0.12:
+            if cx < fw * 0.06:
                 action = ACT_LEFT
-            elif x + w > fw * 0.88:
+            elif cx > fw * 0.94:
                 action = ACT_RIGHT
 
         # 去重保序
@@ -1737,6 +2082,34 @@ class PersonTracker(object):
         return self._stable_count
 
     # ---------------- 绘制 ----------------
+    # ---------------- 手机归属 ----------------
+    @staticmethod
+    def _associate_phones(person_rect, phones):
+        """把手机框归属到某个人身上。
+
+        判据（两者其一即可）：
+          · 手机中心落在人框内（拿在身前/桌上）；
+          · 手机中心在人框附近（水平外扩 0.6 倍框宽、垂直不外扩太多），
+            覆盖"手伸出框外举着手机"的情形。
+        返回 (是否命中, [(phone_dict)] 命中明细)。
+        """
+        if not phones:
+            return False, []
+        px, py, pw, ph = person_rect
+        pad_x = pw * 0.6
+        pad_y = ph * 0.10
+        hit = []
+        for ph_obj in phones:
+            rect = ph_obj.get("rect") if isinstance(ph_obj, dict) else None
+            if not rect:
+                continue
+            mx = rect[0] + rect[2] / 2.0
+            my = rect[1] + rect[3] / 2.0
+            if (px - pad_x) <= mx <= (px + pw + pad_x) and \
+               (py - pad_y) <= my <= (py + ph + pad_y):
+                hit.append(ph_obj)
+        return bool(hit), hit
+
     def analyze_only(self, frame, boundary_ratio=None, min_hits=None,
                      with_pose=True):
         """只做检测/跟踪/行为分析，**不绘制**。
@@ -1757,17 +2130,34 @@ class PersonTracker(object):
                                   with_pose=True)
         need = self.min_hits if min_hits is None else max(1, int(min_hits))
         tracks = {pid: tr for pid, tr in self._tracks.items() if tr.hits >= need}
+        phones = list(self._last_phones or [])
+        phone_used = set()
         persons = []
         for pid, tr in sorted(tracks.items()):
             kp = pose_map.get(pid) if with_pose else None
             action, bad, behaviors = self.analyze(
                 frame, tr, boundary_ratio=boundary_ratio, keypoints=kp)
+            # 手机归属：命中就把"使用手机"并入该人的行为（同一个人只记一次）
+            has_phone, hits = self._associate_phones(tr.rect, phones)
+            if has_phone:
+                for i, ph in enumerate(phones):
+                    if ph in hits:
+                        phone_used.add(i)
+                if ACT_PHONE not in behaviors:
+                    behaviors = list(behaviors) + [ACT_PHONE]
+                if action in (ACT_NORMAL, ACT_SIT):
+                    action = ACT_PHONE
             persons.append({"pid": pid, "rect": tr.rect, "action": action,
                             "bad": bad, "crosses": tr.crosses,
                             "behaviors": behaviors,
                             "score": tr.score,
                             "pose": kp,
+                            "has_phone": has_phone,
+                            "phone_boxes": [ph["rect"] for ph in hits],
                             "density_level": self._density_level})
+        # 没归属到任何人的手机：作为全局告警带出来（界面画红框 + 提示）
+        unassigned = [phones[i] for i in range(len(phones)) if i not in phone_used]
+        self._last_unassigned_phones = unassigned
         violations = sum(1 for p in persons if p["bad"])
         # 人数平滑：最近 5 次分析取中位数，界面读数不再跳变
         self._count_hist.append(len(persons))
@@ -1838,6 +2228,17 @@ class PersonTracker(object):
                         if pt is not None:
                             cv2.circle(frame, pt, 2, COLOR_POSE, -1)
 
+            # 手机框（橙黄色，与"越界红"区分开）：标注"手机"
+            for phbox in (p.get("phone_boxes") or []):
+                qx, qy, qw, qh = phbox
+                cv2.rectangle(frame,
+                              (int(qx * scale + ox), int(qy * scale + oy)),
+                              (int((qx + qw) * scale + ox),
+                               int((qy + qh) * scale + oy)), COLOR_PHONE, 2)
+                draw_label(frame, "手机", COLOR_PHONE,
+                           int(qx * scale + ox), max(0, int(qy * scale + oy) - 16),
+                           font_size)
+
             # 人脸小框（微表情辅助，青色）
             fa = p.get("face")
             if fa is not None:
@@ -1868,6 +2269,20 @@ class PersonTracker(object):
                 draw_label(frame, label, color, tx, ty, font_size)
                 used_labels.append(probe)
                 break
+
+        # 未归属到任何人的手机：单独画红框提醒（有人拿手机但人没被框住时会走到这里）
+        for ph_obj in (getattr(self, "_last_unassigned_phones", None) or []):
+            rect = ph_obj.get("rect") if isinstance(ph_obj, dict) else None
+            if not rect:
+                continue
+            qx, qy, qw, qh = rect
+            cv2.rectangle(frame,
+                          (int(qx * scale + ox), int(qy * scale + oy)),
+                          (int((qx + qw) * scale + ox),
+                           int((qy + qh) * scale + oy)), COLOR_PHONE, 2)
+            draw_label(frame, "检测到手机", COLOR_PHONE,
+                       int(qx * scale + ox), max(0, int(qy * scale + oy) - 16),
+                       font_size)
 
     def draw(self, frame, boundary_ratio=0.5, min_hits=None, with_pose=True):
         """
