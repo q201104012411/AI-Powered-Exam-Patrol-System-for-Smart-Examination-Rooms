@@ -212,13 +212,23 @@ def _search_dirs(model_dir=None):
 def find_model(model_dir=None, model_kind=None):
     """按优先级找模型文件。
 
-    model_kind: None/"auto" / "yolo" / "caffe" —— 指定优先族（找不到仍会回落）
+    model_kind:
+      None/"auto"  自动挑（YOLO 优先）
+      "yolo"       优先 ONNX
+      "caffe"      优先 MobileNet-SSD
+      "off"        显式不用模型，强制 HOG+SVM
     返回 (kind, path, extra)：
       kind = "onnx-yolo"   path = .onnx 路径，extra = None
       kind = "caffe-ssd"   path = .prototxt 路径，extra = .caffemodel 路径
-      kind = None          没找到任何模型
+      kind = None          没找到任何模型（或已显式关闭）
+
+    为什么需要 "off"：目录里放上模型后，**所有** PersonTracker 默认都会用模型，
+    而合成剪影/色块这类非真实画面 YOLO 是认不出的——单元测试要测"HOG 兜底路径"
+    就必须能显式关掉模型，否则测的其实是另一条分支。
     """
     kind = (model_kind or "auto").lower()
+    if kind == "off":
+        return None, None, None
     if kind not in ("auto", "yolo", "caffe"):
         kind = "auto"
     onnx_files, prototxts = [], []
@@ -522,6 +532,7 @@ class PersonTracker(object):
         self._last_scores = None
         self._last_phones = []
         self._last_unassigned_phones = []
+        self._last_phone_peak = 0.0     # 最近一帧手机类的峰值置信度（不受阈值影响）
 
         # 检测后端状态（供 backend_name() / 自检读取）
         self._backend_kind = "hog"                # hog / caffe-ssd / onnx-yolo
@@ -797,18 +808,27 @@ class PersonTracker(object):
                     and self._net_input_size[0] >= _YOLO_DEFAULT_IMGSZ * 0.5)
 
     def detect_phones(self, frame):
-        """对外接口：检出手机，返回 (phones, supports)。
+        """对外接口：检出手机，返回 (phones, supports, peak)。
 
-        phones: [{"rect","score"}]，原图坐标；supports=False 表示当前后端不支持。
+        phones:   [{"rect","score"}]，原图坐标
+        supports: False 表示当前后端不支持（HOG/Haar/SSD 都不认手机）
+        peak:     本帧手机类的**峰值置信度**（不受阈值影响）。
+                  检不出时看这个数就知道是"没检到"(如 0.02) 还是
+                  "检到了但阈值太高"(如 0.45 < 0.60)。
         """
         if not self.enable_phone:
-            return [], False
+            return [], False, 0.0
         if not self.supports_phone:
             self._last_phones = []
-            return [], False
+            self._last_phone_peak = 0.0
+            return [], False, 0.0
         found = self._detect_phones(frame)
         self._last_phones = [{"rect": r, "score": float(s)} for r, s in found]
-        return self._last_phones, True
+        return self._last_phones, True, self._last_phone_peak
+
+    def phone_peak(self):
+        """最近一帧手机类的峰值置信度（配合界面诊断显示）。"""
+        return float(getattr(self, "_last_phone_peak", 0.0) or 0.0)
 
     # ---------------- 辅助 ----------------
     def _scale_frame(self, frame):
@@ -894,7 +914,7 @@ class PersonTracker(object):
             a = np.squeeze(a, axis=0)
         if a.ndim != 2 or a.shape[1] < 5:
             return (np.zeros((0, 4), np.float32), np.zeros((0,), np.float32),
-                    None, [])
+                    None, [], 0.0)
         if a.shape[0] < a.shape[1]:
             a = a.T
         cx, cy, bw, bh = a[:, 0], a[:, 1], a[:, 2], a[:, 3]
@@ -922,7 +942,16 @@ class PersonTracker(object):
         p_scores = scores[pkeep]
         p_kps = kp[pkeep] if kp is not None else None
 
+        phone_peak = 0.0
         phones = []
+        if nz >= 80:
+            # 手机类的"峰值置信度"：**不受阈值影响**，始终记录。
+            # 用途：同学们拿手机却检不出时，界面上能看到到底是多少分
+            # （例如 0.42 就说明是阈值 0.60 太高，而不是"没检到"）。
+            try:
+                phone_peak = float(np.max(rest[:, PHONE_CLASS_ID]))
+            except Exception:
+                phone_peak = 0.0
         if want_phone and nz >= 80:
             tkeep = (cls_ids == PHONE_CLASS_ID) & (scores >= phone_conf)
             for i in np.where(tkeep)[0]:
@@ -939,7 +968,7 @@ class PersonTracker(object):
                              k[0][2], k[0][3])) <= 0.45 for k in kept):
                     kept.append((box, sc))
             phones = kept
-        return p_boxes, p_scores, p_kps, phones
+        return p_boxes, p_scores, p_kps, phones, phone_peak
 
     @staticmethod
     def _letterbox_params(fw, fh, imgsz):
@@ -1047,8 +1076,9 @@ class PersonTracker(object):
         旧实现在多类模型上取"第 0 类 person"，且没有手机支持；
         与 _postprocess_yolo_full 重复容易混用，内部已不再调用它。
         """
-        return self._postprocess_yolo_full(out, conf_thres, 1.0,
-                                          want_phone=False)[:3]
+        pb, ps, pk, _ph, _peak = self._postprocess_yolo_full(
+            out, conf_thres, 1.0, want_phone=False)
+        return pb, ps, pk
 
     def _normalize_phones(self, phones_in, fw, fh, scale, dw, dh):
         """把 YOLO 后处理的手机框（输入尺度 cx,cy,w,h）映射到原图像素并做合理性过滤。"""
@@ -1095,8 +1125,9 @@ class PersonTracker(object):
             out = self._net.forward()
 
         want_phone = bool(self.enable_phone)
-        boxes, scores, kps, phones_in = self._postprocess_yolo_full(
+        boxes, scores, kps, phones_in, phone_peak = self._postprocess_yolo_full(
             out, self.yolo_conf, self.phone_conf, want_phone=want_phone)
+        self._last_phone_peak = float(phone_peak) if want_phone else 0.0
         phones = (self._normalize_phones(phones_in, fw, fh, scale, dw, dh)
                   if want_phone else [])
         if boxes.shape[0] == 0:
@@ -1480,6 +1511,7 @@ class PersonTracker(object):
         # 2) 没有模型：HOG 主检测 + 人脸/运动辅助（带来源标签，便于压重复框）
         self._last_pose = None
         self._last_phones = []        # HOG 后端检不出手机
+        self._last_phone_peak = 0.0
         cands = []          # [(rect, score, src)]，坐标均在 small 上
 
         # 2.1) MobileNet-SSD（配置成 caffe 但装载失败时 _net 为 None，此支不生效）

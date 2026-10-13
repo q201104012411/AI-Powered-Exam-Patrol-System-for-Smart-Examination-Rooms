@@ -753,6 +753,17 @@ class TerminalApp(object):
                         cam["_ai_count"] = (det.stable_count()
                                             if hasattr(det, "stable_count")
                                             else len(persons))
+                        # 手机识别：本路"使用手机"人数 + 手机类峰值置信度。
+                        # 峰值不受阈值影响——拿手机却检不出时看它就知道是
+                        # "模型没认出来(≈0)"还是"认出来了但阈值高"。
+                        cam["_ai_phone"] = sum(1 for p in persons
+                                               if p.get("has_phone"))
+                        try:
+                            cam["_ai_phone_peak"] = (det.phone_peak()
+                                                     if hasattr(det, "phone_peak")
+                                                     else 0.0)
+                        except Exception:
+                            cam["_ai_phone_peak"] = 0.0
                         self._cam_ai_side_effects(url, cam, persons, viol)
                 scale = cam.get("_ai_scale")
                 if scale is None:
@@ -856,8 +867,8 @@ class TerminalApp(object):
                                    foreground=DENSITY_COLOR.get(level, "#888"))
                 except tk.TclError:
                     pass
-        # 面板边框：越界红 > 异常橙 > 正常绿
-        self._cam_set_border(cam, "error" if viol else
+        # 面板边框：越界红 > 使用手机红 > 异常橙 > 正常绿
+        self._cam_set_border(cam, "error" if (viol or cam.get("_ai_phone")) else
                              ("warn" if any(p.get("behaviors") for p in persons)
                               else "ok"))
         now_ms = time.time() * 1000.0
@@ -868,9 +879,20 @@ class TerminalApp(object):
                 # 避免操作员误以为已经在用 YOLO/SSD 这类模型
                 backend = getattr(self, "_ai_backend_name", "")
                 extra = ("　｜　后端：%s" % backend) if backend else ""
+                # 手机告警：检到就报数；没检到但模型支持时，把"手机类峰值置信度"
+                # 一并显示——拿手机却不出告警时，看这个数就知道是不是模型没认出来
+                ph = int(cam.get("_ai_phone", 0) or 0)
+                if ph:
+                    phone_txt = "　｜　📱 手机 %d" % ph
+                elif "YOLO" in backend:
+                    phone_txt = "　｜　手机峰值 %.2f" % float(
+                        cam.get("_ai_phone_peak", 0.0) or 0.0)
+                else:
+                    phone_txt = ""
                 self.monitor_status.config(
-                    text="AI识别中：%d 人，越界 %d%s"
-                         % (cam.get("_ai_count", len(persons)), viol, extra))
+                    text="AI识别中：%d 人，越界 %d%s%s"
+                         % (cam.get("_ai_count", len(persons)), viol,
+                            phone_txt, extra))
             except tk.TclError:
                 pass
             self._monitor_update_info_bar()

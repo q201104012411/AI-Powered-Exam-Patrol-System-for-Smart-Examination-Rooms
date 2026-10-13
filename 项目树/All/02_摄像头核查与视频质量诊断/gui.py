@@ -1613,6 +1613,17 @@ class App(object):
                             if hasattr(tracker, "stable_count") else len(persons)
                         # 分析分辨率 -> 显示分辨率 的比例
                         panel["ai_scale"] = disp.shape[1] / float(ai_frame.shape[1])
+                        # 手机识别：记录本路"使用手机"的人数与手机类峰值置信度。
+                        # 峰值不受阈值影响——拿手机却检不出时，看它就知道是
+                        # "模型没认出来(≈0)" 还是 "认出来了但阈值高"。
+                        panel["ai_phone"] = sum(1 for p in persons
+                                                if p.get("has_phone"))
+                        try:
+                            panel["ai_phone_peak"] = (tracker.phone_peak()
+                                                      if hasattr(tracker, "phone_peak")
+                                                      else 0.0)
+                        except Exception:
+                            panel["ai_phone_peak"] = 0.0
                         # 人脸框带出来给 draw_boxes 画
                         for p in persons:
                             tr = getattr(tracker, "_tracks", {}).get(p["pid"])
@@ -1648,15 +1659,19 @@ class App(object):
         panel["density_level"] = level
         panel["persons"] = persons
         self._cam_set_density(code, level)
-        # 状态边框：越界红 > 异常橙 > 正常绿
-        if viol:
+        # 状态边框：越界红 > 使用手机红 > 异常橙 > 正常绿
+        if viol or panel.get("ai_phone"):
             self._cam_set_border(code, "error")
         elif any(p.get("behaviors") for p in persons):
             self._cam_set_border(code, "stalled")
         else:
             self._cam_set_border(code, "playing")
-        # 显示平滑后的人数（避免读数在 15/16/17 之间乱跳）
-        self._cam_set_ai(code, panel.get("ai_count", len(persons)), viol)
+        # 显示平滑后的人数（避免读数在 15/16/17 之间乱跳），并带上手机告警
+        phone_txt = ""
+        if panel.get("ai_phone"):
+            phone_txt = "　📱 手机 %d" % panel["ai_phone"]
+        self._cam_set_ai(code, panel.get("ai_count", len(persons)),
+                         viol, extra=phone_txt)
         # 顶部信息条与汇总限频刷新，避免每路每次分析都去改 Tk 控件
         now_ms = time.time() * 1000.0
         if (now_ms - getattr(self, "_info_ts", 0.0)) >= INFO_BAR_MS:
@@ -1712,8 +1727,11 @@ class App(object):
         except tk.TclError:
             pass
 
-    def _cam_set_ai(self, code, n_person, n_cross):
-        """逐路显示 AI 识别人数：正常绿、有越界橙红，未开 AI 时留空"""
+    def _cam_set_ai(self, code, n_person, n_cross, extra=""):
+        """逐路显示 AI 识别人数：正常绿、有越界橙红，未开 AI 时留空。
+
+        extra：附加文本（目前用于"📱 手机 N"手机告警）。
+        """
         panel = self._mon_panels.get(code)
         if panel is None:
             return
@@ -1721,9 +1739,11 @@ class App(object):
         if ai is None or not ai.winfo_exists():
             return
         if n_cross:
-            text, color = "AI 识别中：%d 人，越界 %d" % (n_person, n_cross), CAM_AI_COLOR
+            text = "AI 识别中：%d 人，越界 %d" % (n_person, n_cross)
         else:
-            text, color = "AI 识别中：%d 人" % n_person, CAM_COLORS["playing"]
+            text = "AI 识别中：%d 人" % n_person
+        text += extra or ""
+        color = CAM_AI_COLOR if (n_cross or extra) else CAM_COLORS["playing"]
         # 内容没变就不碰控件（Tk 的 config 会触发重绘，路数一多非常吃 CPU）
         if panel.get("ai_text") == text:
             return

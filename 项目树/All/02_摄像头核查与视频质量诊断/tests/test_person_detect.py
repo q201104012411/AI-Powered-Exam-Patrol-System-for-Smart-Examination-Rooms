@@ -77,7 +77,7 @@ class TestPersonTracker(unittest.TestCase):
 
     def test_single_realistic_person_detected(self):
         """单个较真实人形剪影应能被检测到"""
-        tracker = pd.PersonTracker(dense_mode=True, max_input_dim=1920)
+        tracker = pd.PersonTracker(model_kind="off", dense_mode=True, max_input_dim=1920)
         img = np.full((720, 1280, 3), 235, dtype=np.uint8)
         self._draw_realistic_person(img, 640, 360, height=220)
         rects = tracker._detect(img)
@@ -85,7 +85,7 @@ class TestPersonTracker(unittest.TestCase):
 
     def test_synthetic_40_persons_detected_without_exception(self):
         """40 个合成小人：不抛异常、检测到若干人、密度等级为 high"""
-        tracker = pd.PersonTracker(dense_mode=True, detect_stride=1,
+        tracker = pd.PersonTracker(model_kind="off", dense_mode=True, detect_stride=1,
                                    max_input_dim=1920)
         img = self._make_person_scene(n=40)
         # 视频流场景：连续两帧都检出才算"确认的人"（滤掉单帧噪声）
@@ -104,7 +104,7 @@ class TestPersonTracker(unittest.TestCase):
 
     def test_margin_tighter_than_old_default(self):
         """收紧后的框应比原始 HOG 框小；5% 收紧程度应比 2% 更大（直接测试 _shrink_rect）"""
-        tracker = pd.PersonTracker(max_input_dim=1920)
+        tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920)
         raw_rect = (100, 100, 300, 500)
         fw, fh = 1280, 720
         raw_area = raw_rect[2] * raw_rect[3]
@@ -120,7 +120,7 @@ class TestPersonTracker(unittest.TestCase):
 
     def test_min_box_size_enforced(self):
         """收紧后框不应低于 24×24"""
-        tracker = pd.PersonTracker(margin_ratio=0.02, max_input_dim=1920)
+        tracker = pd.PersonTracker(model_kind="off", margin_ratio=0.02, max_input_dim=1920)
         img = np.full((720, 1280, 3), 235, dtype=np.uint8)
         self._draw_realistic_person(img, 100, 150, height=80)
         rects = tracker._detect(img)
@@ -130,7 +130,7 @@ class TestPersonTracker(unittest.TestCase):
 
     def test_draw_returns_density_level(self):
         """draw 返回的每个人必须包含 density_level 字段"""
-        tracker = pd.PersonTracker(max_input_dim=1920)
+        tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920)
         img = np.full((720, 1280, 3), 235, dtype=np.uint8)
         self._draw_realistic_person(img, 640, 360, height=220)
         _, _, persons = tracker.draw(img)
@@ -141,7 +141,7 @@ class TestPersonTracker(unittest.TestCase):
 
     def test_high_density_no_exception(self):
         """高密度场景连续多帧不会抛异常"""
-        tracker = pd.PersonTracker(dense_mode=True, detect_stride=2,
+        tracker = pd.PersonTracker(model_kind="off", dense_mode=True, detect_stride=2,
                                    max_input_dim=1920)
         for _ in range(5):
             img = self._make_person_scene(n=40)
@@ -150,7 +150,7 @@ class TestPersonTracker(unittest.TestCase):
 
     def test_stop_start_resets_tracker(self):
         """stop / start 后跟踪器应清空并复位"""
-        tracker = pd.PersonTracker(max_input_dim=1920)
+        tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920)
         img = np.full((720, 1280, 3), 235, dtype=np.uint8)
         self._draw_realistic_person(img, 640, 360, height=220)
         tracker.draw(img)
@@ -166,7 +166,7 @@ class TestPersonTracker(unittest.TestCase):
 
     def test_detect_stride_prediction_frame(self):
         """detect_stride > 1 时，非检测帧应通过预测维持轨迹"""
-        tracker = pd.PersonTracker(detect_stride=2, max_missed=5,
+        tracker = pd.PersonTracker(model_kind="off", detect_stride=2, max_missed=5,
                                    max_input_dim=1920)
         img = np.full((720, 1280, 3), 235, dtype=np.uint8)
         self._draw_realistic_person(img, 640, 360, height=220)
@@ -178,7 +178,7 @@ class TestPersonTracker(unittest.TestCase):
 
     def test_auxiliary_detectors_do_not_crash(self):
         """背景差分、人头检测辅助分支至少不会崩溃，并返回 list"""
-        tracker = pd.PersonTracker(max_input_dim=1920)
+        tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920)
         img = self._make_person_scene(n=40)
         # 背景差分需要若干帧历史，连续调用不应抛异常
         for _ in range(3):
@@ -193,12 +193,12 @@ class TestAccuracyFixes(unittest.TestCase):
 
     def test_default_boundary_is_near_bottom(self):
         """警戒线默认必须在画面 90% 以下，否则中后排考生会被误判越界"""
-        tracker = pd.PersonTracker(max_input_dim=1920)
+        tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920)
         self.assertGreaterEqual(tracker.boundary_ratio, 0.90)
 
     def test_seated_person_in_middle_is_not_out_of_bounds(self):
         """坐在画面中部（底部在 70% 高度）的人不应被判越界/上报"""
-        tracker = pd.PersonTracker(max_input_dim=1920)
+        tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920)
         frame = np.full((1080, 1920, 3), 200, dtype=np.uint8)
         track = pd._Track(1, (800, 500, 120, 250), int(1080 * tracker.boundary_ratio))
         # 框底 = 750，警戒线 = 993 -> 不越界
@@ -208,7 +208,7 @@ class TestAccuracyFixes(unittest.TestCase):
 
     def test_person_at_camera_front_is_out_of_bounds(self):
         """走到镜头前（框底越过 92% 线）才应判越界"""
-        tracker = pd.PersonTracker(max_input_dim=1920)
+        tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920)
         frame = np.full((1080, 1920, 3), 200, dtype=np.uint8)
         track = pd._Track(1, (800, 950, 200, 200), int(1080 * tracker.boundary_ratio))
         _, bad, _ = tracker.analyze(frame, track)
@@ -216,7 +216,7 @@ class TestAccuracyFixes(unittest.TestCase):
 
     def test_wide_boxes_are_filtered_out(self):
         """宽高比超过 max_aspect 的扁框（桌椅/墙面误检）必须被剔除"""
-        tracker = pd.PersonTracker(max_input_dim=1920)
+        tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920)
         rects = [
             (100, 100, 60, 150),     # 正常人（宽高比 0.4）
             (200, 100, 400, 100),    # 很扁的误检（宽高比 4.0）
@@ -229,7 +229,7 @@ class TestAccuracyFixes(unittest.TestCase):
 
     def test_turn_requires_consecutive_confirmation(self):
         """单帧宽高比突变不应立刻报'大幅度偏转'（旧版会把噪音全刷成异常）"""
-        tracker = pd.PersonTracker(max_input_dim=1920, confirm_frames=4)
+        tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920, confirm_frames=4)
         frame = np.full((720, 1280, 3), 200, dtype=np.uint8)
         track = pd._Track(1, (600, 300, 260, 200), 662)   # 宽高比 1.3，单帧很宽
         action, _, behaviors = tracker.analyze(frame, track)
@@ -238,7 +238,7 @@ class TestAccuracyFixes(unittest.TestCase):
 
     def test_turn_reported_after_sustained_wide_frames(self):
         """连续多帧都偏宽时才报'大幅度偏转'"""
-        tracker = pd.PersonTracker(max_input_dim=1920, confirm_frames=4)
+        tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920, confirm_frames=4)
         frame = np.full((720, 1280, 3), 200, dtype=np.uint8)
         track = pd._Track(1, (600, 300, 260, 200), 662)
         for _ in range(5):
@@ -249,7 +249,7 @@ class TestAccuracyFixes(unittest.TestCase):
 
     def test_stable_count_uses_median(self):
         """人数读数取最近几次的中位数，避免在 15/16/17 之间乱跳"""
-        tracker = pd.PersonTracker(max_input_dim=1920)
+        tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920)
         for n in (10, 11, 10, 40, 10):
             tracker._count_hist.append(n)
             ordered = sorted(tracker._count_hist)
@@ -258,7 +258,7 @@ class TestAccuracyFixes(unittest.TestCase):
         self.assertEqual(tracker.stable_count(), 10)
 
     def test_stop_resets_count_smoothing(self):
-        tracker = pd.PersonTracker(max_input_dim=1920)
+        tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920)
         tracker._count_hist.extend([5, 6, 7])
         tracker._stable_count = 6
         tracker.stop()
@@ -271,7 +271,7 @@ class TestTrackingFramework(unittest.TestCase):
 
     def test_match_distance_scales_with_frame_width(self):
         """匹配半径应随画面宽度自适应，且不超过 max_dist 上限"""
-        tracker = pd.PersonTracker(max_dist=90, match_dist_ratio=0.12)
+        tracker = pd.PersonTracker(model_kind="off", max_dist=90, match_dist_ratio=0.12)
         self.assertEqual(tracker._match_dist(416), 49)    # 416*0.12 ≈ 49
         self.assertEqual(tracker._match_dist(1920), 90)   # 受 max_dist 封顶
         self.assertGreaterEqual(tracker._match_dist(100), 12)  # 有下限
@@ -295,7 +295,7 @@ class TestTrackingFramework(unittest.TestCase):
 
     def test_single_frame_noise_is_not_confirmed(self):
         """只命中一次的轨迹不应计入人数（单帧反光/桌椅误检）"""
-        tracker = pd.PersonTracker(dense_mode=True, max_input_dim=1920, min_hits=2)
+        tracker = pd.PersonTracker(model_kind="off", dense_mode=True, max_input_dim=1920, min_hits=2)
         img = np.full((720, 1280, 3), 235, dtype=np.uint8)
         TestPersonTracker._draw_realistic_person(img, 640, 360, height=220)
         # 人为放一条只命中一次的轨迹
@@ -307,7 +307,7 @@ class TestTrackingFramework(unittest.TestCase):
 
     def test_duplicate_tracks_are_merged(self):
         """同一个人被检出两个框时应合并，避免人数虚高"""
-        tracker = pd.PersonTracker(max_input_dim=1920, min_hits=1)
+        tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920, min_hits=1)
         tracker._tracks[1] = pd._Track(1, (100, 100, 60, 150), 662)
         tracker._tracks[2] = pd._Track(2, (104, 103, 60, 150), 662)  # 几乎重合
         tracker._tracks[1].hits = 5
@@ -340,7 +340,7 @@ class TestTrackingFramework(unittest.TestCase):
 
     def test_duplicate_small_boxes_merged_end_to_end(self):
         """端到端：同一人被检出两个偏移小框，人数不应翻倍"""
-        tracker = pd.PersonTracker(dense_mode=True, max_input_dim=1920, min_hits=1)
+        tracker = pd.PersonTracker(model_kind="off", dense_mode=True, max_input_dim=1920, min_hits=1)
         dupes = [(200, 300, 26, 40), (206, 306, 26, 40)]   # 同一个人的两个框
         tracker._detect = lambda frame: list(dupes)
         frame = np.zeros((234, 416, 3), dtype=np.uint8)
@@ -350,7 +350,7 @@ class TestTrackingFramework(unittest.TestCase):
 
     def test_distinct_persons_are_not_merged(self):
         """相隔较远的两条轨迹不能被误合并"""
-        tracker = pd.PersonTracker(max_input_dim=1920, min_hits=1)
+        tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920, min_hits=1)
         tracker._tracks[1] = pd._Track(1, (100, 100, 60, 150), 662)
         tracker._tracks[2] = pd._Track(2, (500, 100, 60, 150), 662)
         tracker._tracks[1].hits = 5
@@ -360,7 +360,7 @@ class TestTrackingFramework(unittest.TestCase):
 
     def test_min_hits_can_be_overridden_for_single_image(self):
         """单张图片分析可传 min_hits=1 立即得到结果"""
-        tracker = pd.PersonTracker(dense_mode=True, max_input_dim=1920)
+        tracker = pd.PersonTracker(model_kind="off", dense_mode=True, max_input_dim=1920)
         img = np.full((720, 1280, 3), 235, dtype=np.uint8)
         TestPersonTracker._draw_realistic_person(img, 640, 360, height=220)
         persons, _, _ = tracker.analyze_only(img, min_hits=1)
@@ -408,7 +408,7 @@ class TestRenderFastPath(unittest.TestCase):
 
     def test_draw_boxes_paints_green_for_normal_person(self):
         """draw_boxes 应在正常人员位置画出绿色像素"""
-        tracker = pd.PersonTracker(max_input_dim=1920)
+        tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920)
         frame = np.full((200, 200, 3), 255, dtype=np.uint8)
         tracker.draw_boxes(frame, [self._person(rect=(40, 40, 60, 100))],
                            line_y=None, draw_line=False)
@@ -419,7 +419,7 @@ class TestRenderFastPath(unittest.TestCase):
         self.assertTrue(greens, "正常人员应画出绿色框")
 
     def test_draw_boxes_paints_red_for_out_of_bounds(self):
-        tracker = pd.PersonTracker(max_input_dim=1920)
+        tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920)
         frame = np.full((200, 200, 3), 255, dtype=np.uint8)
         tracker.draw_boxes(frame, [self._person(bad=True, rect=(40, 40, 60, 100))],
                            line_y=None, draw_line=False)
@@ -430,7 +430,7 @@ class TestRenderFastPath(unittest.TestCase):
 
     def test_draw_boxes_scales_from_analysis_to_display(self):
         """分析分辨率 -> 显示分辨率的坐标映射必须生效"""
-        tracker = pd.PersonTracker(max_input_dim=1920)
+        tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920)
         frame = np.full((100, 100, 3), 255, dtype=np.uint8)
         # 分析帧 200 宽，显示帧 100 宽 -> scale=0.5，框应落在 (10,10)
         tracker.draw_boxes(frame, [self._person(rect=(20, 20, 40, 60))],
@@ -441,7 +441,7 @@ class TestRenderFastPath(unittest.TestCase):
 
     def test_analyze_only_does_not_draw(self):
         """analyze_only 不应在帧上落笔（贴图与绘制解耦）"""
-        tracker = pd.PersonTracker(dense_mode=True, max_input_dim=1920)
+        tracker = pd.PersonTracker(model_kind="off", dense_mode=True, max_input_dim=1920)
         img = np.full((720, 1280, 3), 235, dtype=np.uint8)
         TestPersonTracker._draw_realistic_person(img, 640, 360, height=220)
         before = img.copy()
@@ -470,7 +470,7 @@ class TestRenderFastPath(unittest.TestCase):
 
     def test_draw_returns_same_array_in_place(self):
         """draw 原地绘制并返回同一数组（界面层据此省掉大帧拷贝）"""
-        tracker = pd.PersonTracker(dense_mode=True, max_input_dim=1920)
+        tracker = pd.PersonTracker(model_kind="off", dense_mode=True, max_input_dim=1920)
         img = np.full((360, 640, 3), 235, dtype=np.uint8)
         out, violations, persons = tracker.draw(img)
         self.assertIs(out, img)
