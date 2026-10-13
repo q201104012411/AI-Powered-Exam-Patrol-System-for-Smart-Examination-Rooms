@@ -4,13 +4,13 @@
 
 【入口】
   启动终端界面.bat      -> terminal_gui.py（桌面界面，4 页签）
-  运行自检与测试.bat    -> 单元测试(106) + 端到端自检(55)
+  运行自检与测试.bat    -> 单元测试(124) + 端到端自检(74)
   main.py               -> 端到端自检；默认用临时数据目录，--real 用真实目录
   terminal_gui.py       -> 界面；登录后按角色装配视图
 
 【模块与职责】
   config.py    路径解析(DATA_ROOT)、终端类型、告警分级元数据(LEVEL_META)、
-               角色动作矩阵(ROLE_ACTIONS)、断网与管控阈值、时钟与播报表
+               角色动作矩阵(ROLE_ACTIONS)、断网与管控阈值、时钟与播报表、AI 检测设置(load_ai_settings/save_ai_settings)
   models.py    Alert（含分级/SLA/脱敏展示/序列化）、ReviewRecord、
                canonical()、chain_hash() 哈希链原语
   storage.py   SQLite：alerts / reviews / audit(哈希链) / commands / kv
@@ -45,6 +45,16 @@
   _cmd_bridge.py   子进程侧：把 01 目录放进 sys.path，调用其 cmd_console.execute，
                **不自行判权限**（role 原样传，由 01 的 accounts.cmd_console_tier 定），
                以最后一行 JSON 回传；设 sys.dont_write_bytecode 保证对 01 只读
+
+  person_detect.py  【AI 框选识别，与 02 同一份代码，已同步为模型接入版】
+               检测后端自动选择：YOLO-pose ONNX > YOLO ONNX > MobileNet-SSD Caffe
+               > HOG+SVM(兜底)；模型在"本目录"与"本目录\models\"自动查找，
+               找到即启用、找不到静默回落 HOG（不报错、不崩）；
+               有 pose 时用骨骼几何(肩线倾斜/头肩偏移/眼耳置信度)判行为，
+               否则用原框宽高比逻辑；detect_backends()/backend_name()/backend_info()
+               可如实报出当前后端（terminal_gui 会显示在状态栏并写 data\ai_backend.txt）
+  工具_模型对比.py  检测后端可用性自检(--selftest) + 同一素材上 HOG/SSD/YOLO 的
+               速度/人数波动/轨迹连续性/精度对比；报告落 data\reports\
 
 【数据流】
   边缘/平台 --HTTP--> AlertHub.ingest --> SQLite(alerts) --+

@@ -77,6 +77,8 @@ class FaceVerifyGUI:
         self.auto_verify = tk.BooleanVar(value=False)
         self._verifying = False         # 防止自动核验并发叠加
         self._auto_sched = False        # after 调度是否已启动
+        self._auto_after_id = None      # 已排期的 after id（关闭时要取消，防叠加）
+        self._auto_busy_since = 0.0     # 本次核验开始时间戳（看门狗兜底解锁用）
         self.live_token = None          # 现场令牌
         self.live_desc = "未采集"
 
@@ -342,30 +344,36 @@ class FaceVerifyGUI:
         ttk.Button(elem, text="⇩ 按所选考生带入",
                    command=self._fill_elements_from_candidate
                    ).grid(row=1, column=6, sticky="w", padx=(12, 0), pady=(8, 0))
+        # 切换考生时会自动带入报名库的值；这里把提示固定显示出来，
+        # 避免操作员因为"输入框是空的"而在要素校验阶段被判 TICKET_MISMATCH。
+        self.elem_hint = ttk.Label(
+            elem, text="切换考生会自动按报名库带入准考证号/座位号，请与证件实物核对（不符请直接改）。",
+            foreground="#0a7d28", wraplength=880, justify="left")
+        self.elem_hint.grid(row=2, column=0, columnspan=7, sticky="w", pady=(6, 0))
         self.mode_hint = ttk.Label(elem, text=accounts.identity_mode_detail(),
                                    foreground="#888", wraplength=880, justify="left")
-        self.mode_hint.grid(row=2, column=0, columnspan=7, sticky="w", pady=(6, 0))
+        self.mode_hint.grid(row=3, column=0, columnspan=7, sticky="w", pady=(6, 0))
 
         # ---- 报名库带出（只读）：人脸通过后供工作人员对照证件实物目视核对 ----
-        ttk.Separator(elem, orient="horizontal").grid(row=3, column=0, columnspan=7,
+        ttk.Separator(elem, orient="horizontal").grid(row=4, column=0, columnspan=7,
                                                       sticky="ew", pady=(8, 4))
-        ttk.Label(elem, text="报名库带出（只读）：").grid(row=4, column=0, sticky="w")
+        ttk.Label(elem, text="报名库带出（只读）：").grid(row=5, column=0, sticky="w")
         self.id_card_var = tk.StringVar()
         self.id_card_entry = ttk.Entry(elem, textvariable=self.id_card_var, width=24,
                                        state="readonly")
-        self.id_card_entry.grid(row=4, column=1, sticky="w", padx=4)
-        ttk.Label(elem, text="准考证：").grid(row=4, column=2, sticky="w", padx=(12, 0))
+        self.id_card_entry.grid(row=5, column=1, sticky="w", padx=4)
+        ttk.Label(elem, text="准考证：").grid(row=5, column=2, sticky="w", padx=(12, 0))
         self.ticket_var = tk.StringVar()
         self.ticket_entry = ttk.Entry(elem, textvariable=self.ticket_var, width=16,
                                       state="readonly")
-        self.ticket_entry.grid(row=4, column=3, sticky="w", padx=4)
-        ttk.Label(elem, text="座位：").grid(row=4, column=4, sticky="w", padx=(12, 0))
+        self.ticket_entry.grid(row=5, column=3, sticky="w", padx=4)
+        ttk.Label(elem, text="座位：").grid(row=5, column=4, sticky="w", padx=(12, 0))
         self.seat_var = tk.StringVar()
         self.seat_entry = ttk.Entry(elem, textvariable=self.seat_var, width=10,
                                     state="readonly")
-        self.seat_entry.grid(row=4, column=5, sticky="w", padx=4)
+        self.seat_entry.grid(row=5, column=5, sticky="w", padx=4)
         ttk.Label(elem, text="身份证号仅显示掩码（库中只存加盐哈希，明文不可逆）：请对照证件实物目视核对。",
-                  foreground="#888").grid(row=5, column=0, columnspan=7, sticky="w", pady=(6, 0))
+                  foreground="#888").grid(row=6, column=0, columnspan=7, sticky="w", pady=(6, 0))
 
         out = ttk.LabelFrame(body, text="核验结果", padding=8)
         out.pack(fill="both", expand=True, padx=10, pady=6)
@@ -476,23 +484,41 @@ class FaceVerifyGUI:
                 self.candidates = self.store.load()
                 if os.path.exists(config.INDEX_PATH):
                     self.index.load()
+                # 注意：_warmup_model() 不在这里调用。
+                # 原因：verifier 是在下面的 _after_load（主线程）里才赋值的，
+                # 而预热线程会并发跑 3~15 秒。若在后台线程直接预热，就会出现
+                # "模型已就绪、但 verifier 仍为 None" 的窗口期——此时点「开始核验」
+                # 会因 verifier 为 None 静默失败（表现为"点了没反应"）。
+                # 因此预热统一挪到 _after_load 末尾（主线程、verifier 已就绪）再启动。
                 self.root.after(0, self._after_load, None)
-                self._warmup_model()                  # 数据加载完就后台预热模型
             except Exception as e:
                 self.root.after(0, self._after_load, str(e))
         threading.Thread(target=work, daemon=True).start()
 
     def _after_load(self, err):
         if err:
-            self.status.config(text="加载失败：%s" % err)
+            self.status.config(text="加载失败：%s" % str(err)[:80])
             self.action_log.log("加载失败", str(err)[:120])
+            # 绝不能带着 None verifier 继续：否则点核验会静默失败。
+            # 这里给出明确提示并禁用按钮，让操作员知道该重启而不是干等。
+            try:
+                self.verify_btn.config(state="disabled")
+            except Exception:
+                pass
+            messagebox.showerror(
+                "数据加载失败",
+                "报名库/特征索引加载失败，核验功能不可用。\n\n原因：%s\n\n"
+                "请关闭程序后重新启动；若反复出现，请运行「运行自检与测试.bat」定位。" % err)
             return
         cids = sorted(self.candidates)
         self.candidate_combo["values"] = cids
+        self.candidate_combo.bind("<<ComboboxSelected>>", lambda e: self._on_candidate_change())
         if cids:
             self.candidate_var.set(cids[0])
             self._refresh_consent()
-        self.candidate_combo.bind("<<ComboboxSelected>>", lambda e: self._on_candidate_change())
+            # 首屏也要把核验输入框按报名库带入：否则启动后直接点核验会
+            # 因为准考证号为空而判 TICKET_MISMATCH（人脸比对不会执行）。
+            self._on_candidate_change()
         self.verifier = FaceVerifier(self.candidates, self.index,
                                      device_id=self.device_var.get(), logger=self.audit,
                                      operator=self.operator_var.get())
@@ -516,6 +542,9 @@ class FaceVerifyGUI:
                                      if accounts.strict_mode_enabled() else "已关闭（允许本地图片，留痕）"))
         self._append("-" * 64)
         self._refresh_identity_mode()
+        # 全部就绪后才预热人脸模型：此时 self.verifier 已赋值，不存在
+        # "模型就绪但 verifier 还是 None" 的窗口期。
+        self._warmup_model()
 
     def _report_library_health(self, missing_index):
         """库数据体检：把"会让核验恒失败"的数据问题直接摆到界面上。
@@ -584,6 +613,12 @@ class FaceVerifyGUI:
         self._refresh_consent()
         self.action_log.log("切换考生", "考生编号=%s" % self.candidate_var.get())
         self._auto_fill_from(self.candidate_var.get())
+        # 关键：把核验输入框也按报名库带入，否则选完考生直接点核验会因为
+        # 准考证号为空而判 TICKET_MISMATCH（人脸比对根本不会执行）。
+        try:
+            self._fill_elements_from_candidate(quiet=True)
+        except Exception:
+            pass
         self._enable_doc_check(None, False)
 
     def _refresh_consent(self):
@@ -1041,16 +1076,23 @@ class FaceVerifyGUI:
         else:
             self.photo_btn.config(text="选择图片（严格模式已禁用）")
 
-    def _fill_elements_from_candidate(self):
+    def _fill_elements_from_candidate(self, quiet=False):
         """
-        按所选考生把身份要素带入"核验输入"框（便利按钮，不等于自动填充）。
+        按所选考生把身份要素带入"核验输入"框。
+
+        **默认在切换考生时自动调用**（quiet=True）：否则操作员选完考生直接点核验，
+        输入框是空的 -> 核验会在要素校验阶段就判 TICKET_MISMATCH，
+        且相似度=None（人脸比对根本没跑），看起来就像"核验功能坏了"。
+        带入的只是**报名库里的值**，操作员仍应以证件实物为准核对/修改。
+
         只带入准考证号 / 座位号；身份证号**只带掩码、明文不可反推**，
         因此大考模式下必须人工输入证件原件号码，这里不会替你填。
         """
         cid = self.candidate_var.get()
         c = self.candidates.get(cid)
         if not c:
-            messagebox.showwarning("提示", "请先选择考生。")
+            if not quiet:
+                messagebox.showwarning("提示", "请先选择考生。")
             return
         self.elem_ticket_var.set(c.ticket_no or "")
         self.elem_seat_var.set(c.seat_no or "")
@@ -1058,10 +1100,17 @@ class FaceVerifyGUI:
             self.elem_id_var.set("")            # 掩码不是明文，留空由人工输入
             tip = "已带入准考证号/座位号；大考模式要求身份证号，请手工输入证件原件明文。"
         else:
-            tip = "已带入准考证号/座位号；常规模式身份证不参与校验，可留空。"
+            tip = "已按报名库带入准考证号/座位号，请与证件实物核对（不符请直接改）。"
         self.action_log.log("带入身份要素", "考生=%s 准考证=%s 座位=%s（身份证需人工输入）"
                             % (cid, c.ticket_no, c.seat_no))
-        self.status.config(text=tip)
+        if not quiet:
+            self.status.config(text=tip)
+        else:
+            # 切换考生时只更新提示，不刷日志噪音
+            try:
+                self.elem_hint.config(text=tip)
+            except (AttributeError, tk.TclError):
+                pass
 
     def _toggle_major_exam(self):
         """所有者开关：大考模式（必须使用身份证）"""
@@ -2480,6 +2529,26 @@ class FaceVerifyGUI:
     # ---------------- 自动核验（仅所有者面板可开启） ----------------
     AUTO_INTERVAL_MS = 2500           # 自动核验间隔（毫秒）
 
+    # 自动核验看门狗超时（秒）：一次核验正常在数秒内完成（实测 1~10 秒）。
+    # 超过这个时间仍未回调，说明后台线程已经死了或回调丢失，
+    # 此时必须强制解锁，否则自动核验会永久静默停止（"没反应"）。
+    AUTO_VERIFY_TIMEOUT_SEC = 45.0
+
+    def _stop_auto_verify(self):
+        """关闭自动核验：置位停止标记并取消已排期的 after 回调。
+
+        历史缺陷：只置 _auto_sched=False，已排期的 after 仍会执行；
+        反复开关会叠加多条调度链，表现为"越用越慢/偶发不响应"。
+        """
+        self._auto_sched = False
+        aid = getattr(self, "_auto_after_id", None)
+        if aid is not None:
+            try:
+                self.root.after_cancel(aid)
+            except Exception:
+                pass
+            self._auto_after_id = None
+
     def _toggle_auto_verify(self):
         on = self.auto_verify.get()
         self.action_log.log("自动核验开关", "开启" if on else "关闭")
@@ -2490,24 +2559,49 @@ class FaceVerifyGUI:
                                 % (self.AUTO_INTERVAL_MS / 1000.0))
             self._start_auto_verify()
         else:
+            self._stop_auto_verify()
             self.status.config(text="自动核验已关闭")
 
     def _start_auto_verify(self):
-        if self._auto_sched:
-            return
+        # 无论是否已在调度，都先清掉旧的 after，避免重复排期
+        self._stop_auto_verify()
         self._auto_sched = True
-        self.root.after(self.AUTO_INTERVAL_MS, self._schedule_auto_verify)
+        self._auto_after_id = self.root.after(self.AUTO_INTERVAL_MS,
+                                              self._schedule_auto_verify)
 
     def _schedule_auto_verify(self):
+        self._auto_after_id = None
         if not self.auto_verify.get():        # 被关闭 -> 停止调度
             self._auto_sched = False
             return
         self._try_auto_verify()
-        self.root.after(self.AUTO_INTERVAL_MS, self._schedule_auto_verify)
+        self._auto_after_id = self.root.after(self.AUTO_INTERVAL_MS,
+                                              self._schedule_auto_verify)
+
+    def _auto_verify_watchdog(self, started_at):
+        """看门狗：后台核验线程未按时回调时强制解锁，避免永久卡死。"""
+        if not self._verifying:
+            return
+        if time.time() - started_at < self.AUTO_VERIFY_TIMEOUT_SEC:
+            return
+        self._verifying = False
+        self._auto_busy_since = 0.0
+        self.status.config(text="自动核验超时已自动恢复（上一次核验未返回结果）")
+        self.action_log.log("自动核验超时", "超过 %.0f 秒未返回，已强制解锁"
+                            % self.AUTO_VERIFY_TIMEOUT_SEC)
 
     def _try_auto_verify(self):
         """主线程调度：取最新帧，交后台线程核验，避免并发叠加"""
         if self._verifying:
+            # 兜底解锁：正常路径会在回调里复位；若回调丢失则靠时间戳解锁
+            if self._auto_busy_since and \
+                    time.time() - self._auto_busy_since > self.AUTO_VERIFY_TIMEOUT_SEC:
+                self._verifying = False
+                self.action_log.log("自动核验超时", "检测到上次核验未复位，已解锁重试")
+            else:
+                return
+        if self.verifier is None:
+            self.status.config(text="自动核验：数据仍在加载，请稍候")
             return
         s = self.video_stream
         if s is None or not s.running:
@@ -2524,6 +2618,9 @@ class FaceVerifyGUI:
             self.status.config(text="自动核验：1:1 模式需先选定考生")
             return
         self._verifying = True
+        self._auto_busy_since = time.time()
+        self.root.after(int(self.AUTO_VERIFY_TIMEOUT_SEC * 1000) + 500,
+                        self._auto_verify_watchdog, self._auto_busy_since)
         self.status.config(text="自动核验中…")
         token = liveness.make_token(device, source="camera")
         # 身份要素在主线程取值（Tk 不是线程安全的）；自动核验同样遵守大考/常规模式
@@ -2551,12 +2648,22 @@ class FaceVerifyGUI:
 
     def _finish_auto_verify(self, rec):
         self._verifying = False
-        self._show_result(rec.to_dict())
+        self._auto_busy_since = 0.0
+        try:
+            self._show_result(rec.to_dict())
+        except Exception as e:
+            # _show_result 自身异常时绝不能把 _verifying 留在 True（会永久卡死自动核验）
+            self._verifying = False
+            self._auto_busy_since = 0.0
+            self.action_log.log("自动核验结果渲染异常", str(e)[:120])
+            self.status.config(text="自动核验结果渲染失败：%s" % str(e)[:60])
+            return
         self.status.config(text="自动核验完成，等待下一次" if self.auto_verify.get()
                            else "已获取现场图像")
 
     def _finish_auto_verify_error(self, msg):
         self._verifying = False
+        self._auto_busy_since = 0.0
         self._show_error(msg)
 
     # ---------------- 现场图像 ----------------
@@ -2648,6 +2755,17 @@ class FaceVerifyGUI:
 
     # ---------------- 核验 ----------------
     def _start_verify(self):
+        # 就绪守卫：报名库/特征索引尚未加载完时 self.verifier 仍为 None，
+        # 此时若直接往下走，会在线程里抛 AttributeError 只留下一条日志，
+        # 界面上表现为"点了没反应"。这里必须先给出明确提示。
+        if self.verifier is None:
+            self.status.config(text="尚未就绪：报名库/特征索引正在加载，请稍候再点「开始核验」")
+            messagebox.showwarning(
+                "请稍候",
+                "报名库与特征索引尚未加载完成，核验功能暂不可用。\n\n"
+                "请等界面底部状态栏显示「人脸模型已就绪，可开始核验」后再操作。\n"
+                "若状态栏一直停在「初始化中…」，请查看「操作记录」里的加载失败原因。")
+            return
         if self.live_image is None:
             messagebox.showwarning("提示", "请先抓拍或选择现场图像。")
             return
@@ -2699,6 +2817,28 @@ class FaceVerifyGUI:
             self.root.after(0, self._show_error, str(e))
 
     def _show_result(self, rec):
+        """薄包装：保证任何渲染异常都不会把「开始核验」按钮卡在 disabled。
+
+        历史缺陷：按钮在 _start_verify 里被 disable，只在 _show_result /
+        _show_error 里 restore。若渲染途中抛异常，按钮就永久灰显，
+        表现为"点了没反应"。
+        """
+        try:
+            self._render_result(rec)
+        except Exception as e:
+            self.action_log.log("结果渲染异常", str(e)[:150])
+            try:
+                self._append("[结果渲染异常] %s" % str(e)[:200])
+            except Exception:
+                pass
+            self.status.config(text="结果渲染异常，已恢复按钮（详见操作记录）")
+        finally:
+            try:
+                self.verify_btn.config(state="normal")
+            except Exception:
+                pass
+
+    def _render_result(self, rec):
         self._last_verdict = rec          # 供 AI 提示词判定当前阶段
         self.verify_btn.config(state="normal")
         self._append("-" * 64)
@@ -2769,6 +2909,15 @@ class FaceVerifyGUI:
                 "2) 由两名工作人员（含见证人）共同确认；\n"
                 "3) 在「见证人」栏填写姓名并重新核验留存记录。"
                 % REASON_TEXT.get(rec.get("reason_code"), rec.get("reason_code")))
+
+        # 手动核验成功路径的状态栏收尾：否则会一直停留在「核验中…」，
+        # 让操作员误以为还没出结果（自动核验路径由 _finish_auto_verify 覆盖）。
+        try:
+            if not getattr(self, "_auto_sched", False) or not self.auto_verify.get():
+                self.status.config(text="核验完成：%s（%s）"
+                                        % (rec.get("result"), rec.get("reason_code")))
+        except Exception:
+            pass
 
     def _show_error(self, msg):
         self.verify_btn.config(state="normal")

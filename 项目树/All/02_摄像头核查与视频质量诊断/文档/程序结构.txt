@@ -35,6 +35,14 @@
   workorder.py 工单闭环 open->dispatched->rectified->closed，
                复核不通过打回；整改必须附整改后截图
   report.py    逐机位/逐考场报告、KPI 报告、验收证据清单、导出
+  person_detect.py 【逐人检测与行为识别】检测后端自动选择：
+               YOLO-pose ONNX > YOLO ONNX > MobileNet-SSD Caffe > HOG+SVM(兜底)；
+               模型在"本目录"与"本目录 models\"自动查找，找到即启用，无模型静默回落；
+               跟踪用匈牙利(scipy)/最近邻回退 + 匀速预测；
+               有 pose 时用骨骼几何(肩线倾斜/头肩偏移/眼耳置信度)判行为，否则用框宽高比；
+               detect_backends()/backend_name()/backend_info() 可如实报出当前后端
+  工具_模型对比.py 检测后端可用性自检(--selftest) + 同一素材上 HOG/SSD/YOLO 的
+               速度/人数波动/轨迹连续性/精确率召回率对比，报告落 data\reports\
   gui.py       tkinter 界面：登录页直接建在主窗口内，登录后原地切主界面；
                受控操作先 Session.can() 判权限（_guard/_need），越权明确提示；
                所有者专属：删除机位、终端账户管理、审计链、隐藏 cmd 开关
@@ -52,6 +60,21 @@
                                      +--> 缺陷统计 / KPI / 报告
   心跳/录像/时间/音频 --> probe.* --> 同样进 Defect[]
   巡考联动：credibility_factor(机位) -> 告警分数 ×0.5/0.8/1.0
+
+【逐人检测（AI 框选）与模型接入】
+  帧 --> PersonTracker.analyze_only()
+           |-- 后端自动选择（按序找，找到即用，都没有用 HOG）：
+           |     1 YOLO-pose ONNX  -> 人框 + 17 骨骼点
+           |     2 YOLO ONNX(v5/v8/v11) -> 人框
+           |     3 MobileNet-SSD(prototxt+caffemodel) -> 人框
+           |     4 HOG+SVM(OpenCV 自带，兜底)
+           |-- 模型查找：本目录 与 本目录\models\（无需改配置/界面）
+           |-- 跟踪：匈牙利匹配(scipy)/最近邻回退 + 匀速预测 + 密度感知
+           |-- 行为：有骨骼点->骨骼几何(肩线倾斜/头肩偏移/眼耳置信度)
+           |         无骨骼点->框宽高比+质心+Haar 人脸/人眼(原逻辑)
+           v
+        persons[]（含 rect/action/bad/behaviors/score/pose）-> 界面/告警
+  权重不随仓库分发；缺模型时静默回落 HOG，不报错、不崩。
 
 【三级巡检】
   daily   每 30 分钟   全部考点   -> 在线率、质量异常清单

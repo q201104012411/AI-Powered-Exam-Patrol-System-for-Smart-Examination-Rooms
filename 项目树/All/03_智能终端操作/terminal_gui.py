@@ -135,7 +135,18 @@ RENDER_MS_MID = 90
 RENDER_MS_MANY = 130
 RENDER_MS_HUGE = 200
 AI_INTERVAL_MS = 500        # 单路 AI 分析最小间隔（2 次/秒）
-AI_INPUT_DIM = 416          # AI 分析用长边
+# AI 分析用长边。【2026-10 实测调优】HOG 的人体检测窗口是 128 px 高，
+# 而"坐着的人"在 416 长边下只有约 70 px 高，必然漏检。实测检出人数：
+#     416 -> 4~5 人 ｜ 640 -> 6 人 ｜ 原生 1080p -> 7 人（真值 24 人，HOG 上限如此）
+# 同时 person_detect 已默认关闭 dense 密集网格（同检出、耗时约 1/3）。
+# 因此默认由 416 提到 640：约 33 ms/次/路，9 路约占单核 60%，仍有余量。
+# 可在 data\ai_settings.json 里用 ai_input_dim / ai_mode 覆盖（见 config.load_ai_settings）。
+AI_MODE_DIM = {             # 预设：标准 / 密集 / 节能
+    "standard": 640,
+    "dense": 768,
+    "energy": 416,
+}
+AI_INPUT_DIM = AI_MODE_DIM["standard"]   # 兼容旧引用；启动时按设置覆盖
 INFO_BAR_MS = 500           # 顶部状态条最小刷新间隔
 MAX_PANEL_W = 480
 MAX_PANEL_H = 300
@@ -707,8 +718,19 @@ class TerminalApp(object):
                 due = (now_ms - cam.get("_ai_ts", 0.0)) >= AI_INTERVAL_MS
                 if due:
                     rh, rw = raw.shape[:2]
-                    if max(rh, rw) > AI_INPUT_DIM:
-                        s = AI_INPUT_DIM / float(max(rh, rw))
+                    # 分析长边按设置解析（缓存到 cam，避免每帧读配置）
+                    dim = cam.get("_ai_dim")
+                    if dim is None:
+                        try:
+                            cfg = config.load_ai_settings()
+                            dim = int(cfg.get("ai_input_dim") or 0) or \
+                                AI_MODE_DIM.get(str(cfg.get("ai_mode") or "standard"),
+                                                AI_INPUT_DIM)
+                        except Exception:
+                            dim = AI_INPUT_DIM
+                        cam["_ai_dim"] = dim
+                    if max(rh, rw) > dim:
+                        s = dim / float(max(rh, rw))
                         ai_frame = cv2.resize(raw, (max(2, int(rw * s)),
                                                     max(2, int(rh * s))),
                                               interpolation=cv2.INTER_AREA)
@@ -749,16 +771,37 @@ class TerminalApp(object):
             self._cam_set_status(url, "渲染失败：%s" % e, "#c00")
 
     def _person_detector_for(self, url):
-        """取（或创建）该路的 AI 检测器（与 02 的算法参数保持一致）"""
+        """取（或创建）该路的 AI 检测器。
+
+        检测后端由 person_detect 自动选择（YOLO-ONNX > MobileNet-SSD > HOG），
+        模型放在本目录或本目录\\models\\ 即自动启用；可用 data\\ai_settings.json
+        覆盖优先级/阈值/GPU 偏好（与 02 同一套设置格式）。
+        参数与 02 的算法参数保持一致。
+        """
         det = self._person_detectors.get(url)
         if det is not None:
             return det
+        # 读取 AI 检测设置（缺文件/坏文件都返回默认值，不抛异常）
         try:
-            det = pd_mod.PersonTracker(max_input_dim=1280,
-                                       boundary_ratio=BOUNDARY_RATIO,
-                                       confirm_frames=4,
-                                       min_hits=2)
+            ai_cfg = config.load_ai_settings()
+        except Exception:
+            ai_cfg = {}
+        kwargs = dict(max_input_dim=1280, boundary_ratio=BOUNDARY_RATIO,
+                      confirm_frames=4, min_hits=2)
+        # 只有新版 person_detect 才认识这些参数；老版本靠下面的 TypeError 回退
+        for k in ("model_kind", "prefer_gpu", "use_onnxruntime", "yolo_conf"):
+            if ai_cfg.get(k) not in (None, ""):
+                kwargs[k] = ai_cfg[k]
+        if ai_cfg.get("model_path"):
+            kwargs["model_path"] = ai_cfg["model_path"]
+        try:
+            det = pd_mod.PersonTracker(**kwargs)
             self._person_detectors[url] = det
+            # 如实展示当前到底用的哪个后端（没模型就是 HOG）
+            try:
+                self._log_ai_backend(det)
+            except Exception:
+                pass
         except TypeError:
             # 兼容尚未升级的 person_detect 版本
             det = pd_mod.PersonTracker(max_input_dim=1280)
@@ -772,6 +815,33 @@ class TerminalApp(object):
                 pass
             return None
         return det
+
+    def _log_ai_backend(self, det):
+        """把"当前实际用的是哪个检测后端"如实记录下来（没模型就是 HOG+SVM）。
+
+        只在后端发生变化时记录一次，避免刷屏；失败不影响识别主流程。
+        """
+        try:
+            name = det.backend_name() if hasattr(det, "backend_name") else "未知"
+        except Exception:
+            name = "未知"
+        if getattr(self, "_ai_backend_name", None) == name:
+            return
+        self._ai_backend_name = name
+        try:
+            (config.DATA_ROOT / "ai_backend.txt").write_text(
+                "%s\n" % name, encoding="utf-8")
+        except Exception:
+            pass
+        try:
+            det_info = det.backend_info() if hasattr(det, "backend_info") else {}
+            if getattr(det_info, "get", None) and det_info.get("kind") == "hog":
+                self.monitor_status.config(
+                    text="AI 框选：HOG+SVM（未放模型；放入 *.onnx 到本目录或 models\\ 可换用 YOLO）")
+            else:
+                self.monitor_status.config(text="AI 框选后端：%s" % name)
+        except Exception:
+            pass
 
     def _cam_ai_side_effects(self, url, cam, persons, viol):
         """AI 分析后的界面更新 + 异常上报本终端告警列表"""
@@ -794,9 +864,13 @@ class TerminalApp(object):
         if (now_ms - getattr(self, "_info_ts", 0.0)) >= INFO_BAR_MS:
             self._info_ts = now_ms
             try:
+                # 一并显示当前检测后端（没放模型时会明确显示 HOG+SVM），
+                # 避免操作员误以为已经在用 YOLO/SSD 这类模型
+                backend = getattr(self, "_ai_backend_name", "")
+                extra = ("　｜　后端：%s" % backend) if backend else ""
                 self.monitor_status.config(
-                    text="AI识别中：%d 人，越界 %d"
-                         % (cam.get("_ai_count", len(persons)), viol))
+                    text="AI识别中：%d 人，越界 %d%s"
+                         % (cam.get("_ai_count", len(persons)), viol, extra))
             except tk.TclError:
                 pass
             self._monitor_update_info_bar()

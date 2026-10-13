@@ -1,4 +1,4 @@
-# 智能终端操作端
+﻿# 智能终端操作端
 
 > 实现《[智能终端.md](智能终端.md)》里**终端侧软件**的部分。
 > 本目录是真代码，可运行、有测试；**硬件与选型类要求（国产化整机、国密、三防 PAD、拼接大屏、MDM 服务端）
@@ -10,7 +10,7 @@
 | --- | --- |
 | 打开终端界面 | 双击 `启动终端界面.bat` |
 | 一键自检（74 项） | 双击 `运行自检与测试.bat` |
-| 只跑单元测试（106 项） | `python -m unittest discover -s tests -t .` |
+| 只跑单元测试（124 项） | `python -m unittest discover -s tests -t .` |
 | 自检（用临时数据，不污染） | `python main.py` |
 | 自检（用真实数据目录） | `python main.py --real` |
 
@@ -70,7 +70,7 @@
 | 终端与平台/边缘节点联通性测试 | 界面「运行状态与管控」→ 联通性如实报告；`bridge.PlatformLink.connectivity()` |
 | 断网降级与恢复测试 | `python main.py` 第 6 组（离线不丢数据 → 恢复批量补传 → 队列清空 → 审计留痕） |
 | 72 小时稳定性运行记录 | `fleet.soak_tick()` 写 `data/logs/soak.log`；`soak_status()` 算最长连续时长。**记录必须靠真实运行积累，未满即如实标注"未达标"** |
-| 权限矩阵验证（越权不通过） | 106 项单测里的 `TestAccess` / `TestReview` / `TestConsoleSwitch` / `TestCmdBridge`（监考员复核被拒、跨考场上报被拒、无 export 被拒、管理员拿不到 `full`、非所有者调桥接被 01 拒且命令未执行） |
+| 权限矩阵验证（越权不通过） | 124 项单测里的 `TestAccess` / `TestReview` / `TestConsoleSwitch` / `TestCmdBridge`（监考员复核被拒、跨考场上报被拒、无 export 被拒、管理员拿不到 `full`、非所有者调桥接被 01 拒且命令未执行） |
 
 ## 三、目录结构
 
@@ -93,7 +93,7 @@
 ├── console.py               命令控制台开关（默认关闭）与权限层级（唯一判定入口）
 ├── terminal_gui.py          桌面界面（4 个页签，含命令控制台窗口）
 ├── main.py                  端到端自检（74 项）
-├── tests\                   单元测试（106 项）
+├── tests\                   单元测试（124 项）
 └── 文档\程序结构.txt
 ```
 

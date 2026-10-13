@@ -183,6 +183,10 @@ adj, factor, why = runner.adjust_alert_score("CAM-A01-2", 0.9)
 ├── patrol.py      三级巡检、关键指标、与巡考联动的可信度降权
 ├── workorder.py   整改工单闭环
 ├── report.py      逐机位/逐考场报告、KPI、验收证据清单
+├── person_detect.py 逐人检测与行为识别：后端自动选择
+│                  YOLO-pose ONNX > YOLO ONNX > MobileNet-SSD > HOG+SVM(兜底)，
+│                  匈牙利/最近邻跟踪、密度感知、骨骼几何判行为（见 README 第十一节）
+├── 工具_模型对比.py 检测后端可用性自检 + HOG/SSD/YOLO 速度与稳定性对比实验
 ├── gui.py         桌面界面（登录页 + 4 页签，按角色控权）
 ├── main.py        端到端自检（108 项）
 ├── tests\         单元测试（97 项：test_core 55 + test_accounts 42）
@@ -238,5 +242,56 @@ adj, factor, why = runner.adjust_alert_score("CAM-A01-2", 0.9)
   2. 口令策略只限制"至少 6 位"，**没有**强制复杂度或首次登录改密；
   3. 没有登录失败次数锁定/验证码（本地单机工具，未做暴力破解防护）；
   4. 桌面端会话只存在内存里，程序关掉即失效；网页端令牌 TTL 8 小时，无刷新与吊销接口；
-  5. `切换命令行窗口.bat` 是"无登录也能切"的应急入口，任何人都能双击改这个标记
+  5. `切换命令行窗口.bat` 是"无登录也能切"的应急入口（任何人都能双击改这个标记）。
+
+## 十一、AI 检测模型接入的如实说明
+
+### 做了什么
+
+`person_detect.py` 的检测后端改为**自动选择**，优先级：
+
+| 优先级 | 后端 | 触发条件 |
+| --- | --- | --- |
+| 1 | YOLO-pose（ONNX，17 骨骼点） | 存在文件名含 `pose` 的 `*.onnx` |
+| 2 | YOLO（ONNX，v5/v8/v11 导出通吃） | 存在其他 `*.onnx` |
+| 3 | MobileNet-SSD（Caffe） | 存在 `*.prototxt` + `*.caffemodel` |
+| 4 | HOG+SVM | 以上都没有（**当前仓库就是这个状态**） |
+
+- 模型自动在**本目录**与**本目录 `models\`** 两个位置查找，找到即自动启用，
+  **无需改配置或界面**；`gui.py` 用 `inspect.signature` 过滤参数，新增的
+  `model_path` / `model_kind` / `prefer_gpu` 等参数可被界面直接透传，原有调用方式不受影响。
+- 接入 YOLO 后新增能力：`analyze_only()` / `draw()` 的逐人信息里多返回 `pose`（17×3 骨骼点），
+  `draw_boxes()` 会绘制青色骨架；行为判定优先走 `_pose_metrics()` 的**骨骼几何**
+  （肩线倾斜角、头相对肩中心偏移、头肩纵向距离、眼/耳点置信度），
+  明显比原来"用框宽高比猜低头/偏头/趴桌"稳定；骨骼不可用时**自动回退**原框逻辑。
+- 模型后端下收紧了 `_merge_duplicate_tracks`（YOLO/SSD 自带 NMS，重复框少，
+  再合并容易把相邻两个考生错误并成一个而少算人数）。
+- 新增 `工具_模型对比.py`：后端可用性自检 + 同一素材上 HOG/SSD/YOLO 的速度、
+  人数波动、轨迹连续性、以及（提供标注时）精确率/召回率/F1 对比，报告落 `data\reports\`。
+- 新增 `detect_backends()` / `backend_name()` / `backend_info()`，可在自检或报告里
+  如实打印"当前到底用的哪个后端"。
+
+### 验证方式
+
+- `python -m unittest discover -s tests`：**165 项全绿**（原有测试未因改造失败）。
+- `python 工具_模型对比.py --selftest`：本机实测输出
+  `OpenCV 4.14.0 / CUDA=无 / OpenCL=有 / ORT=CPU 版`，三个模型后端均报"缺模型"。
+- `python 工具_模型对比.py --frames 12`：HOG 在 **416 长边**下中位 **50.0ms/帧**
+  （单路约占标准模式 500ms 分析间隔的 10%）。
+
+### 打折扣/没做（重要）
+
+1. **本仓库不携带任何模型权重**，因此**当前实际运行的仍是 HOG+SVM**，不是 YOLO/SSD。
+   上面的优先级是"放上文件就生效"的代码路径，**不等于已经跑上了模型**。
+2. **没有精度数据**。合成帧（灰底人形剪影）与真实监控画面差异过大，
+   精确率/召回率结论必须用真实考场素材 + 标注才能得出；`工具_模型对比.py`
+   已实现该评测，但本机**既没有素材也没有标注，未跑出任何精度数字**。
+3. **没有真机 GPU 验证**。pip 版 `opencv-python` 未编译 CUDA，本机
+   `cv2.cuda.getCudaEnabledDeviceCount()==0`，因此 `prefer_gpu` 的 CUDA 分支
+   **从未被真实执行过**；onnxruntime 的 GPU 路径（`use_onnxruntime=True`）同样**未验证**
+   —— 本机装的是 CPU 版 `onnxruntime`。这两条路径需要装了 `onnxruntime-gpu` 的机器才能验。
+4. YOLO 后处理按"YOLOv5/v8/v11 常见导出布局"实现（`[1,C,N]` 与 `[1,N,C]` 自动适配），
+   **未在真实 YOLO 权重上验证过**；导出配置不同可能需要微调 `_postprocess_yolo`。
+5. 骨骼行为的判定阈值（头肩偏移 0.45、肩线倾斜 35°、躯干比 0.9 等）是**经验值**，
+   未经真实数据标定。
      （只影响要不要显示黑窗口，不影响权限）。

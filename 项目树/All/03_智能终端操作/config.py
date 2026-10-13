@@ -55,6 +55,54 @@ CONSOLE_FLAG = DATA_ROOT / "cmd_console.on"
 CONSOLE_ADMIN_FLAG = DATA_ROOT / "cmd_console_admin.on"
 AI_CHAT_FLAG = DATA_ROOT / "ai_chat.on"
 
+# ---------------- AI 检测后端设置（与 02 同格式，便于两处保持一致） ----------------
+# 放在 data\ai_settings.json。存在的键会覆盖下面的默认值；文件不存在就用默认值。
+# person_detect.py 会自动在"本目录"与"本目录\models\"里找 *.onnx / *.prototxt+*.caffemodel，
+# 找到即启用、找不到静默回落 HOG，所以这里**不需要**填模型路径也能跑。
+AI_SETTINGS_PATH = DATA_ROOT / "ai_settings.json"
+
+AI_SETTINGS_DEFAULT = {
+    "ai_mode": "standard",    # standard / dense / energy —— 决定 AI 分析长边
+    "ai_input_dim": 0,        # 直接指定分析长边（0=按 ai_mode 取预设）
+    "model_kind": "auto",     # auto / yolo / caffe —— 只影响优先族，找不到仍会回落
+    "model_path": "",         # 显式指定模型文件（留空=自动查找）
+    "prefer_gpu": True,       # 有 CUDA 版 OpenCV 时自动走 GPU；没有则忽略
+    "use_onnxruntime": False, # 装了 onnxruntime-gpu 时置 True 可走独显
+    "yolo_conf": 0.30,        # YOLO 置信度阈值（无模型时无意义）
+    "detect_backend": "",     # 只读展示位：由 person_detect.backend_name() 回填
+}
+
+
+def load_ai_settings():
+    """读取 AI 检测设置（缺文件/坏文件都返回默认值，绝不抛异常）。"""
+    import json
+    cfg = dict(AI_SETTINGS_DEFAULT)
+    try:
+        if AI_SETTINGS_PATH.exists():
+            data = json.loads(AI_SETTINGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                for k in AI_SETTINGS_DEFAULT:
+                    if k in data and data[k] not in (None, ""):
+                        cfg[k] = data[k]
+    except Exception:
+        pass
+    return cfg
+
+
+def save_ai_settings(settings):
+    """写入 AI 检测设置；失败返回 False（不影响主流程）。"""
+    import json
+    try:
+        merged = load_ai_settings()
+        merged.update({k: v for k, v in (settings or {}).items()
+                       if k in AI_SETTINGS_DEFAULT})
+        AI_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        AI_SETTINGS_PATH.write_text(
+            json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
 # ---------------- 终端类型（《智能终端.md》第一节） ----------------
 TERMINAL_TYPES = {
     "patrol":     {"name": "巡考客户端",   "role": "patrol",   "desc": "告警接收、视频回看、复核判定、处置记录"},
