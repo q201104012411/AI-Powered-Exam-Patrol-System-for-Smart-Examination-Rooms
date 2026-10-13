@@ -52,11 +52,33 @@ def make_id_card(rng):
     return body + _ID_C[s % 11]
 
 
+# ---- 合成脸的几何变化幅度（模块级可调，便于用 工具\_调参_合成脸区分度.py 扫参）----
+# 说明：这些范围**不能随意放宽**——用椭圆/线段画出的"脸"只在很窄的几何区间内
+# 才能被 InsightFace 检测器认成脸，超出就 NO_FACE。窄则不同身份区分不开（整库撞脸）。
+# 因此默认保持"能被稳定检出"的范围，并额外叠加一次随机仿射形变来提高区分度。
+FACE_RANGES = {
+    "fw": (0.30, 0.36),        # 脸半宽 / 图宽
+    "ar": (1.22, 1.36),        # 脸半高 / 脸半宽
+    "eye_dx": (0.42, 0.50),    # 眼距 / 脸半宽
+    "eye_r": (0.15, 0.19),     # 眼半径 / 脸半宽
+    "eye_y": (0.14, 0.22),     # 眼位（相对脸半高，向上）
+    "nose": (0.24, 0.32),      # 鼻长 / 脸半高
+    "mouth_y": (0.42, 0.50),   # 嘴位（相对脸半高，自眼位向下）
+    "mouth_w": (0.32, 0.44),   # 嘴宽 / 脸半宽
+    "warp_ang": (-4.0, 4.0),   # 仿射：旋转角（度）
+    "warp_sx": (0.94, 1.07),   # 仿射：水平各向异性缩放
+    "warp_sy": (0.94, 1.07),   # 仿射：垂直各向异性缩放
+    "warp_shear": (-0.05, 0.05),   # 仿射：水平错切
+}
+
+
 def draw_face(rng, w=480, h=640):
     """
     画一张合成人像。按"证件照"构图：正面、大头、居中。
     每个身份在脸型/五官/肤色/发型上有随机差异，便于索引区分不同身份。
+    几何范围见 FACE_RANGES（可调，但放宽会先破坏可检出性）。
     """
+    R = FACE_RANGES
     # 背景（证件照常见浅蓝/浅灰）
     bg = (rng.randint(190, 235), rng.randint(200, 240), rng.randint(215, 250))
     img = np.full((h, w, 3), bg, np.uint8)
@@ -65,8 +87,8 @@ def draw_face(rng, w=480, h=640):
     img = np.clip(img.astype(np.float32) * (0.92 + 0.08 * (1 - np.abs(yy))), 0, 255).astype(np.uint8)
 
     cx, cy = w // 2, int(h * 0.46)
-    fw = int(w * rng.uniform(0.30, 0.36))          # 脸半宽
-    fh = int(fw * rng.uniform(1.22, 1.36))         # 脸半高
+    fw = int(w * rng.uniform(*R["fw"]))            # 脸半宽
+    fh = int(fw * rng.uniform(*R["ar"]))           # 脸半高
     skin = (rng.randint(150, 200), rng.randint(175, 220), rng.randint(200, 240))
 
     # 脖子与肩
@@ -87,14 +109,14 @@ def draw_face(rng, w=480, h=640):
 
     # 眉
     brow_y = cy - int(fh * 0.34)
-    eye_dx = int(fw * rng.uniform(0.42, 0.50))
+    eye_dx = int(fw * rng.uniform(*R["eye_dx"]))
     for sgn in (-1, 1):
         cv2.ellipse(img, (cx + sgn * eye_dx, brow_y), (int(fw * 0.26), int(fh * 0.045)),
                     sgn * rng.randint(-6, 6), 180, 360, hair_col, max(3, fw // 16))
 
     # 眼
-    eye_r = int(fw * rng.uniform(0.15, 0.19))
-    eye_y = cy - int(fh * 0.18)
+    eye_r = max(4, int(fw * rng.uniform(*R["eye_r"])))
+    eye_y = cy - int(fh * rng.uniform(*R["eye_y"]))
     for sgn in (-1, 1):
         ex = cx + sgn * eye_dx
         cv2.ellipse(img, (ex, eye_y), (eye_r, int(eye_r * 0.66)), 0, 0, 360, (245, 245, 245), -1)
@@ -106,7 +128,7 @@ def draw_face(rng, w=480, h=640):
                     max(2, fw // 22))
 
     # 鼻
-    nose_len = int(fh * rng.uniform(0.24, 0.32))
+    nose_len = int(fh * rng.uniform(*R["nose"]))
     cv2.line(img, (cx, eye_y + int(fh * 0.06)), (cx - int(fw * 0.10), eye_y + nose_len),
              tuple(int(c * 0.86) for c in skin), max(2, fw // 26))
     cv2.line(img, (cx, eye_y + int(fh * 0.06)), (cx + int(fw * 0.10), eye_y + nose_len),
@@ -115,11 +137,31 @@ def draw_face(rng, w=480, h=640):
                 tuple(int(c * 0.80) for c in skin), -1)
 
     # 嘴
-    mouth_y = eye_y + int(fh * 0.46)
-    mw = int(fw * rng.uniform(0.32, 0.44))
+    mouth_y = eye_y + int(fh * rng.uniform(*R["mouth_y"]))
+    mw = max(4, int(fw * rng.uniform(*R["mouth_w"])))
     lip = (rng.randint(90, 150), rng.randint(110, 165), rng.randint(150, 200))
     cv2.ellipse(img, (cx, mouth_y), (mw, int(fh * 0.075)), 0, 0, 360, lip, -1)
     cv2.line(img, (cx - mw, mouth_y), (cx + mw, mouth_y), (60, 60, 70), max(2, fw // 30))
+
+    # ---- 每个身份一次随机仿射形变：让五官相对位置真正不同 ----
+    # 这是在不破坏"可检出性"的前提下提高区分度的主要手段：
+    # 只改全局几何，不把五官画到检测器认不出的形状。
+    ang = rng.uniform(*R["warp_ang"])
+    sx = rng.uniform(*R["warp_sx"])
+    sy = rng.uniform(*R["warp_sy"])
+    shear = rng.uniform(*R["warp_shear"])
+    m = cv2.getRotationMatrix2D((cx, cy), ang, 1.0)
+    m[0, 0] *= sx
+    m[0, 1] *= sx
+    m[1, 0] *= sy
+    m[1, 1] *= sy
+    m[0, 0] += shear * m[1, 0]
+    m[0, 1] += shear * m[1, 1]
+    # 重算平移，保证形变中心不动
+    m[0, 2] += cx - (m[0, 0] * cx + m[0, 1] * cy)
+    m[1, 2] += cy - (m[1, 0] * cx + m[1, 1] * cy)
+    img = cv2.warpAffine(img, m, (w, h), flags=cv2.INTER_LINEAR,
+                         borderMode=cv2.BORDER_REPLICATE)
 
     # 柔化，去掉生硬边缘（更像照片）
     img = cv2.GaussianBlur(img, (0, 0), rng.uniform(1.0, 1.9))
