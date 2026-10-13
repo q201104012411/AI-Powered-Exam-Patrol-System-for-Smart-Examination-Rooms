@@ -237,15 +237,35 @@ class TestAccuracyFixes(unittest.TestCase):
                          "只有一帧偏宽时不应报大幅度偏转")
 
     def test_turn_reported_after_sustained_wide_frames(self):
-        """连续多帧都偏宽时才报'大幅度偏转'"""
+        """连续多帧都呈"侧转"形态时才报'大幅度偏转'。
+
+        注意样本取值：实测**正常坐姿**的人框宽高比就有 1.386，
+        所以旧样本用的 1.30（260/200）其实是"正常坐姿"，不该判偏转——
+        新判据已改为"相对本轨迹历史 ×1.15 **或** 宽高比 >1.6 的侧转形态"，
+        因此这里改用 2.0 这种明确侧转的宽高比。
+        """
         tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920, confirm_frames=4)
         frame = np.full((720, 1280, 3), 200, dtype=np.uint8)
-        track = pd._Track(1, (600, 300, 260, 200), 662)
+        # 400/200 = 2.0，明显超过 ASPECT_TURN_ABS(1.6)
+        track = pd._Track(1, (600, 300, 400, 200), 662)
         for _ in range(5):
             # 模拟 update 里写入宽高比历史
-            track.aspects.append(260 / 200.0)
+            track.aspects.append(400 / 200.0)
         _, _, behaviors = tracker.analyze(frame, track)
-        self.assertIn(pd.ACT_TURN, behaviors, "连续偏宽应确认为大幅度偏转")
+        self.assertIn(pd.ACT_TURN, behaviors, "连续呈侧转形态应确认为大幅度偏转")
+
+    def test_normal_sitting_posture_is_not_turn(self):
+        """回归：正常坐姿（宽高比约 1.39 且长期不变）不得被判'大幅度偏转'。
+
+        这是实际使用中暴露的问题——旧判据用固定阈值 0.85，坐着不动就报偏转。
+        """
+        tracker = pd.PersonTracker(model_kind="off", max_input_dim=1920, confirm_frames=4)
+        frame = np.full((720, 1280, 3), 200, dtype=np.uint8)
+        track = pd._Track(1, (45, 87, 298, 215), int(720 * 0.92))
+        for _ in range(5):
+            track.aspects.append(298 / 215.0)      # ≈1.386，坐姿常态
+        _, _, behaviors = tracker.analyze(frame, track)
+        self.assertNotIn(pd.ACT_TURN, behaviors, "坐姿宽高比不该被判偏转")
 
     def test_stable_count_uses_median(self):
         """人数读数取最近几次的中位数，避免在 15/16/17 之间乱跳"""

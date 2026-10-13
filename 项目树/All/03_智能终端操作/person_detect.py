@@ -1439,6 +1439,21 @@ class PersonTracker(object):
                 kept.append((rect, score, src))
         return kept
 
+    # 越界辅助判据：头顶低于画面这个比例才算"走到镜头前/离开座位"。
+    # 实测站立者头顶约 20% 画面高、坐姿约 28%，取 45% 作阈值：
+    # 坐姿（含轻微前倾）不会越界，真正逼近镜头时才报。
+    HEAD_LOW_RATIO = 0.45
+
+    # 宽高比自适应倍数：只有当前宽高比超过"本轨迹历史中位数 × 该倍数"才判偏转/前倾。
+    # 【为什么不能用固定阈值】实测坐姿人框宽高比就有 1.386，而旧代码写死 0.85，
+    # 结果**坐着不动就报"大幅度偏转"**。改用相对自身历史的方式后，站/坐/远/近
+    # 都能自适应，只有"相对自己明显变宽"才算侧转。
+    ASPECT_TURN_FACTOR = 1.15
+    ASPECT_LEAN_FACTOR = 1.08
+    # 绝对下限：某些人本来框就宽（基线大），"相对变化"可能仍不足以报警；
+    # 而宽高比超过这个值已经明显是"侧身/回头"的形态（约 1.6:1），直接判偏转。
+    ASPECT_TURN_ABS = 1.6
+
     # dense 密集网格的启用门槛（输入长边像素）。
     # 【2026-10 实测】dense 把 winStride 从 (8,8) 缩到 (4,4)，滑窗数量约 4 倍：
     #   · 小图（416~640，生产实际用的尺寸）：耗时涨 5 倍而检出**不增反减**
@@ -1944,8 +1959,16 @@ class PersonTracker(object):
         if boundary_ratio is None:
             boundary_ratio = self.boundary_ratio
         line_y = int(fh * boundary_ratio)
-        # 越界 = 人已越过警戒线（默认画面 92% 高度，即贴近镜头/走出考区）
-        bad = bottom > line_y
+        # 越界判据：**框底过警戒线** 且 **头顶已下移到画面下部**。
+        #
+        # 【为什么必须加"头顶"这一条】实测（2026-10）：坐姿近景时人框底几乎必然
+        # 压住警戒线——把警戒线放在 92% 时越界，放到 98% 依然越界，因为算出来的人框
+        # 本来就延伸到画面底部。也就是说"只看框底过线"等价于"画面里有人就报越界"，
+        # 与站/坐无关。真越界的语义是"走到镜头前 / 离开座位"，那种情况下**头顶也会
+        # 明显下移**（实测站立者头顶约 20% 画面高，坐姿约 28%）。所以要求头顶低于
+        # HEAD_LOW_RATIO 才算越界。
+        head_low = y > fh * self.HEAD_LOW_RATIO
+        bad = (bottom > line_y) and head_low
 
         behaviors = []
         action = ACT_NORMAL
@@ -1998,12 +2021,26 @@ class PersonTracker(object):
             if action == ACT_NORMAL and h < fh * 0.45 and y > fh * 0.35:
                 action = ACT_SIT
         else:
-            # === 回退：原有基于框/质心的判定（HOG、SSD、骨骼点不可用时） ===
-            # 横向历史宽高比（中位数 + 命中次数），避免单帧抖动误报
+            # === 回退：基于框/质心的判定（HOG、SSD、骨骼点不可用时）===
+            # 【关键改动】宽高比阈值改为**相对本轨迹历史**，不再用固定 0.85。
+            # 原因：实测坐姿人框宽高比就是 1.386，固定 0.85 会让"坐着不动"被判
+            # "大幅度偏转"；反过来若把固定阈值提到 1.5，远距离侧转又检不出来。
+            # 用"相对自己的中位数"才能同时适配站/坐、远/近、不同镜头。
             aspects = list(track.aspects)
             recent = aspects[-self.confirm_frames:] if aspects else []
-            wide_hits = sum(1 for r in recent if r > 0.85)
-            lean_hits = sum(1 for r in recent if r > 0.68)
+            base_ar = float(np.median(aspects)) if len(aspects) >= 3 else 0.0
+            cur_ar = (w / float(h)) if h > 0 else 0.0
+            if base_ar > 0:
+                # 偏转：相对自身明显变宽 **或** 宽高比已到"明显侧身"的形态
+                turn_hits = sum(1 for r in recent
+                                if r > base_ar * self.ASPECT_TURN_FACTOR
+                                or r > self.ASPECT_TURN_ABS)
+                lean_hits = sum(1 for r in recent
+                                if r > base_ar * self.ASPECT_LEAN_FACTOR)
+            else:
+                # 历史样本不足时退回绝对阈值（仅前几帧会遇到）
+                turn_hits = sum(1 for r in recent if r > self.ASPECT_TURN_ABS)
+                lean_hits = sum(1 for r in recent if r > 1.2)
 
             # 1) 触碰红线：跨线次数 >= 2 视为"多次触线"
             if track.crosses >= 2:
@@ -2011,16 +2048,16 @@ class PersonTracker(object):
             elif bad:
                 action = "越界"
 
-            # 2) 大幅度偏转：连续多次宽高比 > 0.85（侧转/回头时人框明显变宽）
-            if wide_hits >= max(2, self.confirm_frames - 1):
+            # 2) 大幅度偏转：连续多次宽高比明显超过自身历史（侧转/回头）
+            if turn_hits >= max(2, self.confirm_frames - 1):
                 action = ACT_TURN
                 behaviors.append(ACT_TURN)
-            # 3) 起立/站立：框很高 + 框底越过警戒线 + 头顶在画面上部
+            # 3) 起立/站立：框很高 + 越过警戒线 + 头顶在画面上部
             # （理由同上：坐姿近景也满足前两条，必须加头部位置约束）
             elif h > fh * 0.55 and bad and y < fh * 0.30:
                 action = ACT_STAND
                 behaviors.append(ACT_STAND)
-            # 4) 前倾/趴桌：连续多次宽高比 > 0.68 且高度在收缩
+            # 4) 前倾/趴桌：宽高比略增 且 高度在收缩
             elif lean_hits >= max(2, self.confirm_frames - 1) and len(track.heights) >= 4:
                 hs = list(track.heights)
                 if hs[-1] <= hs[0] * 1.02:
