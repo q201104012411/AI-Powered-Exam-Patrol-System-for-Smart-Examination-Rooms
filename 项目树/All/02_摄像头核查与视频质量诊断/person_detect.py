@@ -866,7 +866,14 @@ class PersonTracker(object):
                 np.asarray(kept_kps, dtype=np.float32) if kept_kps else None)
 
     def _detect_hog(self, frame, dense):
-        """HOG 行人检测。
+        """HOG 行人检测（兼容旧调用：只返回矩形列表）。
+
+        带置信度的版本见 _detect_hog_scored（_detect 用它来压重复框）。
+        """
+        return [r for r, _s in self._detect_hog_scored(frame, dense)]
+
+    def _detect_hog_scored(self, frame, dense):
+        """HOG 行人检测，返回 [(rect, score)]；score 为归一化后的 SVM 响应。
 
         【为什么 dense 要按尺寸自适应（实测数据，2026-10）】
         dense=True 用 winStride=(4,4) 把滑窗步长缩到一半，实测在**小图上纯亏损**：
@@ -907,9 +914,15 @@ class PersonTracker(object):
             scores = (weights - w_min) / rng
         else:
             scores = np.ones_like(weights)
-        rects = [tuple(int(v) for v in r) for r, s in zip(found, scores) if s > score_thresh]
-        scores = [float(s) for s in scores if s > score_thresh]
-        return _soft_nms(rects, scores, iou_thresh=0.45, sigma=0.5)
+        pairs = [(tuple(int(v) for v in r), float(s))
+                 for r, s in zip(found, scores) if s > score_thresh]
+        if not pairs:
+            return []
+        keep = _soft_nms([p[0] for p in pairs], [p[1] for p in pairs],
+                         iou_thresh=0.45, sigma=0.5)
+        by_rect = dict(pairs)
+        # 软 NMS 后按保留下来的矩形取回分数（可能有微小取整差异，兜底给 1.0）
+        return [(r, by_rect.get(r, 1.0)) for r in keep]
 
     def _detect_bg_rois(self, frame):
         """背景差分补充候选框"""
@@ -990,6 +1003,93 @@ class PersonTracker(object):
             out.append((int(x), int(y), int(w), int(h)))
         return out
 
+    # ---------------- 去重与虚警抑制（治"满屏乱框"） ----------------
+    # 每个候选的来源标签：可靠性从高到低。辅助来源（剪影/人头）可靠性低，
+    # 只在"没有更可靠的框与之重叠"时才会新增一条轨迹。
+    SRC_MODEL = 0      # YOLO / MobileNet-SSD
+    SRC_HOG = 1        # HOG 行人检测
+    SRC_FACE = 2       # Haar 正脸（据人脸位置推算人身框）
+    SRC_MOTION = 3     # 背景差分剪影（最容易在空场景误报）
+
+    @staticmethod
+    def _flat_region_ratio(frame, rect):
+        """框内"平坦区域"占比：拉普拉斯响应过低的像素比例。
+
+        真人身上有衣服褶皱/头发/五官，边缘密度高；而**墙、幕布、地面**这类
+        背景被误检成"人"时，框内几乎是平坦的。用它把这类空场景虚警摘掉。
+        框太小或坐标越界时返回 0.0（表示"不因此判否"，避免误杀真目标）。
+        """
+        if frame is None:
+            return 0.0
+        x, y, w, h = rect
+        fh, fw = frame.shape[:2]
+        x0, y0 = max(0, int(x)), max(0, int(y))
+        x1, y1 = min(fw, int(x + w)), min(fh, int(y + h))
+        if x1 - x0 < 24 or y1 - y0 < 32:
+            return 0.0
+        try:
+            gray = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+            lap = cv2.Laplacian(gray, cv2.CV_64F)
+            var = float(lap.var())
+            # 经验阈值：方差 < 120 基本是平滑背景；> 400 是明确的纹理/人
+            if var >= 400.0:
+                return 0.0
+            if var <= 120.0:
+                return 1.0
+            return (400.0 - var) / 280.0
+        except Exception:
+            return 0.0
+
+    def _filter_implausible(self, frame, cands, fw, fh):
+        """去掉"明显不像人"的框，并对低可靠来源做平坦度否决。
+
+        cands: [(rect, score, src)]
+        之前的问题：Haar 人头与背景差分在空场景里不断产出框，每帧还能开出一条
+        新轨迹，几秒后界面就变成"单人 14 条轨迹、满屏重叠标签"。
+        """
+        out = []
+        frame_area = float(fw * fh)
+        for rect, score, src in cands:
+            x, y, w, h = rect
+            if w < self.min_box_w or h < self.min_box_h:
+                continue
+            if w / float(h) > self.max_aspect:
+                continue
+            if x + w <= 0 or y + h <= 0 or x >= fw or y >= fh:
+                continue
+            # 铺满整个画面的框一定是误检
+            if (w * h) > frame_area * 0.6:
+                continue
+            # 辅助来源（人脸推算框 / 运动剪影）：框内太平坦就否决
+            if src >= self.SRC_FACE:
+                if self._flat_region_ratio(frame, rect) > 0.72:
+                    continue
+            out.append(((int(x), int(y), int(w), int(h)), float(score), int(src)))
+        return out
+
+    def _suppress_duplicates(self, cands, iou_thresh=0.30):
+        """压掉互相重叠的候选：同一位置只留最有把握的那一个。
+
+        先按"来源可靠性 → 置信度 → 面积"排序，再逐个接受；
+        若与已接受框的 IoU 超阈值，或**中心落在已接受框内**（同一目标被检成
+        大小两圈），就丢弃。这是"一帧里同一个人画好几个框"的直接修复。
+        """
+        ordered = sorted(cands, key=lambda c: (c[2], -c[1], -(c[0][2] * c[0][3])))
+        kept = []
+        for rect, score, src in ordered:
+            cx, cy = rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0
+            drop = False
+            for k, _s, _src in kept:
+                if _iou(rect, k) > iou_thresh:
+                    drop = True
+                    break
+                if (k[0] <= cx <= k[0] + k[2]) and (k[1] <= cy <= k[1] + k[3]):
+                    drop = True
+                    break
+            if not drop:
+                kept.append((rect, score, src))
+        return kept
+
     # dense 密集网格的启用门槛（输入长边像素）。
     # 【2026-10 实测】dense 把 winStride 从 (8,8) 缩到 (4,4)，滑窗数量约 4 倍：
     #   · 小图（416~640，生产实际用的尺寸）：耗时涨 5 倍而检出**不增反减**
@@ -1045,33 +1145,52 @@ class PersonTracker(object):
             self._last_pose = pose
             return shrunk
 
-        # 2) 没有模型：原有 HOG + 辅助来源逻辑（完全保留）
+        # 2) 没有模型：HOG 主检测 + 人脸/运动辅助（带来源标签，便于压重复框）
         self._last_pose = None
-        rects = []
-        dnn_rects = []
+        cands = []          # [(rect, score, src)]，坐标均在 small 上
 
         # 2.1) MobileNet-SSD（配置成 caffe 但装载失败时 _net 为 None，此支不生效）
         if self._net is not None:
-            dnn_rects = self._detect_dnn(small)
-            rects.extend(dnn_rects)
+            for r in self._detect_dnn(small):
+                cands.append((r, 1.0, self.SRC_MODEL))
 
-        # 2.2) HOG 回退 / 补充
-        if not dnn_rects or self._density_level == "high":
-            hog_rects = self._detect_hog(small, dense)
-            rects = self._merge_sources(rects, [hog_rects], iou_thresh=0.35)
+        # 2.2) HOG 检测（带置信度，供去重排序用）
+        if not cands or self._density_level == "high":
+            for r, s in self._detect_hog_scored(small, dense):
+                cands.append((r, s, self.SRC_HOG))
 
-        # 2.3) 教室人数偏少或高密度时，用背景差分 + 人头检测辅助
-        if len(rects) < 8 or self._density_level == "high":
-            bg_rois = self._detect_bg_rois(small)
-            head_rects = self._detect_heads(small)
-            rects = self._merge_sources(rects, [bg_rois, head_rects], iou_thresh=0.30)
+        # 2.3) 先压一遍重复框：这一步就把"同一目标多个大小圈"合并掉，
+        #      后续再决定要不要开新轨迹时，看到的已经是干净候选。
+        cands = self._suppress_duplicates(cands, iou_thresh=0.30)
 
-        # 2.4) 映射回原图、收紧、剔除不合理框、最终 NMS
-        orig_rects = [self._rect_to_orig(r, scale) for r in rects]
-        shrunk = [self._shrink_rect(r, orig_w, orig_h) for r in orig_rects]
-        cleaned = self._sanitize_boxes(shrunk, orig_w, orig_h)
-        self._last_scores = [1.0] * len(cleaned)
-        return _soft_nms(cleaned, iou_thresh=0.35, sigma=0.5)
+        # 2.4) 只在"人确实少"时，才用 Haar 人脸与运动剪影补框；
+        #      且必须与已有框重叠才采纳（空场景里的孤立剪影一律丢弃）——
+        #      这是"单人场景 14 条轨迹"的根因所在。
+        if len(cands) < 8 or self._density_level == "high":
+            aux = []
+            for r in self._detect_heads(small):
+                aux.append((r, 0.45, self.SRC_FACE))
+            for r in self._detect_bg_rois(small):
+                aux.append((r, 0.35, self.SRC_MOTION))
+            added = 0
+            for rect, score, src in aux:
+                if any(_iou(rect, c[0]) > 0.10 for c in cands):
+                    cands.append((rect, score, src))
+                    added += 1
+            if added:
+                cands = self._suppress_duplicates(cands, iou_thresh=0.30)
+
+        # 2.5) 映射回原图、收紧、剔除不合理框、最终 NMS
+        mapped = []
+        for rect, score, src in cands:
+            o = self._rect_to_orig(rect, scale)
+            mapped.append((self._shrink_rect(o, orig_w, orig_h), score, src))
+        cleaned = self._filter_implausible(frame, mapped, orig_w, orig_h)
+        kept = self._suppress_duplicates(cleaned, iou_thresh=0.30)
+        rects = _soft_nms([c[0] for c in kept], [c[1] for c in kept],
+                          iou_thresh=0.35, sigma=0.5)
+        self._last_scores = [1.0] * len(rects)
+        return rects
 
     def _detect_net(self, frame):
         """统一入口：按已装载的模型族调用对应检测器。"""
@@ -1689,6 +1808,10 @@ class PersonTracker(object):
                 (11, 12), (11, 13), (13, 15), (12, 14), (14, 16),
                 (0, 1), (0, 2), (1, 3), (2, 4), (0, 5), (0, 6))
 
+        # 标签避让：记录已占用的文字区域（显示分辨率坐标）。
+        # 历史问题：密集场景下十几个标签都贴在框顶，直接叠成一团黑块，谁也看不清。
+        used_labels = []
+
         for p in persons:
             x, y, w, h = p["rect"]
             color = self.person_color(p)
@@ -1726,8 +1849,25 @@ class PersonTracker(object):
             label = "#%d %s" % (p["pid"], p["action"])
             if p.get("crosses", 0) >= 2:
                 label += " ×%d" % p["crosses"]
-            ty = ry - 17 if ry > 20 else ry + rh + 2
-            draw_label(frame, label, color, rx, ty, font_size)
+            # 先试框顶，再试框内顶部、框底；三处都被占就不画这个标签，
+            # 宁可不标也不让它叠在别人身上（框本身仍在，不影响判定）。
+            patch = text_patch(label, color, font_size)
+            lw = ph = 0
+            if patch is not None:
+                lh, lw = patch.shape[:2]
+                ph = lh
+            for ty in (ry - ph - 2, ry + 2, ry + rh + 2):
+                if ty < 0 or ty + ph > fh:
+                    continue
+                tx = max(0, min(rx, fw - lw)) if lw else rx
+                probe = (tx, ty, lw, ph)
+                if any(not (probe[0] + probe[2] < u[0] or u[0] + u[2] < probe[0]
+                            or probe[1] + probe[3] < u[1] or u[1] + u[3] < probe[1])
+                       for u in used_labels):
+                    continue
+                draw_label(frame, label, color, tx, ty, font_size)
+                used_labels.append(probe)
+                break
 
     def draw(self, frame, boundary_ratio=0.5, min_hits=None, with_pose=True):
         """
