@@ -58,7 +58,7 @@ python 网页操作面板\server\启动后端.bat      :: 浏览器访问 http:/
 ├── 文档\                 设计文档、程序结构.txt
 ├── 工具\                 Word 项目书生成脚本、模型下载、镜像测速
 ├── 资源\                 buffalo_l.zip 模型包、Python 安装包
-└── 备份\                 改造前的原始版本（含明文数据，已 gitignore）
+└── （改造前的原始版本已移到仓库根目录 备份\01_人脸识别与身份核对\，已 gitignore）
 ```
 
 | 关键文件/目录 | 作用 |
@@ -512,7 +512,7 @@ python enroll.py scrub-plaintext            :: 预演：扫描数据目录/备�
 python enroll.py scrub-plaintext --apply    :: 执行脱敏（原文件备份为 *.premask.bak）
 ```
 
-扫描范围：`data\`、`备份\`、工程目录下的 `.log/.json/.txt/.csv/.bak` 等文本文件；
+扫描范围：`data\`、工程目录下的 `.log/.json/.txt/.csv/.bak` 等文本文件，以及仓库根目录的 `备份\01_人脸识别与身份核对\`（历史备份已集中到那里）；
 脱敏后自动复查并报告残留。**本次执行结果：已无明文身份证号。**
 
 ---

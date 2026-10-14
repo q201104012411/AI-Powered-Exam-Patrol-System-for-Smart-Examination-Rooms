@@ -75,6 +75,29 @@
   .dot { display:inline-block; width:7px; height:7px; border-radius:50%; background:#4ade80; margin-right:6px; }
   .hint { color:#8a5a00; font-size:12px; }
   .mono { font-family:Consolas,monospace; font-size:12px; }
+  /* ---- 2026-10-14 优化：自动刷新控件 ---- */
+  .autoref { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:#475569; }
+  .autoref input { width:auto; }
+  #lastUpdated { color:#94a3b8; font-size:12px; min-width:132px; text-align:right; }
+  /* ---- 2026-10-14 优化：窄屏（平板/手机）适配 ---- */
+  @media (max-width: 760px) {
+    main { padding:12px 10px 64px; }
+    .top { padding:10px 12px; gap:8px; flex-wrap:wrap; }
+    .top h1 { font-size:15px; }
+    .top .spacer { display:none; }
+    .panel { padding:12px; }
+    .tabs { overflow-x:auto; -webkit-overflow-scrolling:touch; flex-wrap:nowrap; }
+    .tabs .tab { white-space:nowrap; padding:8px 12px; }
+    button { padding:9px 14px; }              /* 触屏更好点 */
+    input, select { padding:9px 10px; }
+    table { font-size:12px; }
+    th, td { padding:6px 6px; }
+    .kpis { grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); }
+    .login-box { width:92vw; padding:24px 20px; }
+    .modal { padding:16px; }
+    .modal .row label { width:70px; }
+    #lastUpdated { min-width:0; text-align:left; }
+  }
 </style>
 </head>
 <body>
@@ -101,6 +124,10 @@
     <span class="tag" id="curRole">—</span>
     <span style="color:#6b7280;font-size:13px;" id="curUser"></span>
     <span class="spacer"></span>
+    <label class="autoref" title="每 30 秒自动刷新当前页签的列表（巡检/工单/台账）">
+      <input type="checkbox" id="autoRef"> 自动刷新
+    </label>
+    <span id="lastUpdated"></span>
     <button class="ghost" onclick="showChangePwd()">🔑 修改口令</button>
     <button class="ghost" onclick="switchAccount()">🔄 切换账号</button>
     <button class="ghost" onclick="doLogout()">🚪 退出</button>
@@ -337,6 +364,8 @@ function showTab(name) {
   document.querySelectorAll(".tab").forEach(el => {
     el.classList.toggle("on", el.dataset.tab === name);
   });
+  CURRENT_TAB = name;
+  markUpdated("已切换到" + (TAB_NAMES[name] || name));
   if (name === "dev") loadDevices();
   if (name === "chk") loadChecks();
   if (name === "wo") loadOrders();
@@ -344,6 +373,32 @@ function showTab(name) {
   if (name === "aud") loadAudit();
   if (name === "acct") loadAccounts();
 }
+
+// ---------------- 2026-10-14 优化：自动刷新 / 当前页签 ----------------
+let CURRENT_TAB = "dev";
+const TAB_NAMES = { dev: "设备台账", chk: "巡检核查", wo: "整改工单",
+                    rep: "报告与指标", aud: "审计", acct: "终端账户" };
+function markUpdated(text) {
+  const el = document.getElementById("lastUpdated");
+  if (el) el.textContent = text || ("最后更新 " + new Date().toLocaleTimeString());
+}
+function refreshCurrentTab() {
+  if (!token) return Promise.resolve();
+  if (CURRENT_TAB === "dev") return loadDevices();
+  if (CURRENT_TAB === "chk") return loadChecks();
+  if (CURRENT_TAB === "wo") return loadOrders();
+  if (CURRENT_TAB === "rep") return loadKpi();
+  return Promise.resolve();
+}
+// 每 30 秒刷新当前页签（默认关：打开后才自动刷新，避免误触发重活）
+setInterval(() => {
+  const cb = document.getElementById("autoRef");
+  if (!cb || !cb.checked || !token) return;
+  const t = new Date().toLocaleTimeString();
+  Promise.resolve(refreshCurrentTab())
+    .then(() => markUpdated("最后更新 " + t))
+    .catch(() => markUpdated("刷新失败 " + t));
+}, 30000);
 
 // ---------------- 设备台账 ----------------
 async function loadDevices() {
