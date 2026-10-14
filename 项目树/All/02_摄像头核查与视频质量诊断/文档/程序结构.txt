@@ -6,7 +6,7 @@
   启动核查界面.bat  -> gui.py（先登录，再进 4 页签：台账/巡检/工单/报告）
   启动核查网页版.bat -> 网页核查面板\server\app.py（端口 5010）
   停止核查网页版.bat / 切换命令行窗口.bat（隐藏/显示黑窗口）
-  运行自检与测试.bat -> 单元测试(97) + 端到端自检(108)
+  运行自检与测试.bat -> 单元测试(184) + 端到端自检(108)
   main.py           -> 自检；默认临时数据目录，--real 用真实目录
 
 【模块】
@@ -35,14 +35,57 @@
   workorder.py 工单闭环 open->dispatched->rectified->closed，
                复核不通过打回；整改必须附整改后截图
   report.py    逐机位/逐考场报告、KPI 报告、验收证据清单、导出
-  person_detect.py 【逐人检测与行为识别】检测后端自动选择：
-               YOLO-pose ONNX > YOLO ONNX > MobileNet-SSD Caffe > HOG+SVM(兜底)；
-               模型在"本目录"与"本目录 models\"自动查找，找到即启用，无模型静默回落；
+  person_detect.py 【逐人检测与行为识别，2026-10-14 已整体替换为 YOLO11n ONNX 版】
+               （1,611 行 / 70,810 字节）检测链固定优先级、自动选择：
+               YOLO11n ONNX(主力) > MobileNet-SSD(兼容保留) > HOG+SVM(兜底)；
+               模型默认 models\yolo11n.onnx，EXAM_YOLO_MODEL 可指向别的 onnx；
+               YOLO 输入固定 640×640 letterbox，只解码 COCO 的 person 类，输出 [1,84,8400]；
+               某帧 YOLO 零检出时仍会再跑一次 HOG 兜底并合并（新版行为）；
+               【密集考场 40 人】分块（切片）推理 yolo_tiling=auto/on/off：
+               分析帧长边 ≥ 640×1.35 时把画面切成 yolo_tile_size(640) 的块，
+               每块按原生像素送模型（等效放大 长边÷块边 倍），跨块按 IoU/包含去重、
+               优先保留未被块边界切断的框；整帧出现贴脸大目标（高度≥45% 或面积≥12%）
+               时自动回落单张推理（避免把一个人切成好几块）；单帧最多 yolo_tile_max(12) 块；
+               contain_thresh(0.85) 控"部分-整体"去重强度；
+               人多（>COMPACT_LABEL_OVER=12）时 draw_boxes 只给异常/越界框写文字
                跟踪用匈牙利(scipy)/最近邻回退 + 匀速预测；
-               有 pose 时用骨骼几何(肩线倾斜/头肩偏移/眼耳置信度)判行为，否则用框宽高比；
-               detect_backends()/backend_name()/backend_info() 可如实报出当前后端
-  工具_模型对比.py 检测后端可用性自检(--selftest) + 同一素材上 HOG/SSD/YOLO 的
-               速度/人数波动/轨迹连续性/精确率召回率对比，报告落 data\reports\
+               行为用框几何(宽高比/质心/历史中位数) + Haar 人脸/人眼辅助判；
+               依赖 onnxruntime；缺失/无模型时静默回落 HOG，不报错、不崩
+  工具_YOLO模型导出.py 用 ultralytics 从官方 yolo11n.pt 导出 models\yolo11n.onnx
+               （一次性依赖 pip install ultralytics onnxslim；改脚本里的 MODEL_NAME 可换 yolo11s 等）
+  下载模型.py  从 ultralytics 官方 release 下载预导出 onnx（yolo11n.onnx / yolo11s.onnx）
+               + SHA256 校验；姿态模型选项（旧 --pose 参数）已删除、该能力已下线；
+               本地导出的 onnx 与官方 release 哈希不同属正常
+  工具_模型对比.py 检测链可用性自检(--selftest) + 同一素材上 YOLO11n-ONNX 行 vs HOG+SVM 行
+               的速度/人数波动/轨迹连续性/精确率召回率对比（MobileNet-SSD 缺模型时如实标
+               "未参与"），报告落 data\reports\
+  工具_密集场景评测.py 40 人考场检测评测（可复现）：
+               用真实人物素材合成"8×5=40 人、近大远小、桌线遮挡"的场景，对多组
+               分析长边/分块开关/块大小/置信度/去重阈值 跑一遍，按与真实位置 IoU≥0.4
+               算召回/精确/耗时，输出表格 + 画框图 + md 报告。实测（2026-10-14）：
+               640 单张 12.5% → 1280 单张 22.5% → 1280+分块 62.5%（精确 89%，约 200ms）；
+               素材已确定化（源文件排序取样 + 固定种子），同一次运行内对比可靠
+  cheat_bridge.py 【作弊识别结合层，2026-10-14 新增】
+               把本项目逐人检测结果（人框/人脸/行为标签/VLM 物体）转成 cheatdetect 的
+               FrameFeatures，驱动"风险分数 + 滑动窗口 2s + 持续超阈 1s 才告警"的时序引擎；
+               单帧瞬时动作被时间维度抑制（现场"坐着没动却报偏转"那类误报的解药）。
+               默认 perception=False（复用本项目检测，不重复跑 YOLO）；push(frame) 可切到
+               引擎自带感知。告警在 gui._cam_cheat_update 里写日志/蜂鸣/详情，并经
+               linkage_bridge 上报 03。窗口/最短持续按帧数换算：feed_hz 必须等于真实送帧频率。
+               引擎本体在 作弊识别\（零第三方依赖，自带界面/演示/自检/75 项测试）。
+  vlm_detect.py 【多模态大模型（VLM）检测引擎，本版新增】
+               VlmPersonTracker 继承 person_detect.PersonTracker，只替换检测源 _detect()：
+               多模态为主（后台线程按间隔刷新，结果新鲜就用它的人框/行为/可疑物品），
+               超时/报错/结果过期则本帧回落 YOLO11n（跟踪/编号/画框/越界/告警全部复用原链路）；
+               两种后端可切换：ollama（/api/chat + images，探测走 /api/tags+/api/show 的
+               capabilities）与 api（OpenAI 兼容 /chat/completions + image_url data URI，Bearer）；
+               模型输出强制 JSON（persons[box,action,confidence] / objects[box,label] / summary），
+               坐标 0~1000 相对（兼容 0~1、绝对像素、{x,y,w,h}），行为词经 ACTION_ALIASES 归一；
+               provider=off 时与旧版完全一致（纯 YOLO11n）
+  工具_多模态检测.py 多模态联调工具：--check 看配置/连通性、--pull 拉视觉模型、
+               --image 验一张图（打印 JSON + 画框图与 JSON 落 data\reports\）、
+               --write-settings 写 data\ai_settings.json、--prompt 打印提示词
+  多模态检测.bat  上面这个工具的菜单式启动器（choice 菜单；也支持"多模态检测.bat check"参数式）
   gui.py       tkinter 界面：登录页直接建在主窗口内，登录后原地切主界面；
                受控操作先 Session.can() 判权限（_guard/_need），越权明确提示；
                所有者专属：删除机位、终端账户管理、审计链、隐藏 cmd 开关
@@ -61,20 +104,30 @@
   心跳/录像/时间/音频 --> probe.* --> 同样进 Defect[]
   巡考联动：credibility_factor(机位) -> 告警分数 ×0.5/0.8/1.0
 
-【逐人检测（AI 框选）与模型接入】
+【逐人检测（AI 框选）与模型接入（2026-10-14 新版模型层）】
   帧 --> PersonTracker.analyze_only()
-           |-- 后端自动选择（按序找，找到即用，都没有用 HOG）：
-           |     1 YOLO-pose ONNX  -> 人框 + 17 骨骼点
-           |     2 YOLO ONNX(v5/v8/v11) -> 人框
-           |     3 MobileNet-SSD(prototxt+caffemodel) -> 人框
-           |     4 HOG+SVM(OpenCV 自带，兜底)
-           |-- 模型查找：本目录 与 本目录\models\（无需改配置/界面）
+           |-- 检测链固定优先级（自动选择，界面/配置无法指定后端族）：
+           |     1 YOLO11n ONNX（主力；models\yolo11n.onnx，EXAM_YOLO_MODEL 可换 onnx）
+           |          输入固定 640×640 letterbox；只解码 COCO 的 person 类；输出 [1,84,8400]
+           |     2 MobileNet-SSD（兼容保留：仅当本目录存在
+           |          MobileNetSSD_deploy.prototxt + .caffemodel 时启用）
+           |     3 HOG+SVM（OpenCV 自带，兜底）
+           |-- YOLO 可用时，某帧零检出仍会再跑一次 HOG 兜底并合并（新版行为）
+           |-- EXAM_YOLO_DISABLE=1 强制禁用 YOLO（对比/排查用）；
+           |     EXAM_YOLO_EP=coreml 优先 CoreML（失败自动回退 CPU）
+           |-- 依赖 onnxruntime；缺失/无模型时静默回落 HOG，不报错、不崩
            |-- 跟踪：匈牙利匹配(scipy)/最近邻回退 + 匀速预测 + 密度感知
-           |-- 行为：有骨骼点->骨骼几何(肩线倾斜/头肩偏移/眼耳置信度)
-           |         无骨骼点->框宽高比+质心+Haar 人脸/人眼(原逻辑)
+           |-- 行为：框几何(宽高比/质心/历史中位数) + Haar 人脸/人眼辅助
+           |-- 去重：两级——先 IoU-NMS，再做"部分-整体"去重（_suppress_contained/_iomin，
+           |        小框被大框包住且中心在框内才丢，阈值 0.85，避免吞掉边缘的另一个人）；
+           |        跟踪层允许"头框轨迹"并入"整体框轨迹"（_is_part_of）
+           |-- 辅助源（背景差分 / Haar 人头）只在主链零检出时兜底
+           |        （旧版"人数 < 8 就叠加"会让单人特写画面一个人画出一堆框）
            v
-        persons[]（含 rect/action/bad/behaviors/score/pose）-> 界面/告警
-  权重不随仓库分发；缺模型时静默回落 HOG，不报错、不崩。
+        persons[]（含 pid/rect/action/bad/crosses/behaviors/density_level）-> 界面/告警
+  模型：models\yolo11n.onnx 随包分发（10,741,326 字节，Ultralytics 官方 YOLO11n COCO 检测
+        模型，opset 12、simplify=True、自带元数据）—— 默认就是 YOLO11n；
+        同目录 yolo11n.pt（5,613,764 字节，官方权重）供离线重新导出。
 
 【三级巡检】
   daily   每 30 分钟   全部考点   -> 在线率、质量异常清单

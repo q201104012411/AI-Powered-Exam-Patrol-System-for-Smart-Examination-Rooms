@@ -34,6 +34,48 @@ def check(name, cond, detail=""):
     return bool(cond)
 
 
+def cheat_smoke():
+    """⑦ 作弊识别（时序引擎）自检：瞬时动作被抑制、持续模式才告警。
+
+    用引擎自带场景（合成，非实拍）验证"判定逻辑"，不冒充真实考场准确率。
+    """
+    import random
+    out = {"ok": False, "backend": ""}
+    try:
+        import cheat_bridge                       # 本目录下的结合层
+        from cheatdetect import simulate as sim   # cheat_bridge 已把 作弊识别\ 加进 sys.path
+    except Exception as e:
+        out["error"] = str(e)
+        return out
+    w = cheat_bridge.CheatWatch(feed_hz=10.0)
+    out["ok"] = bool(w.ok)
+    out["backend"] = w.backend or w.import_error
+    if not w.ok:
+        return out
+
+    def run(frames):
+        w.reset()
+        at, peak = None, 0.0
+        for i, fr in enumerate(frames):
+            fr.frame_id, fr.timestamp = i, i * 0.1
+            r = w.det.push(fr)
+            peak = max(peak, float(r.risk))
+            if r.just_triggered and at is None:
+                at = i
+        return at, peak
+
+    rng = random.Random(2026)
+    at, peak = run(sim.sc_quiet_writing(rng))
+    out["quiet_alarm"], out["quiet_peak"] = at is not None, peak
+    at, peak = run(sim.sc_stretch(rng))
+    out["stretch_alarm"], out["stretch_peak"] = at is not None, peak
+    at, peak = run(sim.sc_steady_peek(rng))
+    out["peek_alarm"], out["peek_at"], out["peek_peak"] = at is not None, at, peak
+    at, peak = run(sim.sc_phone_use(rng))
+    out["phone_alarm"], out["phone_at"] = at is not None, at
+    return out
+
+
 def make_images(tmp):
     """造两张测试画面：一张正常、一张模糊（模糊会让该机位可信度下降）"""
     sys.path.insert(0, os.path.join(linkage.PROJECTS["02"], "tests"))
@@ -138,6 +180,30 @@ def main(argv=None):
               a_ok.get("level") == "red" and a_ok.get("downgraded") is False
               and a_ok.get("force_confirm") is True,
               "level=%s force_confirm=%s" % (a_ok.get("level"), a_ok.get("force_confirm")))
+
+        # ---------- 3.5 作弊识别（时序引擎）-> 03 告警 ----------
+        print("\n[4/7] 作弊识别：动作序列判定（瞬时动作被抑制 / 持续模式才告警）")
+        cm = cheat_smoke()
+        check("作弊识别引擎可用", cm.get("ok") is True,
+              cm.get("backend") or cm.get("error", ""))
+        if cm.get("ok"):
+            check("安静答题不告警", cm.get("quiet_alarm") is False,
+                  "峰值风险 %.1f" % cm.get("quiet_peak", 0.0))
+            check("伸懒腰（瞬时动作）被时间维度抑制", cm.get("stretch_alarm") is False,
+                  "峰值风险 %.1f" % cm.get("stretch_peak", 0.0))
+            check("持续偷看邻座触发告警", cm.get("peek_alarm") is True,
+                  "第 %s 帧触发，峰值 %.1f" % (cm.get("peek_at"), cm.get("peek_peak", 0.0)))
+            check("使用手机模式触发告警", cm.get("phone_alarm") is True,
+                  "第 %s 帧触发" % cm.get("phone_at"))
+            a_cheat = lk.raise_alert("CHEAT_PATTERN", ns.device, room_id="A-01",
+                                     seat_no="12",
+                                     detail="持续侧头面向邻座并出现手机，构成获取答案的动作模式")
+            check("作弊告警已送进 03 终端", bool(a_cheat.get("alert_id")),
+                  a_cheat.get("alert_id"))
+            check("作弊告警同样带机位画质可信度并按可信度降级",
+                  a_cheat.get("credibility") == f and a_cheat.get("downgraded") is True,
+                  "level=%s credibility=%s" % (a_cheat.get("level"),
+                                               a_cheat.get("credibility")))
 
         # ---------- 4. 01 人脸核验 + 画质上下文 ----------
         print("\n[5/6] 01 人脸核验（并带上机位画质上下文）")

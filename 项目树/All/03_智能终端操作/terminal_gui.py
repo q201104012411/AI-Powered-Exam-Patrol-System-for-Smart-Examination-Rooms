@@ -15,6 +15,7 @@
 """
 import os
 import shutil
+import inspect
 import json
 import sys
 import threading
@@ -37,6 +38,12 @@ try:
     HAS_PD = True
 except Exception:
     HAS_PD = False
+try:
+    import vlm_detect as vlm_mod          # 多模态（VLM）检测引擎；拿不到就只跑 YOLO11n
+    HAS_VLM = True
+except Exception:
+    vlm_mod = None
+    HAS_VLM = False
 
 import access
 import alerts as alerts_mod
@@ -140,10 +147,13 @@ AI_INTERVAL_MS = 500        # 单路 AI 分析最小间隔（2 次/秒）
 #     416 -> 4~5 人 ｜ 640 -> 6 人 ｜ 原生 1080p -> 7 人（真值 24 人，HOG 上限如此）
 # 同时 person_detect 已默认关闭 dense 密集网格（同检出、耗时约 1/3）。
 # 因此默认由 416 提到 640：约 33 ms/次/路，9 路约占单核 60%，仍有余量。
-# 可在 data\ai_settings.json 里用 ai_input_dim / ai_mode 覆盖（见 config.load_ai_settings）。
-AI_MODE_DIM = {             # 预设：标准 / 密集 / 节能
+# 【40 人考场】单张 YOLO 推理会把整帧压到 640，后排考生只有十几像素高 —— 必漏。
+# 密集档因此改为 1280，并让 person_detect 走"分块推理"（切成 640 的块分别送模型）：
+# 实测合成 40 人考场 召回 25% → 67.5%（单路分析约 170 ms）。
+# 可在 data\ai_settings.json 里用 ai_input_dim / ai_mode / yolo_tiling 覆盖。
+AI_MODE_DIM = {             # 预设：标准 / 密集（40 人考场）/ 节能
     "standard": 640,
-    "dense": 768,
+    "dense": 1280,
     "energy": 416,
 }
 AI_INPUT_DIM = AI_MODE_DIM["standard"]   # 兼容旧引用；启动时按设置覆盖
@@ -445,6 +455,7 @@ class TerminalApp(object):
         self._cam_seen = {}         # url -> (generation, seq) 已渲染过的帧
         self._cam_render_after = {}  # url -> after id（渲染循环，避免重复排程）
         self._person_detectors = {}  # url -> PersonTracker（仅考场路）
+        self._cheat_watches = {}     # url -> CheatWatch（作弊识别时序引擎，仅考场路）
         self._behavior_tracker = _BehaviorTracker()
         self._info_ts = 0.0         # 顶部状态条限频用
         self._ai_error_file = config.DATA_ROOT / "ai_detect_error.txt"
@@ -753,17 +764,8 @@ class TerminalApp(object):
                         cam["_ai_count"] = (det.stable_count()
                                             if hasattr(det, "stable_count")
                                             else len(persons))
-                        # 手机识别：本路"使用手机"人数 + 手机类峰值置信度。
-                        # 峰值不受阈值影响——拿手机却检不出时看它就知道是
-                        # "模型没认出来(≈0)"还是"认出来了但阈值高"。
-                        cam["_ai_phone"] = sum(1 for p in persons
-                                               if p.get("has_phone"))
-                        try:
-                            cam["_ai_phone_peak"] = (det.phone_peak()
-                                                     if hasattr(det, "phone_peak")
-                                                     else 0.0)
-                        except Exception:
-                            cam["_ai_phone_peak"] = 0.0
+                        # 手机识别：新版检测链（YOLO11n 检测头）只解码 COCO person 类，
+                        # 不再产出 has_phone / 手机类峰值置信度，故此处不再统计手机。
                         self._cam_ai_side_effects(url, cam, persons, viol)
                 scale = cam.get("_ai_scale")
                 if scale is None:
@@ -784,10 +786,11 @@ class TerminalApp(object):
     def _person_detector_for(self, url):
         """取（或创建）该路的 AI 检测器。
 
-        检测后端由 person_detect 自动选择（YOLO-ONNX > MobileNet-SSD > HOG），
-        模型放在本目录或本目录\\models\\ 即自动启用；可用 data\\ai_settings.json
-        覆盖优先级/阈值/GPU 偏好（与 02 同一套设置格式）。
-        参数与 02 的算法参数保持一致。
+        检测链：多模态大模型（开了 vlm_provider 时为主）> YOLO11n ONNX >
+        MobileNet-SSD > HOG，全部由代码自动选择；data\\ai_settings.json 可覆盖
+        模型/阈值/分析长边/多模态后端（与 02 同一套格式）。
+        构造参数按"将要使用的那个类"的可接受参数过滤，参数改名/增删都不会把
+        整条识别链打挂（不认识的键自动忽略）。
         """
         det = self._person_detectors.get(url)
         if det is not None:
@@ -797,45 +800,93 @@ class TerminalApp(object):
             ai_cfg = config.load_ai_settings()
         except Exception:
             ai_cfg = {}
-        kwargs = dict(max_input_dim=1280, boundary_ratio=BOUNDARY_RATIO,
-                      confirm_frames=4, min_hits=2)
-        # 只有新版 person_detect 才认识这些参数；老版本靠下面的 TypeError 回退
-        for k in ("model_kind", "prefer_gpu", "use_onnxruntime", "yolo_conf"):
+        kwargs = {"boundary_ratio": BOUNDARY_RATIO, "max_input_dim": 1280,
+                  "confirm_frames": 4, "min_hits": 2}
+        for k in ("yolo_model_path", "yolo_conf", "yolo_iou", "yolo_input_dim",
+                  "yolo_tiling", "yolo_tile_size", "yolo_tile_max"):
             if ai_cfg.get(k) not in (None, ""):
                 kwargs[k] = ai_cfg[k]
-        if ai_cfg.get("model_path"):
-            kwargs["model_path"] = ai_cfg["model_path"]
+        # 多模态参数（provider=off 时不会被接受，等于不传）
+        if HAS_VLM:
+            for k in vlm_mod.SETTING_KEYS:
+                if ai_cfg.get(k) not in (None, ""):
+                    kwargs[k] = ai_cfg[k]
+        # 与 02 的 gui.py 一样按签名过滤：模型/参数换代也不会 TypeError
         try:
-            det = pd_mod.PersonTracker(**kwargs)
+            params = vlm_mod.accepted_params(pd_mod.PersonTracker,
+                                            kwargs.get("vlm_provider")) \
+                if HAS_VLM else inspect.signature(pd_mod.PersonTracker.__init__).parameters
+            kwargs = {k: v for k, v in kwargs.items() if k in params}
+        except (TypeError, ValueError):
+            pass
+        det = None
+        cls = vlm_mod.tracker_class_for(kwargs.get("vlm_provider")) if HAS_VLM else None
+        if cls is not None:
+            try:
+                det = cls(**kwargs)
+            except Exception as e:
+                self._mon_log_line("多模态检测器创建失败，回落 YOLO11n：%s" % e)
+                det = None
+        if det is None:
+            base_params = set(inspect.signature(pd_mod.PersonTracker.__init__).parameters)
+            base_kwargs = dict((k, v) for k, v in kwargs.items() if k in base_params)
+            try:
+                det = pd_mod.PersonTracker(**base_kwargs)
+                self._person_detectors[url] = det
+                # 如实展示当前到底用的哪条链（没模型就是 HOG）
+                try:
+                    self._log_ai_backend(det)
+                except Exception:
+                    pass
+            except TypeError:
+                # 兼容尚未升级的 person_detect 版本
+                det = pd_mod.PersonTracker(max_input_dim=1280)
+                self._person_detectors[url] = det
+            except Exception as e:
+                self.mon_ai.set(False)
+                self.monitor_status.config(text="AI识别不可用：%s" % e)
+                try:
+                    self._ai_error_file.write_text(str(e), encoding="utf-8")
+                except Exception:
+                    pass
+                return None
+        else:
             self._person_detectors[url] = det
-            # 如实展示当前到底用的哪个后端（没模型就是 HOG）
             try:
                 self._log_ai_backend(det)
             except Exception:
                 pass
-        except TypeError:
-            # 兼容尚未升级的 person_detect 版本
-            det = pd_mod.PersonTracker(max_input_dim=1280)
-            self._person_detectors[url] = det
-        except Exception as e:
-            self.mon_ai.set(False)
-            self.monitor_status.config(text="AI识别不可用：%s" % e)
-            try:
-                self._ai_error_file.write_text(str(e), encoding="utf-8")
-            except Exception:
-                pass
-            return None
         return det
 
-    def _log_ai_backend(self, det):
-        """把"当前实际用的是哪个检测后端"如实记录下来（没模型就是 HOG+SVM）。
+    @staticmethod
+    def _ai_chain_name(det):
+        """当前这一路到底是谁在出框：多模态 / YOLO11n / MobileNet-SSD / HOG。
 
-        只在后端发生变化时记录一次，避免刷屏；失败不影响识别主流程。
+        多模态开着但结果过期或报错时，如实写成"多模态→YOLO11n 兜底"，
+        不让人误以为一直在用大模型。
         """
-        try:
-            name = det.backend_name() if hasattr(det, "backend_name") else "未知"
-        except Exception:
-            name = "未知"
+        if det is not None and hasattr(det, "vlm_status_dict"):
+            try:
+                d = det.vlm_status_dict()
+                if d.get("enabled"):
+                    if d.get("source") == "vlm" and d.get("fresh"):
+                        return "多模态(%s)" % d.get("model", "")
+                    return "多模态→YOLO11n 兜底"
+            except Exception:
+                pass
+        if getattr(det, "_yolo_session", None) is not None:
+            return "YOLO11n-ONNX"
+        if getattr(det, "_net", None) is not None:
+            return "MobileNet-SSD"
+        return "HOG+SVM"
+
+    def _log_ai_backend(self, det):
+        """把"当前实际用的是哪条检测链"如实记录下来（没模型就是 HOG+SVM）。
+
+        多模态版本：多模态结果新鲜 = 多模态；否则说明是 YOLO11n/HOG 在兜底。
+        只在链路名变化时记录一次，失败不影响识别主流程。
+        """
+        name = self._ai_chain_name(det)
         if getattr(self, "_ai_backend_name", None) == name:
             return
         self._ai_backend_name = name
@@ -845,13 +896,85 @@ class TerminalApp(object):
         except Exception:
             pass
         try:
-            det_info = det.backend_info() if hasattr(det, "backend_info") else {}
-            if getattr(det_info, "get", None) and det_info.get("kind") == "hog":
+            if name == "HOG+SVM":
                 self.monitor_status.config(
-                    text="AI 框选：HOG+SVM（未放模型；放入 *.onnx 到本目录或 models\\ 可换用 YOLO）")
+                    text="AI 框选：HOG+SVM（YOLO11n 模型不可用；"
+                         "可运行 工具_YOLO模型导出.py 生成 models\\yolo11n.onnx）")
             else:
                 self.monitor_status.config(text="AI 框选后端：%s" % name)
         except Exception:
+            pass
+
+    def _cam_cheat_update(self, url, cam, persons):
+        """喂一帧给作弊识别时序引擎 → 返回要拼进状态栏的文字（正常时为空串）。
+
+        与逐帧行为标签的区别：发动机看的是**动作序列**，单帧瞬时动作会被
+        时间维度抑制（阈值 60 + 滑动窗口 2s + 最短持续 1s），只有持续/组合成
+        "获取或传递答案"的模式才告警。
+        """
+        if not (getattr(self, "mon_ai", None) and self.mon_ai.get()):
+            cam["_cheat"] = None
+            return ""
+        watch = self._cheat_watches.get(url)
+        if watch is None:
+            try:
+                import cheat_bridge
+                watch = cheat_bridge.CheatWatch(feed_hz=self._cheat_feed_hz())
+            except Exception as e:
+                self._write_mon_log("作弊识别不可用：%s" % e)
+                return ""
+            self._cheat_watches[url] = watch
+            self._write_mon_log(watch.describe())
+            notes = watch.signal_notes()
+            if notes:
+                self._write_mon_log("作弊识别信号可得性（引擎自述）：%s" % notes)
+        if not watch.ok:
+            cam["_cheat"] = {"ok": False, "reason": watch.import_error}
+            return "　｜　作弊识别：%s" % (watch.import_error or "不可用")
+        r = watch.push_persons(persons, frame_shape=cam.get("_ai_shape"))
+        cam["_cheat"] = r
+        if not r.get("ok"):
+            return ""
+        if r.get("just_triggered"):
+            text = "作弊预警 %s #%s：%s（风险 %.0f）" % (
+                r.get("level", ""), r.get("pid"), r.get("pattern_desc") or "",
+                float(r.get("risk", 0)))
+            self._write_mon_log(text)
+            try:
+                import linkage_bridge
+                linkage_bridge.report_behavior(
+                    device_code=str(cam.get("name") or url), behavior=text,
+                    pid=int(r.get("pid") or 0), crosses=0,
+                    room_id="", seat_no="",
+                    operator=self.session.username if self.session else "03_ai")
+            except Exception:
+                pass
+        if r.get("triggered"):
+            return "　｜　作弊风险：%s %.0f【%s】" % (r.get("level", ""),
+                                                float(r.get("risk", 0)),
+                                                r.get("pattern_desc") or "告警中")
+        if float(r.get("risk", 0)) >= 42.0:
+            return "　｜　作弊风险：%s %.0f" % (r.get("level", ""),
+                                            float(r.get("risk", 0)))
+        return ""
+
+    def _cheat_feed_hz(self):
+        """真实送帧频率 = 本终端的 AI 分析频率（窗口/最短持续按帧数换算）"""
+        try:
+            ms = float(getattr(self, "AI_INTERVAL_MS", 0) or 0)
+        except Exception:
+            ms = 0
+        if ms <= 0:
+            ms = 1000.0
+        return max(0.2, 1000.0 / ms)
+
+    def _write_mon_log(self, text):
+        """追加到监控日志（失败不影响界面）"""
+        try:
+            self._mon_log.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._mon_log, "a", encoding="utf-8") as f:
+                f.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), text))
+        except OSError:
             pass
 
     def _cam_ai_side_effects(self, url, cam, persons, viol):
@@ -867,32 +990,29 @@ class TerminalApp(object):
                                    foreground=DENSITY_COLOR.get(level, "#888"))
                 except tk.TclError:
                     pass
-        # 面板边框：越界红 > 使用手机红 > 异常橙 > 正常绿
-        self._cam_set_border(cam, "error" if (viol or cam.get("_ai_phone")) else
+        # 面板边框：越界红 > 异常橙 > 正常绿
+        self._cam_set_border(cam, "error" if viol else
                              ("warn" if any(p.get("behaviors") for p in persons)
                               else "ok"))
+        # 作弊识别（时序引擎）：单帧动作被抑制，只有"持续/组合"才告警
+        cheat_txt = self._cam_cheat_update(url, cam, persons)
         now_ms = time.time() * 1000.0
         if (now_ms - getattr(self, "_info_ts", 0.0)) >= INFO_BAR_MS:
             self._info_ts = now_ms
             try:
-                # 一并显示当前检测后端（没放模型时会明确显示 HOG+SVM），
-                # 避免操作员误以为已经在用 YOLO/SSD 这类模型
-                backend = getattr(self, "_ai_backend_name", "")
+                # 一并显示当前检测链（多模态开着时如实写"多模态(模型)"或
+                # "多模态→YOLO11n 兜底"，没模型时写 HOG+SVM），
+                # 避免操作员误以为一直在用大模型
+                det_now = self._person_detectors.get(url)
+                backend = self._ai_chain_name(det_now) if det_now is not None else \
+                    getattr(self, "_ai_backend_name", "")
+                if det_now is not None and getattr(det_now, "_last_tiling", False):
+                    backend += "（分块 %d）" % getattr(det_now, "_last_tile_count", 0)
                 extra = ("　｜　后端：%s" % backend) if backend else ""
-                # 手机告警：检到就报数；没检到但模型支持时，把"手机类峰值置信度"
-                # 一并显示——拿手机却不出告警时，看这个数就知道是不是模型没认出来
-                ph = int(cam.get("_ai_phone", 0) or 0)
-                if ph:
-                    phone_txt = "　｜　📱 手机 %d" % ph
-                elif "YOLO" in backend:
-                    phone_txt = "　｜　手机峰值 %.2f" % float(
-                        cam.get("_ai_phone_peak", 0.0) or 0.0)
-                else:
-                    phone_txt = ""
                 self.monitor_status.config(
                     text="AI识别中：%d 人，越界 %d%s%s"
                          % (cam.get("_ai_count", len(persons)), viol,
-                            phone_txt, extra))
+                            extra, cheat_txt))
             except tk.TclError:
                 pass
             self._monitor_update_info_bar()

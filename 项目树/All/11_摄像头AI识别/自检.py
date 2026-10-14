@@ -5,7 +5,7 @@ r"""
 覆盖三件事，不需要真实摄像头也能跑：
   1) 台账 CRUD（增/改/查/删/去重/地址校验）
   2) 取流内核（用注入的假采集器验证"永不卡界面"的状态机）
-  3) AI 检测器（建得起来、能出结果、能如实报出后端）
+  3) AI 检测器（建得起来、能出结果、能如实报出当前检测链）
   4) 自检脚本的 --real 模式只读真实数据，不做破坏性写入
 
 用法：
@@ -160,17 +160,28 @@ def main():
     try:
         import numpy as np
         import person_detect as pd
-        check("person_detect 导入", True, "版本接口齐全")
-        check("探针接口存在", all(hasattr(pd, n) for n in
-                              ("detect_backends", "describe_backends", "find_model")))
-        print("      后端探测：%s" % pd.describe_backends())
-        kind, path, extra = pd.find_model()
-        print("      找到模型：%s" % (os.path.basename(path) if path else "无（将用 HOG+SVM）"))
+        check("person_detect 导入", True, "新版检测链（YOLO11n ONNX + HOG 兜底）")
+        model_path = pd.default_yolo_model_path()
+        check("模型查找接口存在", bool(model_path), model_path)
+        try:
+            import onnxruntime  # noqa: F401
+            ort_ok = True
+        except Exception:
+            ort_ok = False
+        check("onnxruntime 已安装（YOLO 推理依赖）", ort_ok, "缺则自动回落 HOG+SVM")
+        check("YOLO11n 权重在位", os.path.exists(model_path),
+              os.path.basename(model_path) if os.path.exists(model_path)
+              else "可运行 工具_YOLO模型导出.py 生成")
 
         tr = pd.PersonTracker(max_input_dim=1280, dense_mode=True, min_hits=1)
         check("检测器创建成功", tr is not None)
-        name = tr.backend_name()
-        check("能如实报出后端", bool(name), name)
+        if getattr(tr, "_yolo_session", None) is not None:
+            name = "YOLO11n-ONNX"
+        elif getattr(tr, "_net", None) is not None:
+            name = "MobileNet-SSD"
+        else:
+            name = "HOG+SVM"
+        check("能如实报出当前检测链", bool(name), name)
 
         # 合成一帧，能跑通且框格式正确
         frame = np.full((480, 640, 3), 90, dtype=np.uint8)
@@ -186,12 +197,13 @@ def main():
             p0 = persons[0]
             check("逐人字段齐全", all(k in p0 for k in
                                  ("pid", "rect", "action", "bad", "behaviors",
-                                  "score", "pose")))
+                                  "crosses", "density_level")))
             x, y, w, h = p0["rect"]
             check("框在画面内", 0 <= x and 0 <= y and w > 0 and h > 0
                   and x + w <= frame.shape[1] + 1, str(p0["rect"]))
         else:
-            check("逐人字段齐全（本次未检出人，跳过）", True, "HOG 未召回，属已知上限")
+            check("逐人字段齐全（本次未检出人，跳过）", True,
+                  "合成剪影召回有限，属已知上限")
         check("draw_boxes 可调用", callable(tr.draw_boxes))
         buf = frame.copy()
         tr.draw_boxes(buf, persons, line_y=line_y, scale=1.0, font_size=12)

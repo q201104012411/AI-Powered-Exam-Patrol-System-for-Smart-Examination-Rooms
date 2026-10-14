@@ -90,17 +90,18 @@ MAX_PANEL_H = 300
 INFO_BAR_MS = 500
 
 # AI 设置文件（可手改，也可在界面里改）
+# 检测链由 person_detect.py 自动选择，顺序固定：
+#   YOLO11n ONNX（models\yolo11n.onnx，可用 EXAM_YOLO_MODEL 覆盖）
+#     -> MobileNet-SSD（兼容）-> HOG+SVM（兜底）；模型缺失时静默回落。
 AI_SETTINGS_PATH = DATA_ROOT / "ai_settings.json"
 AI_SETTINGS_DEFAULT = {
     "ai_mode": "standard",      # standard / dense / energy
     "ai_input_dim": 0,          # 0=按 ai_mode 取预设
-    "model_kind": "auto",       # auto / yolo / caffe
-    "model_path": "",           # 显式指定模型，留空=自动查找
-    "prefer_gpu": True,
-    "use_onnxruntime": False,
-    "yolo_conf": 0.30,
+    "yolo_model_path": "",      # 显式指定 YOLO onnx，留空=自动用 models\yolo11n.onnx
+    "yolo_conf": 0.25,          # YOLO 置信度阈值
+    "yolo_iou": 0.45,           # YOLO 后处理 NMS 的 IoU 阈值
+    "yolo_input_dim": 640,      # YOLO 输入边长（官方导出固定 640）
     "boundary_pct": 92,         # 警戒线位置（画面高度百分比）
-    "draw_pose": True,          # 有骨骼点时是否画骨架
 }
 
 

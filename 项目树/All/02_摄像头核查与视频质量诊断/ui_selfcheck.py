@@ -43,6 +43,22 @@ def main():
     except Exception as e:
         line("opencv 导入失败：%s" % e, False)
 
+    # ---- 多模态大模型（VLM）----
+    try:
+        import gui as _gui                     # 本段在 main() 里早于下面的 import gui，这里补一次
+        import vlm_detect as vlm_mod
+        line("vlm_detect 模块导入", True)
+        line("多模态 Tracker 选择（off→原版 / ollama→多模态）",
+             vlm_mod.tracker_class_for("off") is None
+             and vlm_mod.tracker_class_for("ollama") is vlm_mod.VlmPersonTracker)
+        line("参数表：开多模态才带 vlm_* 键",
+             "vlm_provider" in vlm_mod.accepted_params(_gui.pd_mod.PersonTracker, "ollama")
+             and "vlm_provider" not in vlm_mod.accepted_params(_gui.pd_mod.PersonTracker, "off"))
+        line("设置默认键齐全",
+             all(k in _gui.AI_SETTINGS_DEFAULT for k in vlm_mod.SETTING_KEYS))
+    except Exception as e:
+        line("多模态模块检查失败：%s" % str(e)[:80], False)
+
     try:
         import PIL
         line("Pillow %s" % PIL.__version__, True)
@@ -98,6 +114,32 @@ def main():
          isinstance(getattr(app, "_behavior_tracker", None), gui._BehaviorTracker))
     line("AI 检测开关控件", hasattr(app, "mon_ai_chk"))
     line("隐藏命令行窗口勾选框", hasattr(app, "hide_cmd"))
+
+    # 多模态：AI 设置弹窗能真实构建（含新增的"多模态大模型"一栏）
+    try:
+        app._open_ai_settings()
+        root.update()
+        tops = [w for w in root.winfo_children() if isinstance(w, tk.Toplevel)]
+        line("AI 设置弹窗构建（含多模态一栏）", bool(tops))
+        if tops:
+            texts = []
+
+            def _collect(w):
+                for c in w.winfo_children():
+                    try:
+                        texts.append(str(c.cget("text")))
+                    except Exception:
+                        pass
+                    _collect(c)
+
+            _collect(tops[-1])
+            joined = " ".join(texts)
+            line("弹窗含『多模态大模型』", "多模态大模型" in joined)
+            line("弹窗含『测试连接』按钮", "测试连接" in joined)
+            line("弹窗含『API Key』输入框", "API Key" in joined)
+            tops[-1].destroy()
+    except Exception as e:
+        line("AI 设置弹窗构建失败：%s" % str(e)[:80], False)
 
     # 台账操作链路（不真的保存：只校验方法可调用性）
     line("设备清单条数：%d" % len(app.store.list_devices()))

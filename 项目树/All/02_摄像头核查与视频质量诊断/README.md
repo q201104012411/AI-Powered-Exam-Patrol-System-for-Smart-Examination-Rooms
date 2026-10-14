@@ -1,7 +1,7 @@
 # 摄像头核查与视频质量诊断
 
 > 实现《[摄像头核查与视频质量诊断.md](摄像头核查与视频质量诊断.md)》里的核查能力。
-> 本目录是**真代码，可运行、有测试**：97 项单元测试 + 108 项端到端自检。
+> 本目录是**真代码，可运行、有测试**：233 项单元测试 + 108 项端到端自检。
 > 涉及**真实摄像头/录像系统/音频设备/现场样本**的指标必须靠现场巡检积累，
 > 自检不替代现场验收（见文末"范围与如实说明"）。
 
@@ -183,13 +183,23 @@ adj, factor, why = runner.adjust_alert_score("CAM-A01-2", 0.9)
 ├── patrol.py      三级巡检、关键指标、与巡考联动的可信度降权
 ├── workorder.py   整改工单闭环
 ├── report.py      逐机位/逐考场报告、KPI、验收证据清单
-├── person_detect.py 逐人检测与行为识别：后端自动选择
-│                  YOLO-pose ONNX > YOLO ONNX > MobileNet-SSD > HOG+SVM(兜底)，
-│                  匈牙利/最近邻跟踪、密度感知、骨骼几何判行为（见 README 第十一节）
-├── 工具_模型对比.py 检测后端可用性自检 + HOG/SSD/YOLO 速度与稳定性对比实验
+├── person_detect.py 逐人检测与行为识别（YOLO11n ONNX 版）：检测链**固定优先级、自动选择**
+│                  YOLO11n ONNX（主力）> MobileNet-SSD（兼容保留）> HOG+SVM（兜底），
+│                  界面/配置无法指定后端族；匈牙利/最近邻跟踪、密度感知、
+│                  框几何 + Haar 人脸/人眼判行为（见 README 第十一节）
+├── models\yolo11n.onnx 随包分发的检测模型（Ultralytics 官方 YOLO11n COCO，opset 12、simplify=True）
+├── models\yolo11n.pt   官方权重，供 工具_YOLO模型导出.py 离线重新导出 onnx
+├── 工具_YOLO模型导出.py 用 ultralytics 从 yolo11n.pt 导出 onnx（改脚本 MODEL_NAME 可换 yolo11s）
+├── 下载模型.py    从 ultralytics 官方 release 下载预导出 onnx（SHA256 校验，只提供检测模型）
+├── 工具_模型对比.py 检测链可用性自检 + YOLO11n-ONNX 行 vs HOG+SVM 行 的速度与稳定性对比
+├── vlm_detect.py  【多模态大模型引擎】VlmPersonTracker 继承 person_detect.PersonTracker，
+│                 只替换"检测源"：多模态看图出人框/行为/可疑物品，YOLO11n 自动兜底
+├── 工具_多模态检测.py 多模态联调工具：--check 查配置/连通性、--pull 拉视觉模型、
+│                 --image 验一张图（出 JSON + 画框图）、--write-settings 写 ai_settings.json
+├── 多模态检测.bat 上面这个工具的菜单式启动器（检查/拉模型/写设置/验图片/关闭）
 ├── gui.py         桌面界面（登录页 + 4 页签，按角色控权）
 ├── main.py        端到端自检（108 项）
-├── tests\         单元测试（97 项：test_core 55 + test_accounts 42）
+├── tests\         单元测试（233 项；含 test_person_detect 68 项 + test_vlm_detect 38 项）
 ├── 网页核查面板\server\app.py   Flask 后端（端口 5010，账户/权限与桌面端同源）
 └── 文档\程序结构.txt
 ```
@@ -231,7 +241,9 @@ adj, factor, why = runner.adjust_alert_score("CAM-A01-2", 0.9)
 - **做了**：桌面端登录页（内嵌主窗口）、角色权限矩阵与逐入口拦截、所有者专属的
   删除机位/终端账户管理/审计链查看/隐藏 cmd 开关、网页端同源权限（含 403 拦截）、
   隐藏命令行窗口标记与启动器支持、`web_accounts.py` 两端共用一份账户、新增 42 项单测与自检项。
-- **验证方式**：97 项单测与 108 项自检全绿；用 Pillow 截图核对过登录页/主界面（owner 与 admin
+- **验证方式**：账户改造那一轮是 97 项单测 + 108 项自检全绿（当时的记录），
+  测试总数随后续模型层改造与框去重优化已增至 **233 项**（2026-10-14 多模态版 + 密集场景优化后实测 `Ran 233 tests, OK`）；
+  用 Pillow 截图核对过登录页/主界面（owner 与 admin
   受限按钮状态）/账户管理/审计链四个界面；网页端用 `Invoke-WebRequest`（HttpWebRequest）
   实测各接口状态码（见交付简报）。
 - **可复现的界面证据**：`文档\界面截图\`（登录页错误口令提示、所有者主界面、管理员主界面
@@ -244,54 +256,173 @@ adj, factor, why = runner.adjust_alert_score("CAM-A01-2", 0.9)
   4. 桌面端会话只存在内存里，程序关掉即失效；网页端令牌 TTL 8 小时，无刷新与吊销接口；
   5. `切换命令行窗口.bat` 是"无登录也能切"的应急入口（任何人都能双击改这个标记）。
 
-## 十一、AI 检测模型接入的如实说明
+## 十一、AI 检测模型接入的如实说明（2026-10-14 模型层已替换）
 
-### 做了什么
+### 现在跑的是什么
 
-`person_detect.py` 的检测后端改为**自动选择**，优先级：
+`person_detect.py` 已**整体替换为 YOLO11n ONNX 版**（1,611 行 / 70,810 字节）。
+检测链是**固定优先级、自动选择**的，**界面与配置都无法指定后端族**：
 
-| 优先级 | 后端 | 触发条件 |
-| --- | --- | --- |
-| 1 | YOLO-pose（ONNX，17 骨骼点） | 存在文件名含 `pose` 的 `*.onnx` |
-| 2 | YOLO（ONNX，v5/v8/v11 导出通吃） | 存在其他 `*.onnx` |
-| 3 | MobileNet-SSD（Caffe） | 存在 `*.prototxt` + `*.caffemodel` |
-| 4 | HOG+SVM | 以上都没有（**当前仓库就是这个状态**） |
+| 优先级 | 后端 | 触发条件 | 本目录现状 |
+| --- | --- | --- | --- |
+| 1 | **YOLO11n ONNX**（主力） | `models\yolo11n.onnx` 存在且装了 `onnxruntime` | **已就绪**（模型随包分发） |
+| 2 | MobileNet-SSD（Caffe，兼容保留） | 本目录存在 `MobileNetSSD_deploy.prototxt` + `.caffemodel` | 缺模型，未参与 |
+| 3 | HOG+SVM（OpenCV 自带） | 以上都不可用 | 可用（兜底） |
 
-- 模型自动在**本目录**与**本目录 `models\`** 两个位置查找，找到即自动启用，
-  **无需改配置或界面**；`gui.py` 用 `inspect.signature` 过滤参数，新增的
-  `model_path` / `model_kind` / `prefer_gpu` 等参数可被界面直接透传，原有调用方式不受影响。
-- 接入 YOLO 后新增能力：`analyze_only()` / `draw()` 的逐人信息里多返回 `pose`（17×3 骨骼点），
-  `draw_boxes()` 会绘制青色骨架；行为判定优先走 `_pose_metrics()` 的**骨骼几何**
-  （肩线倾斜角、头相对肩中心偏移、头肩纵向距离、眼/耳点置信度），
-  明显比原来"用框宽高比猜低头/偏头/趴桌"稳定；骨骼不可用时**自动回退**原框逻辑。
-- 模型后端下收紧了 `_merge_duplicate_tracks`（YOLO/SSD 自带 NMS，重复框少，
-  再合并容易把相邻两个考生错误并成一个而少算人数）。
-- 新增 `工具_模型对比.py`：后端可用性自检 + 同一素材上 HOG/SSD/YOLO 的速度、
-  人数波动、轨迹连续性、以及（提供标注时）精确率/召回率/F1 对比，报告落 `data\reports\`。
-- 新增 `detect_backends()` / `backend_name()` / `backend_info()`，可在自检或报告里
-  如实打印"当前到底用的哪个后端"。
+- YOLO11n 输入**固定 640×640 letterbox**，**只解码 COCO 的 person 类**（输出 `[1,84,8400]`）；
+  模型默认 `models\yolo11n.onnx`（10,741,326 字节，本机用 `工具_YOLO模型导出.py` 从官方
+  `yolo11n.pt` 导出，opset 12、simplify=True、自带元数据），可用环境变量
+  `EXAM_YOLO_MODEL` 指向别的 onnx。
+- **YOLO 可用时，某帧 YOLO 零检出仍会再跑一次 HOG 兜底并把结果合并**（新版行为），
+  所以对比报告里的"YOLO11n-ONNX 行"会如实标注"零检出帧叠加 HOG 兜底"，不冒充纯 YOLO。
+- `EXAM_YOLO_DISABLE=1` 强制禁用 YOLO（对比/排查用）；`EXAM_YOLO_EP=coreml` 优先 CoreML
+  （失败自动回退 CPU）。缺 `onnxruntime` 或缺模型时**静默回落 HOG**，不报错、不崩。
+- 逐人信息字段为 `pid / rect / action / bad / crosses / behaviors / density_level`
+  （**不再有** `score` / `pose` / `has_phone`）；行为判定现在是**框几何（宽高比/质心/历史中位数）
+  + Haar 人脸/人眼辅助** —— **姿态（pose）相关能力已随本次替换整体下线**（不再绘制骨架，
+  也没有手机类识别与手机告警）。
+- 模型层配套工具（都在本目录）：
+  - `工具_YOLO模型导出.py`：用 ultralytics 从官方 `yolo11n.pt` 导出 onnx
+    （一次性依赖 `pip install ultralytics onnxslim`，改 `MODEL_NAME` 可换 yolo11s 等）；
+  - `下载模型.py`：从 ultralytics 官方 release 下载**预导出**的检测模型（`yolo11n.onnx`
+    默认、`yolo11s.onnx` 可选）并做 SHA256 校验，已**不再提供姿态模型选项**；
+    本机导出的 onnx 与官方 release 哈希不同属正常；
+  - `工具_模型对比.py`：**YOLO11n-ONNX 行 vs HOG+SVM 行**的速度（中位/P95）、人数波动、
+    轨迹连续性、以及（提供标注时）精确率/召回率/F1 对比；缺模型的后端如实标"未参与"，
+    报告落 `data\reports\`。`--selftest` 打印的是**检测链**，不是旧版的"后端探测"。
+- 旧的"后端探测/上报"接口与 `PersonTracker` 的模型族/GPU 相关参数**已随替换删除**；
+  现在要查"到底会跑哪条链"，统一用 `python 工具_模型对比.py --selftest`。
+- 界面侧：AI 分析长边在 standard / dense / energy **三档统一 640**（因为 YOLO11n 输入固定 640），
+  三档差别只在分析频率与跳帧；手机相关的界面元素（手机计数、手机相关红框）已一并移除，
+  人数与越界显示不变。
+- **框去重（2026-10-14 追加优化，现场反馈"框太多了"）**：YOLO 会把同一个人同时检成
+  "头/上半身"和"整体"，两者 IoU 很低（≈ 小框面积/大框面积），IoU-NMS 压不掉；跟踪层的
+  `_same_person` 又要求两个框尺寸相近，头框 vs 整体框的高度比只有 ~0.3，于是同一个人稳定占住
+  两条编号。现在解码后增加"IoU-NMS + 部分-整体"两级去重（`_suppress_contained` / `_iomin`：
+  小框几乎完全被大框包住、中心也在框内才丢弃，阈值 0.85，避免吞掉画面边缘的"另一个真人"），
+  跟踪层也允许"头框轨迹"并入"整体框轨迹"（`_is_part_of`）；同时把 Haar 人头 + 背景差分两个
+  辅助源从"人数 < 8 就叠加"改成**只在主链零检出时兜底**。实测（同一素材 40 帧抖动）：
+  单人特写 每帧框数中位 7→2、峰值 19→3、轨迹峰值 23→5；街景 中位 10→4、峰值 29→4，
+  且真实人物召回不变（单人特写素材仍稳定检出画面里的 3 个人）。新增 9 项回归测试
+  （`TestPartialBoxDedup`）。
 
-### 验证方式
+### 验证方式（2026-10-14，本机实测）
 
-- `python -m unittest discover -s tests`：**165 项全绿**（原有测试未因改造失败）。
-- `python 工具_模型对比.py --selftest`：本机实测输出
-  `OpenCV 4.14.0 / CUDA=无 / OpenCL=有 / ORT=CPU 版`，三个模型后端均报"缺模型"。
-- `python 工具_模型对比.py --frames 12`：HOG 在 **416 长边**下中位 **50.0ms/帧**
-  （单路约占标准模式 500ms 分析间隔的 10%）。
+- `python -m unittest discover -s tests -t .`：**Ran 233 tests, OK**。
+- `python main.py`：**自检通过 108/108**。
+- `python 工具_模型对比.py --selftest`：`OpenCV 4.14.0` /
+  `检测链：YOLO11n 就绪(yolo11n.onnx)；MobileNet-SSD 缺模型；HOG+SVM 兜底可用`。
+- YOLO 冒烟：合成 3 人画面 -> **检出 3 人**（首次调用约 **315 ms**，含 onnxruntime 图优化）。
 
 ### 打折扣/没做（重要）
 
-1. **本仓库不携带任何模型权重**，因此**当前实际运行的仍是 HOG+SVM**，不是 YOLO/SSD。
-   上面的优先级是"放上文件就生效"的代码路径，**不等于已经跑上了模型**。
-2. **没有精度数据**。合成帧（灰底人形剪影）与真实监控画面差异过大，
+1. **没有精度数据**。合成帧（灰底人形剪影）与真实监控画面差异过大，
    精确率/召回率结论必须用真实考场素材 + 标注才能得出；`工具_模型对比.py`
    已实现该评测，但本机**既没有素材也没有标注，未跑出任何精度数字**。
-3. **没有真机 GPU 验证**。pip 版 `opencv-python` 未编译 CUDA，本机
-   `cv2.cuda.getCudaEnabledDeviceCount()==0`，因此 `prefer_gpu` 的 CUDA 分支
-   **从未被真实执行过**；onnxruntime 的 GPU 路径（`use_onnxruntime=True`）同样**未验证**
-   —— 本机装的是 CPU 版 `onnxruntime`。这两条路径需要装了 `onnxruntime-gpu` 的机器才能验。
-4. YOLO 后处理按"YOLOv5/v8/v11 常见导出布局"实现（`[1,C,N]` 与 `[1,N,C]` 自动适配），
-   **未在真实 YOLO 权重上验证过**；导出配置不同可能需要微调 `_postprocess_yolo`。
-5. 骨骼行为的判定阈值（头肩偏移 0.45、肩线倾斜 35°、躯干比 0.9 等）是**经验值**，
-   未经真实数据标定。
-     （只影响要不要显示黑窗口，不影响权限）。
+2. **没有真机 GPU 验证**。pip 版 `opencv-python` 未编译 CUDA，本机
+   `cv2.cuda.getCudaEnabledDeviceCount()==0`；本机装的是 **CPU 版 `onnxruntime`**，
+   所以 `onnxruntime-gpu` / DirectML 能否提速，本机**没有可复现的数字**；
+   `EXAM_YOLO_EP=coreml` 是给苹果机器的路径，本机（Windows）**未验证**。
+3. **没有手机识别能力**。手机（cell phone）类识别与告警已随本次替换下线；
+   旧引擎时期的实测数据（手机类峰值置信度只有 0.0001~0.0007 等）作为历史记录保留在
+   `使用说明.md` §五「手机识别（该能力已随 2026-10-14 模型层替换下线）」里，供决策参考。
+   需要该能力请接入 `06_智能安检与手机作弊器材检测` 模块。
+4. **多人遮挡/并框场景未系统标定**。密集考场里人挨人时的漏检与并框情况，
+   本机只有合成画面与少量真实照片，**未做系统评测**。
+
+## 十二、多模态大模型（VLM）检测 · 本版新增
+
+> 本版把 AI 检测源从 YOLO11n 换成**能看图的多模态大模型**：
+> 由模型直接判读"谁在干什么、有没有手机小抄"，YOLO11n 保留为兜底。
+> 不开多模态时，行为与界面与上一版**完全一致**。
+
+**实现方式**：新增 `vlm_detect.py`，`VlmPersonTracker` **继承**
+`person_detect.PersonTracker`，只替换 `_detect()`（检测源）。跟踪、编号、
+画框、越界判定、告警上报全部复用原链路 —— 改动面小，风险可控。
+
+### 12.1 两种后端（随时切换）
+
+| 后端 | 说明 | 需要 |
+| --- | --- | --- |
+| `ollama` | 本机 Ollama（127.0.0.1:11434），数据不出本机 | 一个**能看图**的模型 |
+| `api` | OpenAI 兼容的多模态接口（通义千问 VL / GLM-4V / 自建 vLLM） | base_url + api_key + 模型名 |
+| `off` | 关闭（默认），等于上一版 | — |
+
+界面里改：**实时监控 → AI 设置 → 多模态大模型 → 模型名/接口地址/API Key/间隔 → 测试连接 → 保存**；
+命令行改：`python 工具_多模态检测.py --provider ollama --model qwen2.5vl:3b --write-settings`。
+
+### 12.2 快速上手（本机 Ollama）
+
+```bat
+python 工具_多模态检测.py --pull                                   :: 拉 qwen2.5vl:3b（几 GB）
+python 工具_多模态检测.py --provider ollama --model qwen2.5vl:3b --write-settings
+python 工具_多模态检测.py --check                                  :: 看连通性
+python 工具_多模态检测.py --image data\captures\考场1.jpg           :: 看框画得对不对
+```
+
+或双击 `多模态检测.bat` 走菜单。**注意：本机 Ollama 目前只有文本模型
+（Qwen3-4B），它不能看图**；不拉视觉模型的话，多模态会一直如实回落 YOLO11n。
+
+### 12.3 参数（data\ai_settings.json）
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `vlm_provider` | `off` | `off` / `ollama` / `api` |
+| `vlm_model` | 空 | `qwen2.5vl:3b`（ollama）/ `qwen-vl-max`（api）等 |
+| `vlm_base_url` | 空 | 留空=后端默认（ollama→`127.0.0.1:11434`） |
+| `vlm_api_key` | 空 | 只有 api 需要 |
+| `vlm_interval` | `3.0` | **每路每 N 秒最多一次**多模态调用 |
+| `vlm_max_dim` | `896` | 送模型的图片长边 |
+| `vlm_timeout` | `60` | 单次调用超时（秒） |
+
+也认环境变量：`EXAM_VLM_PROVIDER` / `EXAM_VLM_MODEL` / `EXAM_VLM_BASE_URL` /
+`EXAM_VLM_API_KEY` / `EXAM_VLM_INTERVAL` / `EXAM_VLM_MAX_DIM` / `EXAM_VLM_TIMEOUT`。
+
+### 12.4 结果怎么用、怎么如实显示
+
+- 模型返回 JSON：`persons[{box,action,confidence}]`、
+  `objects[{box,label,confidence}]`（手机/小抄/耳机/智能手表/平板/书本）、`summary`；
+  坐标按 **0~1000 相对坐标**（兼容 0~1 小数、绝对像素、`{x,y,w,h}`），本模块负责换算与裁剪。
+- 行为词由 `vlm_detect.ACTION_ALIASES` 归一到本项目词表（起立/站立、前倾/趴桌、
+  长时间低头、东张西望、大幅度偏转、眼神游移、闭眼/趴睡、转脸偏头、使用手机…），
+  异常行为照旧走 `ABNORMAL_ACTIONS` → 越界/异常计数与告警上报。
+- 可疑物品画橙色框（**手机为红色**）；落在那个人框内的物品会记到该人身上
+  （`vlm_objects` / `has_phone`，并把「使用手机」并入该人行为）。
+- 请求**全程在后台线程**，渲染永不被卡住；结果超过 `interval × 3` 秒没刷新即判过期并回落 YOLO11n。
+- 状态栏如实显示谁在出框：`AI：N 路 … ｜ 多模态 <模型>：结果新鲜 / 回落 YOLO11n`，
+  同时写 `data\ai_backend.txt`。
+- **不猜**：模型没返回、不是 JSON、框不合法、后端报错 —— 一律按本次失败处理并回落，
+  状态里写明原因（实测：用纯文本模型冒充视觉模型时，Ollama 以 400 拒绝，错误原样显示）。
+
+### 12.5 验证
+
+- 单元测试：`Ran 233 tests, OK`（新增 `tests\test_vlm_detect.py` 38 项 + 密集场景分块推理 11 项，
+  **不联网**：JSON 容错 / 坐标归一 / 两种后端请求体 / 探测 / 回落行为都有覆盖）。
+- 端到端：`python main.py` → 108/108；`python ui_selfcheck.py` → FAIL 0。
+- 实测探测（本机）：`Qwen3-4B-GGUF` → “不能看图（capabilities 只有 completion、tools、thinking）”；
+  未安装视觉模型时给出去拉取的建议命令。
+
+## 十三、作弊行为模式识别（结合 cheatdetect · 2026-10-14）
+
+与原有逐帧标签是**叠加**关系：
+
+| | 本项目原 AI | 作弊识别（`cheat_bridge.py` + `作弊识别\`） |
+| --- | --- | --- |
+| 看什么 | **这一帧**有什么：几个人、什么姿态、有没有手机、越没越界 | **这段序列**像不像在获取/传递答案 |
+| 判据 | 帧级（单帧动作就出标签） | 加权风险分数 + 滑动窗口 2s + **持续超阈 1s 才告警** |
+| 结果 | 绿/橙/红框 + 逐人标签 | 风险等级（正常/关注/橙色预警/红色预警）+ 行为模式与可解释理由 |
+
+- 界面：实时监控工具条新增**「作弊识别」**开关（默认开）；面板 AI 行只在风险 ≥ 阈值 70%
+  或告警时追加「作弊风险：…」；告警同时写监控日志、蜂鸣、详情历史，并经 `linkage_bridge`
+  上报 03（告警码 `CHEAT_PATTERN` 红 / `CHEAT_PATTERN_SUSPECT` 橙）。
+- 特征来源：**复用本项目检测结果**（人框/人脸/行为标签 + 多模态大模型判出的物体），
+  不重复跑一遍 YOLO；也可 `CheatWatch(perception=True)` 用引擎自带感知。
+- 实测（`tests\test_cheat_bridge.py` 15 项）：安静答题不告警；**单帧瞬时大幅偏转风险 1.1、不告警**；
+  持续侧头 + 手机（VLM 判出）第 5 帧起红色预警、风险 85.9→100 并告警。
+- 引擎自带：`作弊识别\自检.py`（48/48）、`作弊识别\tests`（75 项）、`作弊识别\界面.py`（其自带监控界面）。
+
+**如实说明**：① 摄像头路径下引擎自己声明 **手部交互 / 违禁物体 / 表情 = 不可得**，本层原样透出；
+② 物体类证据来自多模态大模型判读（VLM 开着才有），单靠 YOLO 认不出手机；
+③ yaw/pitch/tilt 是**按人脸偏移与框几何估计**，需按机位标定；④ 引擎自带场景是合成的，
+只用于验证判定逻辑，不等于真实考场准确率。⑤ `feed_hz` 必须等于真实送帧频率——
+窗口与最短持续都按帧数换算，填错会"永远攒不够持续帧、永不告警"。

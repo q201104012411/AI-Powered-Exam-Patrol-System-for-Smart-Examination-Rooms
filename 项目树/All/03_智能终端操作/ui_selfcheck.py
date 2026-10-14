@@ -40,9 +40,33 @@ def main():
     except Exception as e:
         line("opencv 导入失败：%s" % e, False)
 
+    # ---- 多模态大模型（VLM）----
+    try:
+        import vlm_detect as vlm_mod
+        line("vlm_detect 模块导入", True)
+        line("多模态 Tracker 选择（off→原版 / ollama→多模态）",
+             vlm_mod.tracker_class_for("off") is None
+             and vlm_mod.tracker_class_for("ollama") is vlm_mod.VlmPersonTracker)
+    except Exception as e:
+        vlm_mod = None
+        line("多模态模块检查失败：%s" % str(e)[:80], False)
+
     import config
     import terminal_gui as tg
     import ai_assistant
+
+    if vlm_mod is not None:
+        line("AI 设置默认键含 vlm_*（config.AI_SETTINGS_DEFAULT）",
+             all(k in config.AI_SETTINGS_DEFAULT for k in vlm_mod.SETTING_KEYS))
+        line("链路名：没开多模态时不冒充大模型",
+             tg.TerminalApp._ai_chain_name(None) in ("YOLO11n-ONNX", "HOG+SVM"))
+        try:
+            _tr = vlm_mod.VlmPersonTracker(max_input_dim=640, min_hits=1,
+                                           vlm_provider="ollama", vlm_model="未安装的模型")
+            line("链路名：开了多模态但没结果时如实写兜底",
+                 tg.TerminalApp._ai_chain_name(_tr).startswith("多模态"))
+        except Exception as e:
+            line("多模态 Tracker 构建失败：%s" % str(e)[:80], False)
 
     line("terminal_gui 导入", True)
     line("TerminalApp 类存在", hasattr(tg, "TerminalApp"))

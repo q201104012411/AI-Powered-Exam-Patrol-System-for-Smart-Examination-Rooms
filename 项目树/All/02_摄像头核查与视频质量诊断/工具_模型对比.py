@@ -1,10 +1,17 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 r"""
 02 · 检测模型对比实验（把人形/模型差异变成可写进报告的数据）
 
-用途：同一段考场画面，分别用 HOG / MobileNet-SSD / YOLO 跑一遍，输出
+用途：同一段考场画面，分别用 YOLO11n-ONNX 与 HOG+SVM 跑一遍，输出
       耗时、人数、轨迹连续性、以及（可选）精度指标，用于回答
       "换模型到底值不值" —— 而不是只给结论。
+
+检测链说明（与 person_detect.py 一致，检测链是**自动**选的，不能手动指定族）：
+      YOLO11n ONNX（主力，models\yolo11n.onnx）
+        -> MobileNet-SSD（本目录存在 prototxt+caffemodel 时兼容启用）
+        -> HOG+SVM（兜底）
+      注意：YOLO 可用时，"某帧 YOLO 零检出"仍会叠加一次 HOG 兜底（新版行为），
+      所以本工具的 YOLO 行如实标注为"零检出帧叠加 HOG 兜底"，不冒充纯 YOLO。
 
 用法（在本目录下执行）：
   # 1) 只看各后端能不能用 + 速度基准（不需要任何素材，随时可跑）
@@ -17,7 +24,7 @@ r"""
   python 工具_模型对比.py --images data\captures --frames 60
 
   # 4) 只测某个后端 / 指定模型文件
-  python 工具_模型对比.py --video x.mp4 --detectors yolo --model models\yolov8n-pose.onnx
+  python 工具_模型对比.py --video x.mp4 --detectors yolo --model models\yolo11n.onnx
 
   # 5) 有标注时直接出精度（标注为 YOLO txt 格式，与图片同名）
   python 工具_模型对比.py --images data\captures --gt data\gt
@@ -57,6 +64,59 @@ def _project_tag():
 
 
 PROJECT_TAG = _project_tag()
+
+
+# ---------------------------------------------------------------------
+#  检测链探测（新版 person_detect 不再提供 backend_name/backend_info/
+#  detect_backends/find_model，这里按它的真实优先级如实判定，不猜）
+# ---------------------------------------------------------------------
+def yolo_disabled():
+    """与 person_detect._yolo_disabled 同口径：EXAM_YOLO_DISABLE=1 时禁用 YOLO"""
+    return os.environ.get("EXAM_YOLO_DISABLE", "").strip() in ("1", "true", "True")
+
+
+def yolo_model_path():
+    """当前检测链会用的 YOLO ONNX 路径（环境变量 EXAM_YOLO_MODEL 优先）"""
+    env = os.environ.get("EXAM_YOLO_MODEL", "").strip()
+    if env:
+        return env
+    return os.path.join(os.path.dirname(os.path.abspath(pd.__file__)),
+                        "models", "yolo11n.onnx")
+
+
+def onnxruntime_ok():
+    """YOLO 推理依赖 onnxruntime；缺了就只剩 HOG 兜底"""
+    try:
+        import onnxruntime  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def ssd_model_paths():
+    """MobileNet-SSD 兼容模型的 (prototxt, caffemodel)；缺任一返回 (None, None)"""
+    d = os.path.dirname(os.path.abspath(pd.__file__))
+    proto = os.path.join(d, "MobileNetSSD_deploy.prototxt")
+    caffe = os.path.join(d, "MobileNetSSD_deploy.caffemodel")
+    if os.path.exists(proto) and os.path.exists(caffe):
+        return proto, caffe
+    return None, None
+
+
+def describe_chain():
+    """一行中文说明当前检测链到底会跑什么（自检/报告都用它，不用旧接口）"""
+    if yolo_disabled():
+        yolo = "YOLO11n 已停用(EXAM_YOLO_DISABLE=1)"
+    elif not onnxruntime_ok():
+        yolo = "YOLO11n 缺 onnxruntime"
+    elif not os.path.exists(yolo_model_path()):
+        yolo = "YOLO11n 缺模型(%s)" % os.path.basename(yolo_model_path())
+    else:
+        yolo = "YOLO11n 就绪(%s)" % os.path.basename(yolo_model_path())
+    proto, _ = ssd_model_paths()
+    return "；".join([yolo,
+                      "MobileNet-SSD %s" % ("就绪" if proto else "缺模型"),
+                      "HOG+SVM 兜底可用"])
 
 
 # ---------------------------------------------------------------------
@@ -168,25 +228,24 @@ def _load_gt(gt_dir, image_name):
 # ---------------------------------------------------------------------
 #  单个后端的评测
 # ---------------------------------------------------------------------
-def run_detector(name, kwargs, frames, args, gt_dir=None, want_kind=None):
+def run_detector(name, kwargs, frames, args, gt_dir=None, backend="", unavailable=None):
     """跑一个后端，返回指标 dict。
 
-    want_kind：期望的后端族（"hog"/"caffe-ssd"/"onnx-yolo"）。若实际装载的
-    后端与此不符（例如模型文件缺失导致静默回落 HOG），直接标记为"未参与"，
-    绝不把 HOG 的耗时/人数冒充成 SSD/YOLO 的结果。
+    backend：这一行实际跑的检测链（由 build_detectors 按 person_detect 的
+             真实优先级判定，如 "YOLO11n-ONNX"/"HOG+SVM"）。
+    unavailable：非 None 表示本次不可用（缺模型/缺依赖），直接标记"未参与"，
+             绝不把 HOG 的耗时/人数冒充成 YOLO 的结果。
     """
+    if unavailable:
+        return {"name": name, "ok": False, "backend": backend or "-",
+                "error": unavailable}
     t0 = time.perf_counter()
     try:
         tracker = pd.PersonTracker(**kwargs)
     except Exception as e:
-        return {"name": name, "ok": False, "error": "初始化失败：%s" % e}
+        return {"name": name, "ok": False, "backend": backend or "-",
+                "error": "初始化失败：%s" % e}
     init_s = time.perf_counter() - t0
-
-    backend = tracker.backend_name()
-    actual = tracker.backend_info()["kind"]
-    if want_kind and actual != want_kind:
-        return {"name": name, "ok": False, "backend": backend,
-                "error": "模型未装载，实际回落为 %s（不参与对比）" % backend}
 
     # 预热（让 DNN 后端完成图优化，避免把首次开销算进均值）
     warm = frames[: min(3, len(frames))]
@@ -274,18 +333,23 @@ def selftest(args):
     print("%s 检测后端可用性自检" % PROJECT_TAG)
     print("=" * 78)
     print("OpenCV      : %s" % cv2.__version__)
-    print("推理后端探测: %s" % pd.describe_backends())
+    print("检测链      : %s" % describe_chain())
     print()
 
-    kind, path, extra = pd.find_model()
-    rows = []
-    rows.append(("HOG+SVM", "可用（OpenCV 自带，永远可用）", "-"))
-    if kind == "onnx-yolo":
-        rows.append(("YOLO-ONNX", "可用", os.path.basename(path)))
+    path = yolo_model_path()
+    rows = [("HOG+SVM", "可用（OpenCV 自带，永远可用）", "-")]
+    if yolo_disabled():
+        rows.append(("YOLO11n-ONNX", "已停用（EXAM_YOLO_DISABLE=1）", "-"))
+    elif not onnxruntime_ok():
+        rows.append(("YOLO11n-ONNX", "缺依赖（pip install onnxruntime）", "-"))
+    elif os.path.exists(path):
+        rows.append(("YOLO11n-ONNX", "可用（主力检测器）", os.path.basename(path)))
     else:
-        rows.append(("YOLO-ONNX", "缺模型（放 *.onnx 到本目录或 models\\）", "-"))
-    if kind == "caffe-ssd" or (extra and os.path.exists(extra)):
-        rows.append(("MobileNet-SSD", "可用", os.path.basename(extra)))
+        rows.append(("YOLO11n-ONNX", "缺模型（运行 工具_YOLO模型导出.py 生成）", "-"))
+    proto, _ = ssd_model_paths()
+    if proto:
+        rows.append(("MobileNet-SSD", "可用（仅在无 YOLO 时启用）",
+                     os.path.basename(proto)))
     else:
         rows.append(("MobileNet-SSD", "缺模型（需 .prototxt + .caffemodel）", "-"))
 
@@ -294,17 +358,22 @@ def selftest(args):
     for a, b, c in rows:
         print("%-16s %-46s %s" % (a, b, c))
     print()
-    print("模型搜索目录：")
-    for d in pd._search_dirs():
-        print("  %s" % d)
+    print("检测链查找顺序（person_detect 内部，无需在界面上配置）：")
+    print("  1) 环境变量 EXAM_YOLO_MODEL 指定的 ONNX")
+    print("  2) 本目录 models\\yolo11n.onnx（默认；当前%s）"
+          % ("存在" if os.path.exists(path) else "不存在"))
+    print("  3) 本目录 MobileNetSSD_deploy.prototxt + .caffemodel（兼容保留）")
+    print("  4) 纯 HOG+SVM 兜底")
     print()
     print("获取权重（本脚本不自动下载，请自行确认来源后手动放置）：")
-    print("  YOLOv8n / YOLOv8n-pose : ultralytics 官方发布页导出的 .onnx")
-    print("  MobileNet-SSD          : OpenCV 官方 samples/dnn 下的 "
+    print("  YOLO11n ONNX : 首选 `python 工具_YOLO模型导出.py`（从官方 .pt 导出）")
+    print("                 也可 `python 下载模型.py`（官方 release 下载 + SHA256 校验）")
+    print("  MobileNet-SSD: OpenCV 官方 samples/dnn 下的 "
           "MobileNetSSD_deploy.prototxt + .caffemodel")
     print()
-    if kind is None:
-        print("[提示] 当前无模型，对比实验只会跑 HOG。放入模型后重跑本命令即可。")
+    if yolo_disabled() or not onnxruntime_ok() or not os.path.exists(path):
+        print("[提示] 当前 YOLO 不可用，对比实验的 YOLO 行会标记为"
+              "「未参与」，只跑 HOG。装好模型/依赖后重跑本命令即可。")
     return 0
 
 
@@ -312,24 +381,55 @@ def selftest(args):
 #  主流程
 # ---------------------------------------------------------------------
 def build_detectors(args):
-    """构造要对比的后端参数表 -> [(显示名, kwargs, 期望后端族)]。"""
+    """构造要对比的后端参数表 -> [(显示名, kwargs, 实际检测链, 不可用原因)]。
+
+    新版 person_detect 没有"指定后端族"的参数（model_kind/prefer_gpu/
+    use_onnxruntime 都已移除）：检测链固定按 YOLO11n ONNX -> MobileNet-SSD
+    -> HOG 兜底 自动选择。所以这里用"给不给模型"来控制走哪条链：
+      · HOG 行    ：把 yolo_model_path 指向一个不存在的文件 -> 强制 HOG 兜底；
+      · YOLO 行   ：显式传存在的模型路径（--model / EXAM_YOLO_MODEL 可覆盖）。
+    """
     dets = []
     want = [s.strip().lower() for s in (args.detectors or "all").split(",") if s.strip()]
     if "all" in want:
         want = ["hog", "ssd", "yolo"]
     base = dict(boundary_ratio=0.92, max_input_dim=1280, min_hits=1,
                 confirm_frames=4, match_dist_ratio=0.12)
+    no_model = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "models", "_no_such_model_.onnx")
+    proto, _ = ssd_model_paths()
 
     if "hog" in want:
-        dets.append(("HOG+SVM（当前默认）", dict(base, dense_mode=True), "hog"))
+        if proto:
+            reason = ("本目录存在 MobileNet-SSD 模型，检测链会先启用它，"
+                      "无法强制纯 HOG（要测纯 HOG 请先把该模型移出本目录）")
+        else:
+            reason = None
+        dets.append(("HOG+SVM（兜底链）",
+                     dict(base, dense_mode=True, yolo_model_path=no_model),
+                     "HOG+SVM", reason))
     if "ssd" in want:
-        dets.append(("MobileNet-SSD", dict(base, model_kind="caffe",
-                                          model_path=args.ssd_model), "caffe-ssd"))
+        dets.append(("MobileNet-SSD",
+                     dict(base, yolo_model_path=no_model),
+                     "MobileNet-SSD",
+                     None if proto else
+                     "缺 MobileNet-SSD 模型（需 MobileNetSSD_deploy.prototxt "
+                     "+ .caffemodel 放在本目录）"))
     if "yolo" in want:
-        dets.append(("YOLO-ONNX", dict(base, model_kind="yolo",
-                                      model_path=args.model,
-                                      yolo_conf=args.conf,
-                                      use_onnxruntime=args.ort), "onnx-yolo"))
+        path = args.model or yolo_model_path()
+        if yolo_disabled():
+            reason = "YOLO 已被 EXAM_YOLO_DISABLE=1 停用"
+        elif not onnxruntime_ok():
+            reason = "未安装 onnxruntime（pip install onnxruntime）"
+        elif not os.path.exists(path):
+            reason = ("缺模型 %s（可运行 工具_YOLO模型导出.py 生成）"
+                      % os.path.basename(path))
+        else:
+            reason = None
+        dets.append(("YOLO11n-ONNX（零检出帧叠加 HOG 兜底）",
+                     dict(base, yolo_model_path=path, yolo_conf=args.conf,
+                          yolo_input_dim=int(args.input_dim or 640)),
+                     "YOLO11n-ONNX", reason))
     return dets
 
 
@@ -354,8 +454,9 @@ def _resize_to_input_dim(frames, input_dim):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="%s 检测模型对比实验（HOG / MobileNet-SSD / YOLO）" % PROJECT_TAG)
-    ap.add_argument("--selftest", action="store_true", help="只做后端可用性自检")
+        description="%s 检测模型对比实验（YOLO11n-ONNX / MobileNet-SSD / HOG+SVM）"
+                    % PROJECT_TAG)
+    ap.add_argument("--selftest", action="store_true", help="只做检测链可用性自检")
     ap.add_argument("--video", help="考场录像文件")
     ap.add_argument("--images", help="现场抓帧目录")
     ap.add_argument("--gt", help="YOLO txt 标注目录（与图片同名）")
@@ -363,16 +464,16 @@ def main():
     ap.add_argument("--stride", type=int, default=1, help="视频抽帧间隔")
     ap.add_argument("--detectors", default="all",
                     help="要对比的后端：all / hog / ssd / yolo（逗号分隔）")
-    ap.add_argument("--model", help="YOLO onnx 路径（默认自动查找）")
-    ap.add_argument("--ssd-model", dest="ssd_model", help="MobileNet prototxt 路径")
-    ap.add_argument("--conf", type=float, default=0.30, help="YOLO 置信度阈值")
-    ap.add_argument("--ort", action="store_true",
-                    help="YOLO 走 onnxruntime（装了 onnxruntime-gpu 时可上独显）")
+    ap.add_argument("--model", help="YOLO onnx 路径（默认 models\\yolo11n.onnx，"
+                                    "也可用环境变量 EXAM_YOLO_MODEL 指定）")
+    ap.add_argument("--ssd-model", dest="ssd_model",
+                    help="仅用于可用性判定：MobileNet prototxt 路径")
+    ap.add_argument("--conf", type=float, default=0.25, help="YOLO 置信度阈值")
     ap.add_argument("--synth-persons", dest="synth_persons", type=int, default=40,
                     help="无素材时合成帧的人数")
-    ap.add_argument("--input-dim", dest="input_dim", type=int, default=416,
-                    help="AI 分析长边（默认 416，与 02 标准模式一致；"
-                         "密集模式 576 / 节能模式 320）")
+    ap.add_argument("--input-dim", dest="input_dim", type=int, default=640,
+                    help="AI 分析长边（默认 640，与界面标准/密集/节能三档一致；"
+                         "YOLO11n 输入固定 640，长边再大也不会更准）")
     ap.add_argument("--outdir", default=None, help="报告输出目录")
     args = ap.parse_args()
 
@@ -396,15 +497,15 @@ def main():
     print("原始分辨率: %dx%d   ->  AI 分析分辨率 %dx%d（长边 %d，与界面同口径）"
           % (raw_w, raw_h, fsz[0], fsz[1], args.input_dim))
     print("帧数      : %d" % len(frames))
-    print("推理后端  : %s" % pd.describe_backends())
+    print("推理后端  : %s" % describe_chain())
     print("精度标注  : %s" % (args.gt if args.gt else "未提供（只出速度/稳定性）"))
     print()
 
     results = []
-    for name, kwargs, want_kind in build_detectors(args):
+    for name, kwargs, backend, reason in build_detectors(args):
         print("跑 %-22s ..." % name, end="", flush=True)
         r = run_detector(name, kwargs, frames, args, gt_dir=args.gt,
-                         want_kind=want_kind)
+                         backend=backend, unavailable=reason)
         results.append(r)
         if r["ok"]:
             print(" 完成（%s，中位 %.1f ms）" % (r["backend"], r["lat_med"]))
@@ -491,7 +592,7 @@ def main():
             f.write("- AI 分析分辨率：%dx%d（长边 %d）\n"
                     % (fsz[0], fsz[1], args.input_dim))
             f.write("- 帧数：%d\n" % len(frames))
-            f.write("- 推理后端：%s\n" % pd.describe_backends())
+            f.write("- 推理后端：%s\n" % describe_chain())
             f.write("- OpenCV：%s\n\n" % cv2.__version__)
             f.write("## 速度与稳定性\n\n")
             f.write("| 后端 | 实际使用 | 耗时中位 | P95 | 人数均值 | 人数波动 | 编号变动 | 单路占比 |\n")

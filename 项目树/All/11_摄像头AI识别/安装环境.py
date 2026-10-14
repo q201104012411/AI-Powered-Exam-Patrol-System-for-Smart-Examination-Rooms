@@ -36,7 +36,8 @@ def verify(py):
             "print('opencv', cv2.__version__); "
             "print('numpy', numpy.__version__); "
             "print('HOGDescriptor', hasattr(cv2, 'HOGDescriptor')); "
-            "print('peopleDetector', hasattr(cv2, 'HOGDescriptor_getDefaultPeopleDetector'))")
+            "print('peopleDetector', hasattr(cv2, 'HOGDescriptor_getDefaultPeopleDetector')); "
+            "import onnxruntime; print('onnxruntime', onnxruntime.__version__)")
     log("验证依赖…")
     try:
         subprocess.call([py, "-c", code])
@@ -50,9 +51,9 @@ def main():
     py = sys.executable
     log("解释器：%s" % py)
 
-    log("安装/升级：opencv-python<5、numpy、Pillow")
+    log("安装/升级：opencv-python<5、numpy、Pillow、onnxruntime")
     run([py, "-m", "pip", "install", "--upgrade",
-         "opencv-python<5", "numpy", "Pillow"])
+         "opencv-python<5", "numpy", "Pillow", "onnxruntime"])
 
     log("检查 HOGDescriptor（AI 框选的必要条件）…")
     ok = subprocess.call(
@@ -70,8 +71,9 @@ def main():
     log("完成。下一步：")
     log("  1) 双击「启动.bat」打开界面")
     log("  2) 在「① 摄像头管理」里加摄像头（本机摄像头填 0 即可先试）")
-    log("  3) 想让识别更准：把 yolov8n-pose.onnx 放进本目录或本目录\\models\\")
-    log("     （可选，不放则用 HOG+SVM 兜底；确认当前后端看界面顶部）")
+    log("  3) 检测链：models\\yolo11n.onnx（YOLO11n，随包分发）优先，缺失则回落 HOG+SVM")
+    log("     换模型/重新导出：运行「工具_YOLO模型导出.py」；也可运行「下载模型.py」")
+    log("     从官方 release 下载。当前检测链看界面顶部")
     return 0
 
 

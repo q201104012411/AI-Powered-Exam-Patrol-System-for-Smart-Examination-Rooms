@@ -1,4 +1,4 @@
-﻿智能终端操作端 · 程序结构
+智能终端操作端 · 程序结构
 ============================================================
 对应《智能终端.md》。本目录是终端侧软件实现。
 
@@ -46,15 +46,54 @@
                **不自行判权限**（role 原样传，由 01 的 accounts.cmd_console_tier 定），
                以最后一行 JSON 回传；设 sys.dont_write_bytecode 保证对 01 只读
 
-  person_detect.py  【AI 框选识别，与 02 同一份代码，已同步为模型接入版】
-               检测后端自动选择：YOLO-pose ONNX > YOLO ONNX > MobileNet-SSD Caffe
-               > HOG+SVM(兜底)；模型在"本目录"与"本目录\models\"自动查找，
-               找到即启用、找不到静默回落 HOG（不报错、不崩）；
-               有 pose 时用骨骼几何(肩线倾斜/头肩偏移/眼耳置信度)判行为，
-               否则用原框宽高比逻辑；detect_backends()/backend_name()/backend_info()
-               可如实报出当前后端（terminal_gui 会显示在状态栏并写 data\ai_backend.txt）
-  工具_模型对比.py  检测后端可用性自检(--selftest) + 同一素材上 HOG/SSD/YOLO 的
-               速度/人数波动/轨迹连续性/精度对比；报告落 data\reports\
+  person_detect.py  【AI 框选识别，与 02 逐字节相同，2026-10-14 已整体替换为
+               「YOLO11n ONNX 版」（1,611 行 / 70,810 字节）】
+               检测链按固定优先级自动选择（界面/配置**无法**指定后端族）：
+               YOLO11n ONNX(主力；models\yolo11n.onnx，可用环境变量
+               EXAM_YOLO_MODEL 覆盖；输入固定 640×640，只解码 COCO person 类)
+               > MobileNet-SSD(仅当本目录存在 MobileNetSSD_deploy.prototxt
+               + .caffemodel 时启用) > HOG+SVM(兜底)；
+               YOLO 可用时某帧零检出仍会叠加一次 HOG 兜底并合并；
+               【密集考场 40 人】分块（切片）推理（yolo_tiling=auto/on/off）：
+               分析帧长边 ≥ 640×1.35 时切成 yolo_tile_size(640) 的块，每块按原生像素
+               送模型（等效放大 长边÷块边 倍），跨块去重并优先保留未被切断的框；
+               贴脸大目标（高度≥45% 或面积≥12%）时自动回落单张推理；单帧最多 12 块；
+               人多(>12) 时只给异常/越界框写文字；
+  工具_密集场景评测.py 40 人考场评测（与 02 同一份）：真实裁片合成 8×5 场景，
+               对比 分析长边/分块/块大小/置信度/去重阈值 的召回-精确-耗时；
+               实测 640 单张 12.5% → 1280 单张 22.5% → 1280+分块 62.5%
+               EXAM_YOLO_DISABLE=1 强制禁用 YOLO、EXAM_YOLO_EP=coreml 优先 CoreML；
+               依赖 onnxruntime，缺失即静默回落 HOG（不报错、不崩）；
+               行为判定用框几何 + Haar 人脸/人眼辅助（无姿态/骨架环节）；
+               去重：IoU-NMS + "部分-整体"两级去重（_suppress_contained/_iomin，
+               小框被大框包住且中心在框内才丢，阈值 0.85）；
+               辅助源（背景差分 / Haar 人头）只在主链零检出时兜底，避免一人多个框；
+               逐人信息字段 pid/rect/action/bad/crosses/behaviors/density_level；
+               后端如实判定：YOLO 会话已建=YOLO11n-ONNX，否则 MobileNet-SSD，
+               都没有=HOG+SVM（terminal_gui 显示在状态栏并写 data\ai_backend.txt）
+  工具_模型对比.py  检测链可用性自检(--selftest，打印"检测链") + 同一素材上
+               YOLO11n-ONNX 行 vs HOG+SVM 行的速度/人数波动/轨迹连续性/精度对比
+               （MobileNet-SSD 缺模型时如实标"未参与"）；--input-dim 默认 640；
+               报告落 data\reports\
+  工具_YOLO模型导出.py  从 yolo11n.pt 导出 models\yolo11n.onnx（一次性依赖
+               pip install ultralytics onnxslim；改 MODEL_NAME 可换 yolo11s）
+  下载模型.py   只提供 yolo11n.onnx / yolo11s.onnx 两个检测模型（姿态类参数已删除）；
+               从 ultralytics 官方 release 下载并校验 SHA256；本地导出件哈希与官方 release 不同属正常
+  cheat_bridge.py 【作弊识别结合层，2026-10-14 新增，与 02 逐字节相同】
+               逐人检测结果 → FrameFeatures → cheatdetect 时序引擎（风险分数 + 窗口 2s +
+               持续超阈 1s 才告警，单帧瞬时动作被抑制）；本终端状态栏显示风险等级、
+               告警写监控日志并上报。引擎本体在 作弊识别\（与 02/00 同一份）。
+  vlm_detect.py 【多模态大模型（VLM）检测引擎，本版新增，与 02 逐字节相同】
+               VlmPersonTracker 继承 person_detect.PersonTracker，只替换检测源 _detect()：
+               多模态为主（后台线程按间隔刷新，结果新鲜用它的人框/行为/可疑物品），
+               超时/报错/结果过期则本帧回落 YOLO11n（跟踪/编号/画框/越界/告警复用原链路）；
+               后端可切换：ollama（/api/chat + images；/api/tags、/api/show 探测 capabilities）
+               与 api（OpenAI 兼容 /chat/completions + image_url data URI，Bearer 鉴权）；
+               输出强制 JSON（persons/objects/summary），坐标 0~1000 相对，行为词走 ACTION_ALIASES；
+               provider=off 时与旧版完全一致
+  工具_多模态检测.py --check / --pull / --image / --write-settings / --prompt；
+               与 02 同一份工具（设置文件路径各项目自己解析）
+  多模态检测.bat  菜单式启动器（choice 菜单，支持"多模态检测.bat check"参数式）
 
 【数据流】
   边缘/平台 --HTTP--> AlertHub.ingest --> SQLite(alerts) --+

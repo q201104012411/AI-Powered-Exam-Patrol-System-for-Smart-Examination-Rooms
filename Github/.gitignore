@@ -1,0 +1,95 @@
+# ============================================================
+# 根级忽略清单
+# 目的：保证仓库体积小、可快速推送，并避免提交个人信息 / 生物特征
+# ============================================================
+
+# --- 1. 超大安装包（GitHub 单文件硬限制 100MB，超过必被拒绝）---
+# 大模型本地部署/OllmaSetup.exe 约 1.5GB，是导致推送失败的元凶
+# 只忽略该 exe，保留同目录下的说明文档
+大模型本地部署/*.exe
+*.exe
+*.msi
+*.iso
+*.dmg
+
+# --- 2. 模型包与压缩包 ---
+*.zip
+*.7z
+*.rar
+*.tar
+*.gz
+*.onnx
+*.pt
+*.pth
+*.weights
+*.h5
+*.pb
+*.tflite
+# 例外说明：手机识别必须靠模型（HOG/Haar/MobileNet-SSD 都不认手机）。
+# 各子方案用附带的「下载模型.py」从官方 release 获取 yolo11n.onnx（含 SHA256 校验）。
+# 这里保持 *.onnx 通用忽略，不针对具体文件做例外（git 的否定规则与父目录
+# 忽略存在耦合，太容易配错；宁可让"获取模型"成为一条明确的一行命令）。
+# 注：11_摄像头AI识别 的 models/yolo11n.onnx 已在早先提交中入库。
+# --- 3. 运行期数据：含考生个人信息与生物特征，绝不入库 ---
+data/
+logs/
+captures/
+attachments/
+reports/
+baselines/
+
+# --- 4. 历史备份：含旧版明文身份证号，绝对不能提交 ---
+备份/
+*_备份/
+*备份_*/
+
+# --- 5. 密钥、口令与数据库 ---
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.enc
+*.key
+*.pem
+.jwt_secret
+初始密码.txt
+init_admin_password.txt
+exam_home.txt
+
+# --- 6. Python 缓存与构建产物 ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+
+# --- 7. 日志与临时文件 ---
+*.log
+*.log.*
+*.bak
+*.tmp
+*~
+
+# --- 8. 编辑器 / 系统文件 ---
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# --- 9. 仅本机使用的辅助脚本（个人便利工具，不入库）---
+# 一键上传脚本只在本机用；注意它曾被提交过一次，需 git rm 才能真正从仓库移除
+上传到GitHub.bat
+
+# --- 10. 测试临时产物 ---
+# 测试会在这里生成 web_*.db、初始密码_*.txt 等，绝不能入库
+tests/_tmp/
+_tmp/
+
+# --- 11. 工具产物（非项目内容）---
+# DSH 沙箱 ACL 修复工具生成的备份与报告，曾被误提交，已移除并在此忽略
+_acl_recovery/

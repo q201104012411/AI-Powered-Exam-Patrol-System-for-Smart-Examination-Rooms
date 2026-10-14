@@ -2,15 +2,22 @@
 r"""
 摄像头 AI 识别 · 模型下载
 
-为什么需要它：**手机识别只有 YOLO 模型能做**。HOG 是行人检测器、Haar 是人脸级联，
-两者都不认手机；MobileNet-SSD 只有 20 类也没有手机。
-本工具从 ultralytics **官方 release** 下载预导出的 ONNX 权重并校验 SHA256。
+作用：从 ultralytics **官方 release** 下载预导出的 ONNX 权重并校验 SHA256，
+      放到 models\ 后检测链会自动启用（无需改配置/界面）。
+
+与「工具_YOLO模型导出.py」的分工：
+  · 本脚本  ：下载官方**预导出**的 .onnx（不装 ultralytics 也能用，带哈希校验）；
+  · 导出工具：本机用 ultralytics 从 .pt 重新导出（可换 yolo11s 等，需要联网下 .pt）。
+
+如实说明：当前检测链（person_detect.py）只解码 COCO 的 **person** 类做
+人形框选与行为判定，既不使用姿态（pose）模型，也不做手机类识别；
+因此本脚本只提供检测（detect）模型。
 
 用法：
-  python 下载模型.py                  # 下载默认 yolo11n.onnx（含手机类，推荐）
+  python 下载模型.py                  # 下载默认 yolo11n.onnx（推荐）
   python 下载模型.py --check          # 只检查本机已有模型的完整性
-  python 下载模型.py --pose           # 额外下载 yolo11n-pose.onnx（人框+骨骼点）
   python 下载模型.py --list           # 列出可下载的模型与哈希
+  python 下载模型.py --force          # 即使已存在也重新下载
 """
 import argparse
 import hashlib
@@ -29,13 +36,7 @@ MODELS = {
         "url": BASE + "yolo11n.onnx",
         "sha256": "634279b40c07c6391472c51ad45b81ebc48706a9a1fe72dd3396322acd0c053b",
         "size_mb": 10.9,
-        "desc": "YOLO11n 检测模型（COCO 80 类，含 person / cell phone）——手机识别靠它",
-    },
-    "yolo11n-pose.onnx": {
-        "url": BASE + "yolo11n-pose.onnx",
-        "sha256": None,      # 上游未在 API 里给哈希时留空，仅做体积校验
-        "size_mb": 12.5,
-        "desc": "YOLO11n 姿态模型（人框 + 17 骨骼点）——行为判定更准",
+        "desc": "YOLO11n 检测模型（COCO 80 类，person=第 0 类）——主力检测器",
     },
     "yolo11s.onnx": {
         "url": BASE + "yolo11s.onnx",
@@ -129,19 +130,19 @@ def check():
         meta = MODELS.get(f)
         ok = ""
         if meta and meta.get("sha256"):
-            ok = "✅ 与官方一致" if got == meta["sha256"] else "⚠ 与官方不符"
+            ok = "✅ 与官方一致" if got == meta["sha256"] else "⚠ 与官方 release 不一致"
         print("  %-24s %6.1f MB  %s  %s"
               % (f, os.path.getsize(p) / 1e6, got[:16], ok))
     print()
-    print("手机识别能力：需要含 cell phone 类的检测模型（yolo11n.onnx / yolo11s.onnx）")
-    print("骨骼点行为判定：需要 pose 模型（yolo11n-pose.onnx）")
+    print("检测链默认用 models\\yolo11n.onnx（COCO person 类，人形框选）。")
+    print("  注：若该文件是用「工具_YOLO模型导出.py」本地导出的（simplify=True），")
+    print("      哈希与官方 release 不一致属正常，能正常推理即可。")
 
 
 def main():
     ap = argparse.ArgumentParser(description="下载 YOLO ONNX 模型（官方 release + SHA256 校验）")
     ap.add_argument("--check", action="store_true", help="只检查已有模型")
     ap.add_argument("--list", action="store_true", help="列出可下载模型")
-    ap.add_argument("--pose", action="store_true", help="额外下载姿态模型")
     ap.add_argument("--force", action="store_true", help="即使已存在也重新下载")
     args = ap.parse_args()
 
@@ -159,8 +160,6 @@ def main():
         return 0
 
     names = ["yolo11n.onnx"]
-    if args.pose:
-        names.append("yolo11n-pose.onnx")
 
     ok = True
     for n in names:
@@ -172,7 +171,7 @@ def main():
     if ok:
         print("完成。把模型放在这里后程序会**自动启用**，无需改配置：")
         print("  %s" % MODEL_DIR)
-        print("启动「启动.bat」后，AI 页顶部会显示实际后端（不再是 HOG+SVM）。")
+        print("启动界面后，AI 页顶部会显示当前检测链（YOLO11n-ONNX / HOG+SVM）。")
     else:
         print("有模型未下载成功，可重跑本脚本，或按上面的地址手动下载。")
     return 0 if ok else 1

@@ -55,21 +55,39 @@ CONSOLE_FLAG = DATA_ROOT / "cmd_console.on"
 CONSOLE_ADMIN_FLAG = DATA_ROOT / "cmd_console_admin.on"
 AI_CHAT_FLAG = DATA_ROOT / "ai_chat.on"
 
-# ---------------- AI 检测后端设置（与 02 同格式，便于两处保持一致） ----------------
+# ---------------- AI 检测链设置（与 02 同格式，便于两处保持一致） ----------------
 # 放在 data\ai_settings.json。存在的键会覆盖下面的默认值；文件不存在就用默认值。
-# person_detect.py 会自动在"本目录"与"本目录\models\"里找 *.onnx / *.prototxt+*.caffemodel，
-# 找到即启用、找不到静默回落 HOG，所以这里**不需要**填模型路径也能跑。
+# 检测链由 person_detect.py 自动选择，顺序固定为：
+#   YOLO11n ONNX（models\yolo11n.onnx；可用环境变量 EXAM_YOLO_MODEL 覆盖）
+#     -> MobileNet-SSD（本目录存在 prototxt+caffemodel 时兼容启用）
+#     -> HOG+SVM（兜底）
+# 模型缺失 / 未装 onnxruntime 时静默回落 HOG，所以这里**不需要**填模型路径也能跑。
 AI_SETTINGS_PATH = DATA_ROOT / "ai_settings.json"
 
 AI_SETTINGS_DEFAULT = {
     "ai_mode": "standard",    # standard / dense / energy —— 决定 AI 分析长边
     "ai_input_dim": 0,        # 直接指定分析长边（0=按 ai_mode 取预设）
-    "model_kind": "auto",     # auto / yolo / caffe —— 只影响优先族，找不到仍会回落
-    "model_path": "",         # 显式指定模型文件（留空=自动查找）
-    "prefer_gpu": True,       # 有 CUDA 版 OpenCV 时自动走 GPU；没有则忽略
-    "use_onnxruntime": False, # 装了 onnxruntime-gpu 时置 True 可走独显
-    "yolo_conf": 0.30,        # YOLO 置信度阈值（无模型时无意义）
-    "detect_backend": "",     # 只读展示位：由 person_detect.backend_name() 回填
+    "yolo_model_path": "",    # 显式指定 YOLO onnx（留空=自动用 models\yolo11n.onnx）
+    "yolo_conf": 0.25,        # YOLO 置信度阈值（无模型时无意义）
+    "yolo_iou": 0.45,         # YOLO 后处理 NMS 的 IoU 阈值
+    "yolo_input_dim": 640,    # YOLO 输入边长（官方导出固定 640，一般不用改）
+    # ---- 多模态大模型（VLM）：看图判读，YOLO11n 之上/之下的主备关系 ----
+    # provider=off 时与旧版完全一致（纯 YOLO11n）；api/ollama 时多模态为主，
+    # YOLO11n 自动降级为兜底（多模态超时/报错/结果过期时用它的框）。
+    "vlm_provider": "off",    # off / api / ollama
+    "vlm_model": "",          # 例：ollama→qwen2.5vl:3b ／ api→qwen-vl-max
+    "vlm_base_url": "",       # 留空=按后端默认（ollama：127.0.0.1:11434）
+    "vlm_api_key": "",        # 只有 api 后端需要
+    "vlm_interval": 3.0,      # 每路每 N 秒最多一次多模态调用
+    "vlm_max_dim": 896,       # 送模型的图片长边
+    "vlm_timeout": 60.0,      # 单次调用超时（秒）
+    # ---- 密集考场（40 人）：分块（切片）推理 ----
+    # auto = 分析帧长边 ≥ 640×1.35 时自动分块（密集档 1280 会自动开），
+    # 单张推理会把整帧压到 640，40 人考场后排必然漏检（实测召回 25%→68%）。
+    "yolo_tiling": "auto",    # auto / on / off
+    "yolo_tile_size": 640,    # 分块边长：480 更准更慢，640 均衡
+    "yolo_tile_max": 12,      # 单帧最多几块（限制算力上限）
+    "detect_backend": "",     # 只读展示位：由终端按实际检测链回填（多模态/YOLO11n/HOG）
 }
 
 
@@ -146,6 +164,11 @@ ALERT_CODE_LEVEL = {
     "SLEEPY": LEVEL_ORANGE,             # 闭眼/趴睡
     "HEAD_TURN": LEVEL_ORANGE,          # 转脸偏头
     "PERSON_BEHAVIOR_ABNORMAL": LEVEL_ORANGE,  # 其他异常行为兜底
+    # ---- 作弊识别（cheatdetect 时序引擎，2026-10-14 结合） ----
+    # 行为模式类告警=红（"获取/传递答案"的动作模式，属直接证据），
+    # 与逐帧行为标签（橙）区分开：逐帧动作可能只是疲劳调整。
+    "CHEAT_PATTERN": LEVEL_RED,             # 作弊行为模式（持续偷看/传递纸条/使用手机…）
+    "CHEAT_PATTERN_SUSPECT": LEVEL_ORANGE,  # 风险升高但未达持续阈值（关注）
     # ---- 06 智能安检与手机作弊器材检测（事前阻断） ----
     "SECURITY_ALARM": LEVEL_ORANGE,            # 安检报警（金属/强磁/鞋底等非手机类）
     "SECURITY_REINSPECT_TIMEOUT": LEVEL_ORANGE,  # 安检报警复检超时未处置
@@ -158,6 +181,8 @@ ALERT_CODE_TEXT = {
     "MULTI_FACE": "多人同框",
     "NO_INVIGILATOR": "监考缺位",
     "PHONE_DETECTED": "手机/作弊器材",
+    "CHEAT_PATTERN": "作弊行为模式（时序判定）",
+    "CHEAT_PATTERN_SUSPECT": "作弊风险升高（关注）",
     "SIGNAL_ABNORMAL": "无线信号异常",
     "FACE_MISMATCH": "人脸不符",
     "LOOK_DOWN": "长时间低头",

@@ -12,6 +12,7 @@ r"""
 启动：双击「启动.bat」，或 python app.py
 """
 import os
+import inspect
 import sys
 import threading
 import time
@@ -38,6 +39,41 @@ try:
 except Exception:
     pd_mod = None
     HAS_PD = False
+
+
+def yolo_disabled():
+    """与 person_detect._yolo_disabled 同口径：EXAM_YOLO_DISABLE=1 时禁用 YOLO"""
+    return os.environ.get("EXAM_YOLO_DISABLE", "").strip() in ("1", "true", "True")
+
+
+def yolo_ready():
+    """YOLO11n 是否真的可用：开关 + onnxruntime + 模型文件三者都要满足"""
+    if not HAS_PD or yolo_disabled():
+        return False
+    try:
+        import onnxruntime  # noqa: F401
+    except Exception:
+        return False
+    path = ""
+    if hasattr(pd_mod, "default_yolo_model_path"):
+        path = pd_mod.default_yolo_model_path()
+    return bool(path) and os.path.exists(path)
+
+
+def chain_desc():
+    """如实描述当前检测链（新版 person_detect 已移除 describe_backends）"""
+    if not HAS_PD:
+        return "person_detect 未加载（AI 识别不可用）"
+    if yolo_ready():
+        return "YOLO11n-ONNX 主力（缺帧自动 HOG 兜底）"
+    if yolo_disabled():
+        return "YOLO11n 已停用（EXAM_YOLO_DISABLE=1），HOG+SVM 兜底"
+    try:
+        import onnxruntime  # noqa: F401
+    except Exception:
+        return "缺 onnxruntime（pip install onnxruntime），HOG+SVM 兜底"
+    return "缺 YOLO11n 模型（运行 工具_YOLO模型导出.py），HOG+SVM 兜底"
+
 
 from storage import Camera, CameraStore
 
@@ -68,7 +104,6 @@ class App:
         self._cam_state = {}      # cam_id -> 渲染缓存
         self._ai_on = tk.BooleanVar(value=True)
         self._ai_backend_name = ""
-        self._phone_supported = False      # 手机识别是否可用（需 YOLO 模型）
         self._tick_id = None
         self._closing = False
         self._editing_id = None
@@ -364,18 +399,26 @@ class App:
     #  页签② 逻辑
     # =================================================================
     def _make_tracker(self):
-        """按当前 AI 设置建一个检测器（每路一个，避免轨迹串号）。"""
+        """按当前 AI 设置建一个检测器（每路一个，避免轨迹串号）。
+
+        检测链由 person_detect 自动选择（YOLO11n ONNX > MobileNet-SSD > HOG），
+        构造参数按它的实际签名过滤：模型/参数换代时不会因 TypeError 整条链路
+        掉进"降级分支"而丢掉设置。
+        """
         if not HAS_PD:
             return None
         cfg = config.load_ai_settings()
         kw = dict(max_input_dim=1280,
                   boundary_ratio=config.ai_boundary_ratio(cfg),
                   confirm_frames=4, min_hits=2)
-        for k in ("model_kind", "prefer_gpu", "use_onnxruntime", "yolo_conf"):
+        for k in ("yolo_model_path", "yolo_conf", "yolo_iou", "yolo_input_dim"):
             if cfg.get(k) not in (None, ""):
                 kw[k] = cfg[k]
-        if cfg.get("model_path"):
-            kw["model_path"] = cfg["model_path"]
+        try:
+            params = inspect.signature(pd_mod.PersonTracker.__init__).parameters
+            kw = {k: v for k, v in kw.items() if k in params}
+        except (TypeError, ValueError):
+            pass
         try:
             return pd_mod.PersonTracker(**kw)
         except TypeError:
@@ -491,15 +534,11 @@ class App:
             pass
 
     def _update_ai_info(self):
-        try:
-            probe = getattr(pd_mod, "describe_backends", None)
-            backends = probe() if probe else "未知"
-        except Exception:
-            backends = "未知"
-        cfg = self.ai_cfg
-        self._set_info("分析长边 %d ｜ 间隔 %d ms ｜ 警戒线 %.0f%% ｜ 推理后端：%s"
-                       % (config.ai_input_dim(cfg), config.ai_interval_ms(cfg),
-                          config.ai_boundary_ratio(cfg) * 100, backends))
+        self._set_info("分析长边 %d ｜ 间隔 %d ms ｜ 警戒线 %.0f%% ｜ 检测链：%s"
+                       % (config.ai_input_dim(self.ai_cfg),
+                          config.ai_interval_ms(self.ai_cfg),
+                          config.ai_boundary_ratio(self.ai_cfg) * 100,
+                          chain_desc()))
 
     # =================================================================
     #  渲染主循环
@@ -522,12 +561,11 @@ class App:
             return
         now_ms = time.time() * 1000.0
         ai_on = bool(self._ai_on.get()) and HAS_PD
-        total_persons = total_viol = total_phone = 0
+        total_persons = total_viol = 0
         cfg = self.ai_cfg
         ai_dim = config.ai_input_dim(cfg)
         ai_interval = config.ai_interval_ms(cfg)
         boundary = config.ai_boundary_ratio(cfg)
-        draw_pose = bool(cfg.get("draw_pose", True))
 
         for cam in self.store.all():
             cid = cam.id
@@ -573,33 +611,24 @@ class App:
                     tracker = self._trackers.get(cid)
                     if tracker is not None and persons:
                         tracker.draw_boxes(disp, persons, line_y=st.get("line_y"),
-                                           scale=scale, font_size=12,
-                                           draw_pose=draw_pose)
+                                           scale=scale, font_size=12)
                     total_persons += int(st.get("count", len(persons)))
                     total_viol += int(viol)
-                    total_phone += sum(1 for x in persons if x.get("has_phone"))
 
                 self._show_frame(cid, disp)
                 self._set_panel_status(
                     cid, "播放中 %.1f fps" % (snap.get("fps") or 0.0), "#0a7d28")
-                phone_here = sum(1 for x in persons if x.get("has_phone"))
-                extra = ("　｜　📱 手机 %d" % phone_here) if phone_here else ""
-                p["info"].config(text="人数 %d ｜ 越界 %d%s ｜ %s"
-                                 % (st.get("count", len(persons)), viol, extra,
+                p["info"].config(text="人数 %d ｜ 越界 %d ｜ %s"
+                                 % (st.get("count", len(persons)), viol,
                                     snap.get("status") or ""))
             except Exception as e:
                 self._set_panel_status(cid, "渲染失败：%s" % str(e)[:50], "#c00")
 
         if ai_on:
-            tail = ""
-            if total_phone:
-                tail = "　｜　⚠ 手机 %d" % total_phone
-            elif not self._phone_supported:
-                tail = "　｜　手机识别需模型"
             self.status.config(
-                text="AI 识别中：共 %d 人，越界 %d%s ｜ 后端 %s"
-                     % (total_persons, total_viol, tail,
-                        self._ai_backend_name or "—"),
+                text="AI 识别中：共 %d 人，越界 %d ｜ 检测链 %s"
+                     % (total_persons, total_viol,
+                        self._ai_backend_name or chain_desc()),
                 foreground="#0a7d28")
         else:
             self.status.config(text="AI 识别已关闭（仅预览画面）", foreground="#666")
@@ -649,21 +678,24 @@ class App:
             pass
 
     def _note_backend(self, tracker):
-        """如实显示当前检测后端（没放模型时会显示 HOG+SVM）。"""
-        try:
-            name = tracker.backend_name() if hasattr(tracker, "backend_name") else ""
-        except Exception:
-            name = ""
-        if not name or name == self._ai_backend_name:
+        """如实显示当前检测链（没放模型时会显示 HOG+SVM）。
+
+        新版 person_detect 不再提供 backend_name()/backend_info()，这里直接看
+        实际建起来的会话：YOLO11n 会话 -> YOLO11n；Caffe 网络 -> MobileNet-SSD；
+        都没有就是 HOG+SVM。
+        """
+        if getattr(tracker, "_yolo_session", None) is not None:
+            name = "YOLO11n-ONNX"
+        elif getattr(tracker, "_net", None) is not None:
+            name = "MobileNet-SSD"
+        else:
+            name = "HOG+SVM"
+        if name == self._ai_backend_name:
             return
         self._ai_backend_name = name
         try:
-            self._phone_supported = bool(getattr(tracker, "supports_phone", False))
-        except Exception:
-            self._phone_supported = False
-        try:
-            tag = "手机识别可用" if self._phone_supported else "手机识别需模型"
-            self.ai_backend_lbl.config(text="检测后端：%s（%s）" % (name, tag))
+            tag = "YOLO11n 模型不可用" if name == "HOG+SVM" else "主力检测器"
+            self.ai_backend_lbl.config(text="检测链：%s（%s）" % (name, tag))
             (config.DATA_ROOT / "ai_backend.txt").write_text(name + "\n", encoding="utf-8")
         except Exception:
             pass

@@ -85,10 +85,17 @@ def has_hog(py):
 
 
 def install_common(py):
-    """安装 02/03/01 都需要的通用包（opencv-python 固定 4.x，5.x 已移除 HOGDescriptor）"""
-    log("安装/升级通用依赖：opencv-python<5、numpy、Pillow、cryptography")
+    """安装 02/03/01 都需要的通用包（opencv-python 固定 4.x，5.x 已移除 HOGDescriptor）
+
+    onnxruntime：YOLO11n ONNX 检测器（02/03/11 的主力检测链）的推理依赖，
+    缺它检测链会静默回落到 HOG+SVM —— 装了才能真用上 models\\yolo11n.onnx。
+    scipy：匈牙利匹配跟踪（可选，缺失时自动回退贪婪最近邻）。
+    """
+    log("安装/升级通用依赖：opencv-python<5、numpy、Pillow、cryptography、"
+        "onnxruntime、scipy")
     run([py, "-m", "pip", "install", "--upgrade",
-         "opencv-python<5", "numpy", "Pillow", "cryptography"])
+         "opencv-python<5", "numpy", "Pillow", "cryptography",
+         "onnxruntime", "scipy"])
 
 
 def install_face(py):
@@ -123,6 +130,7 @@ def check_all(py):
         ("cv2", "opencv-python", "OpenCV 图像/视频处理"),
         ("numpy", "numpy", "NumPy 数值计算"),
         ("PIL", "Pillow", "Pillow 图像显示"),
+        ("onnxruntime", "onnxruntime", "YOLO11n ONNX 推理（缺则检测链回落 HOG）"),
     ]
     ok = True
     log("=" * 50)

@@ -52,6 +52,7 @@ import web_accounts
 import baseline as baseline_mod
 import patrol as patrol_mod
 import person_detect as pd_mod
+import vlm_detect as vlm_mod
 import report as report_mod
 import workorder as wo_mod
 
@@ -93,6 +94,22 @@ AI_SETTINGS_DEFAULT = {
     "sound_beep": True,
     "boundary_pct": 92,          # 警戒线位置（画面高度百分比）：
                                  # 越大越靠画面底部，越不容易把中后排考生误判越界
+    # ---- 多模态大模型（VLM）：看图判读，作为 YOLO11n 之上的主力检测源 ----
+    # provider=off 时与旧版完全一致（纯 YOLO11n）；api/ollama 时多模态为主、
+    # YOLO11n 自动降级为兜底（多模态超时/报错/结果过期时用它的框）。
+    "vlm_provider": "off",       # off / api / ollama
+    "vlm_model": "",             # 例：ollama→qwen2.5vl:3b ／ api→qwen-vl-max
+    "vlm_base_url": "",          # 留空则按 provider 取默认（ollama=本机 11434）
+    "vlm_api_key": "",           # 只有 api 后端需要
+    "vlm_interval": 3.0,         # 每路每 N 秒最多一次多模态调用
+    "vlm_max_dim": 896,          # 送模型的图片长边
+    "vlm_timeout": 60.0,         # 单次调用超时（秒）
+    # ---- 密集考场（40 人）：分块（切片）推理 ----
+    # auto = 分析帧长边 ≥ 640×1.35 时自动分块（即"密集档 1280"会自动开，
+    # 标准档 640 不分块——分了也没收益，只白花算力）；on/off 可强制。
+    "yolo_tiling": "auto",       # auto / on / off
+    "yolo_tile_size": 640,       # 分块边长（像素）：480 更准更慢，640 均衡
+    "yolo_tile_max": 12,         # 单帧最多几块（限制算力上限）
 }
 
 # ---------------- 渲染性能参数（解决"画面一多就卡"） ----------------
@@ -106,15 +123,17 @@ AI_INTERVAL_MS = {          # 单路 AI 分析最小间隔（毫秒）
     "dense": 900,           # 密集模式更慢，进一步降频
     "energy": 1600,         # 节能模式
 }
-AI_INPUT_DIM = {            # AI 分析用长边（越小越快）
-    # 【2026-10 实测调优】HOG 自带的人体检测窗口是 128 px 高，而"坐着的人"在
-    # 416 长边下只有约 70 px 高——框比检测窗口还小，HOG 必然漏检。实测检出人数：
-    #     416 -> 4~5 人 ｜ 640 -> 6 人 ｜ 原生 1080p -> 7 人（真值 24 人）
-    # 同时把 HOG 的 dense 密集网格关掉（person_detect 默认已关）：同检出、耗时约 1/3。
-    # 结论：默认提到 640，用"关 dense 省下的时间"换更准的检出；算力紧张时选节能模式。
-    "standard": 640,        # 标准：约 33 ms/次/路
-    "dense": 768,           # 密集教室：约 53 ms/次，追求召回
-    "energy": 416,          # 节能：约 8 ms/次，多路优先
+AI_INPUT_DIM = {            # AI 分析用长边（越大越能看清后排，也越费算力）
+    # YOLO11n 检测器输入固定 640×640：
+    #   · 标准/节能档：整帧压到 640 送模型，够用且省算力；
+    #   · **密集档（40 人考场）**：长边给到 1280，再由 person_detect 做"分块推理"
+    #     （把画面切成 640 的块分别送模型）。单张推理永远把整帧压到 640，
+    #     1280/1920 的分辨率会被白白丢掉 —— 实测合成 40 人考场：
+    #     单张 640 → 召回 12.5%；单张 1280/1920 → 25%；**1280 + 分块 → 67.5%**，
+    #     1920 + 分块 → 72.5%（代价：单路分析约 170~215 ms）。
+    "standard": 640,
+    "dense": 1280,
+    "energy": 640,
 }
 INFO_BAR_MS = 500           # 顶部信息条/汇总的最小刷新间隔
 MAX_PANEL_W = 480           # 单路面板最大渲染宽度（超过就缩，省 CPU）
@@ -922,11 +941,16 @@ class App(object):
         return min(0.99, max(0.30, pct / 100.0))
 
     def _ai_tracker_kwargs(self):
-        """构造 PersonTracker 初始化参数，兼容不同版本的 person_detect"""
-        sig = inspect.signature(pd_mod.PersonTracker.__init__)
-        params = sig.parameters
-        kw = {"margin_ratio": self._ai_margin_ratio()}
+        """构造检测器初始化参数（多模态 / 纯 YOLO 自适应）。
+
+        参数表按"将要使用的那个类"的可接受参数过滤：
+          · 多模态开启 → VlmPersonTracker 认识 vlm_* 参数；
+          · 关闭       → 纯 PersonTracker，vlm_* 会被自动丢掉（不会 TypeError）。
+        """
         settings = self._ai_settings
+        params = vlm_mod.accepted_params(pd_mod.PersonTracker,
+                                         settings.get("vlm_provider"))
+        kw = {"margin_ratio": self._ai_margin_ratio()}
         # 界面层已按 AI_INPUT_DIM 缩放后再送进来，这里把内部再缩放阈值放高，
         # 避免"缩两次"浪费 CPU（真实长边已经 <= 576）。
         for key, val in (("dense_mode", settings.get("mode") == "dense"),
@@ -940,23 +964,50 @@ class App(object):
                          ("match_dist_ratio", 0.12)):
             if key in params:
                 kw[key] = val
+        # 多模态参数（provider=off 时不在 params 里，自然不会传下去）
+        for key in vlm_mod.SETTING_KEYS:
+            val = settings.get(key)
+            if key in params and val not in (None, ""):
+                kw[key] = val
+        # 密集考场：分块推理参数（老版本 person_detect 没有这些键，自动跳过）
+        for key in ("yolo_tiling", "yolo_tile_size", "yolo_tile_max"):
+            val = settings.get(key)
+            if key in params and val not in (None, ""):
+                kw[key] = val
         return kw
 
     def _reset_ai_trackers(self):
         """清空每路检测器（改设置/重播时调用，轨迹按新参数重建）"""
         self._person_detector = None
+        for watch in list(getattr(self, "_cheat_watches", {}).values()):
+            try:
+                watch.reset()
+            except Exception:
+                pass
+        getattr(self, "_cheat_watches", {}).clear()
         for tracker in list(getattr(self, "_cam_trackers", {}).values()):
             try:
                 tracker.stop()
             except Exception:
                 pass
         getattr(self, "_cam_trackers", {}).clear()
+        # 如实记一笔当前生效的密集场景配置（排查"后排看不见/人数不对"时先看它）
+        try:
+            mode = (self._ai_settings or {}).get("mode", "standard")
+            dim = AI_INPUT_DIM.get(mode, AI_INPUT_DIM["standard"])
+            tiling = (self._ai_settings or {}).get("yolo_tiling", "auto")
+            dense_note = ("密集场景：分析长边 %d，分块推理 %s" % (dim, tiling)
+                          if mode == "dense" or tiling == "on" else
+                          "分析长边 %d，分块推理 %s" % (dim, tiling))
+            self._mon_log_line("AI 检测器重建：模式=%s ｜ %s" % (mode, dense_note))
+        except Exception:
+            pass
 
     def _open_ai_settings(self):
         """全局 AI 设置弹窗"""
         win = tk.Toplevel(self.root)
         win.title("AI 设置")
-        win.geometry("420x320")
+        win.geometry("700x740")
         win.transient(self.root)
         win.grab_set()
         f = ttk.Frame(win, padding=16)
@@ -968,7 +1019,8 @@ class App(object):
         mode_var = tk.StringVar(value=settings.get("mode", "standard"))
         ttk.Combobox(f, textvariable=mode_var, state="readonly", width=18,
                      values=["standard", "dense", "energy"]).grid(row=0, column=1, sticky="w")
-        ttk.Label(f, text="标准：常规考场；密集：40人考场；节能：隔帧检测", foreground="#888",
+        ttk.Label(f, text="标准：常规考场（640）；密集：40 人考场（1280 + 分块推理）；节能：隔帧 640",
+                  foreground="#888",
                   font=FONT_SMALL).grid(row=0, column=2, sticky="w", padx=(8, 0))
 
         ttk.Label(f, text="框边距：").grid(row=1, column=0, sticky="e", pady=6)
@@ -997,29 +1049,137 @@ class App(object):
         ttk.Label(f, text="越大越靠画面底部；92% 表示只有走到镜头前才算越界",
                   foreground="#888", font=FONT_SMALL).grid(row=4, column=2, sticky="w", padx=(8, 0))
 
+        # ---------------- 多模态大模型（VLM）----------------
+        # 只做"看图判读"这一件事：YOLO11n 仍是兜底，多模态不可用时自动回落，
+        # 所以这里就算填错也不会把识别整条链路搞挂。
+        ttk.Separator(f, orient="horizontal").grid(
+            row=5, column=0, columnspan=3, sticky="ew", pady=(14, 6))
+
+        label_to_provider = dict((vlm_mod.PROVIDER_LABELS[p], p)
+                                 for p in vlm_mod.PROVIDERS)
+
+        ttk.Label(f, text="多模态大模型：").grid(row=6, column=0, sticky="e", pady=4)
+        cur_provider = vlm_mod.VlmConfig.from_settings(settings).provider
+        prov_var = tk.StringVar(
+            value=vlm_mod.PROVIDER_LABELS.get(cur_provider,
+                                              vlm_mod.PROVIDER_LABELS["off"]))
+        ttk.Combobox(f, textvariable=prov_var, state="readonly", width=18,
+                     values=[vlm_mod.PROVIDER_LABELS[p]
+                             for p in vlm_mod.PROVIDERS]).grid(row=6, column=1, sticky="w")
+        ttk.Label(f, text="本机 Ollama 数据不出本机；API 需填 Key",
+                  foreground="#888", font=FONT_SMALL).grid(row=6, column=2,
+                                                           sticky="w", padx=(8, 0))
+
+        ttk.Label(f, text="模型名：").grid(row=7, column=0, sticky="e", pady=4)
+        vlm_model_var = tk.StringVar(value=settings.get("vlm_model", ""))
+        ttk.Entry(f, textvariable=vlm_model_var, width=46).grid(
+            row=7, column=1, columnspan=2, sticky="w")
+
+        ttk.Label(f, text="接口地址：").grid(row=8, column=0, sticky="e", pady=4)
+        vlm_url_var = tk.StringVar(value=settings.get("vlm_base_url", ""))
+        ttk.Entry(f, textvariable=vlm_url_var, width=46).grid(
+            row=8, column=1, columnspan=2, sticky="w")
+        ttk.Label(f, text="留空=默认（ollama：127.0.0.1:11434）",
+                  foreground="#888", font=FONT_SMALL).grid(row=8, column=2,
+                                                           sticky="w", padx=(8, 0))
+
+        ttk.Label(f, text="API Key：").grid(row=9, column=0, sticky="e", pady=4)
+        vlm_key_var = tk.StringVar(value=settings.get("vlm_api_key", ""))
+        ttk.Entry(f, textvariable=vlm_key_var, width=46, show="*").grid(
+            row=9, column=1, columnspan=2, sticky="w")
+
+        ttk.Label(f, text="调用间隔(秒)：").grid(row=10, column=0, sticky="e", pady=4)
+        vlm_iv_var = tk.StringVar(value=str(settings.get("vlm_interval", 3.0)))
+        ttk.Entry(f, textvariable=vlm_iv_var, width=8).grid(row=10, column=1, sticky="w")
+        ttk.Label(f, text="每路每 N 秒最多一次；多模态较慢，不建议小于 2 秒",
+                  foreground="#888", font=FONT_SMALL).grid(row=10, column=2,
+                                                           sticky="w", padx=(8, 0))
+
+        vlm_msg = ttk.Label(f, text="", foreground="#1f56b8", font=FONT_SMALL)
+        vlm_msg.grid(row=11, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
+        def _vlm_cfg_from_form():
+            return vlm_mod.VlmConfig(
+                provider=label_to_provider.get(prov_var.get(), "off"),
+                model=vlm_model_var.get().strip(),
+                base_url=vlm_url_var.get().strip(),
+                api_key=vlm_key_var.get().strip(),
+                interval=vlm_iv_var.get().strip() or 3.0)
+
+        def test_vlm():
+            """探测后端可用性（在后台线程里跑，别卡住设置窗口）"""
+            cfg = _vlm_cfg_from_form()
+            if not cfg.enabled:
+                vlm_msg.config(text="配置不完整：%s" % cfg.missing_reason(),
+                               foreground="#c00")
+                return
+            vlm_msg.config(text="正在探测 %s …" % cfg.model, foreground="#1f56b8")
+
+            def work():
+                try:
+                    ok, text = vlm_mod.probe_text(cfg)
+                except Exception as e:                  # 探测本身出错也要如实说
+                    ok, text = False, "探测异常：%s" % e
+
+                def show():
+                    try:
+                        vlm_msg.config(text=text,
+                                       foreground=("#0a7d28" if ok else "#c00"))
+                    except tk.TclError:
+                        pass
+                try:
+                    self.root.after(0, show)
+                except Exception:
+                    pass
+            threading.Thread(target=work, daemon=True).start()
+
+        ttk.Button(f, text="测试连接", command=test_vlm).grid(row=11, column=2,
+                                                              sticky="e")
+
+        # ---------------- 密集考场（40 人）：分块推理 ----------------
+        ttk.Separator(f, orient="horizontal").grid(
+            row=12, column=0, columnspan=3, sticky="ew", pady=(12, 6))
+        ttk.Label(f, text="密集考场分块推理：").grid(row=13, column=0, sticky="e", pady=4)
+        tiling_var = tk.StringVar(value=str(settings.get("yolo_tiling", "auto")))
+        ttk.Combobox(f, textvariable=tiling_var, state="readonly", width=8,
+                     values=["auto", "on", "off"]).grid(row=13, column=1, sticky="w")
+        ttk.Label(f, text="单张推理会把整帧压到 640，40 人考场后排只有十几像素高必然漏检；"
+                          "分块后每块按原生像素送模型（实测召回 25%→68%）",
+                  foreground="#888", font=FONT_SMALL, wraplength=360,
+                  justify="left").grid(row=14, column=0, columnspan=3, sticky="w")
+
         msg = ttk.Label(f, text="", foreground="#c00")
-        msg.grid(row=5, column=0, columnspan=3, pady=(10, 0))
+        msg.grid(row=15, column=0, columnspan=3, pady=(10, 0))
 
         def apply():
-            new_settings = {
+            new_settings = dict(settings)
+            new_settings.update({
                 "mode": mode_var.get(),
                 "box_margin_pct": margin_var.get(),
                 "haar_face": haar_var.get(),
                 "sound_beep": sound_var.get(),
                 "boundary_pct": boundary_var.get(),
-            }
+                "vlm_provider": label_to_provider.get(prov_var.get(), "off"),
+                "vlm_model": vlm_model_var.get().strip(),
+                "vlm_base_url": vlm_url_var.get().strip(),
+                "vlm_api_key": vlm_key_var.get().strip(),
+                "vlm_interval": vlm_iv_var.get().strip() or 3.0,
+                "yolo_tiling": tiling_var.get(),
+            })
             if self._save_ai_settings(new_settings):
                 self._ai_settings = new_settings
-                # 边距/模式实时生效：清掉每路的检测器，下次分析按新设置重建
+                # 边距/模式/多模态实时生效：清掉每路的检测器，下次分析按新设置重建
                 self._reset_ai_trackers()
+                vlm_desc = vlm_mod.VlmConfig.from_settings(new_settings).describe()
                 msg.config(text="已保存并生效", foreground="#0a7d28")
-                self.status.config(text="AI 设置已更新：模式=%s 边距=%d%% 警戒线=%d%%" % (
-                    new_settings["mode"], new_settings["box_margin_pct"],
-                    new_settings["boundary_pct"]))
+                self.status.config(text="AI 设置已更新：模式=%s 边距=%d%% 警戒线=%d%% ｜ %s"
+                                        % (new_settings["mode"],
+                                           new_settings["box_margin_pct"],
+                                           new_settings["boundary_pct"], vlm_desc))
                 self._mon_log_line("AI 设置更新：%s" % new_settings)
 
         bbar = ttk.Frame(f)
-        bbar.grid(row=6, column=0, columnspan=3, pady=(16, 0))
+        bbar.grid(row=16, column=0, columnspan=3, pady=(16, 0))
         ttk.Button(bbar, text="保存", command=apply).pack(side="left", padx=6)
         ttk.Button(bbar, text="关闭", command=win.destroy).pack(side="left", padx=6)
 
@@ -1218,10 +1378,18 @@ class App(object):
         mid = ttk.Frame(bar)
         mid.pack(side="left", padx=(18, 12))
         self.mon_ai = tk.BooleanVar(value=True)     # 考场监控默认开启 AI 辅助识别
+        # 作弊识别（cheatdetect 时序引擎）：与逐帧标签叠加，看"动作序列像不像作弊"，
+        # 单帧瞬时动作会被时间维度抑制（正是"坐着没动却报偏转"那类误报的解药）
+        self.mon_cheat = tk.BooleanVar(value=True)
+        self._cheat_watches = {}
         self.mon_ai_chk = ttk.Checkbutton(
             mid, text="AI 辅助识别（逐人：绿=正常 橙=异常 红=越界，考场监控默认开启）",
             variable=self.mon_ai)
         self.mon_ai_chk.pack(side="left")
+        self.mon_cheat_chk = ttk.Checkbutton(
+            mid, text="作弊识别（时序：动作持续才告警，单帧动作自动抑制）",
+            variable=self.mon_cheat)
+        self.mon_cheat_chk.pack(side="left", padx=(12, 0))
 
         self.mon_status = ttk.Label(bar, text="就绪", foreground=GRAY_HINT)
         self.mon_status.pack(side="right")
@@ -1531,25 +1699,41 @@ class App(object):
         return AI_INPUT_DIM.get(mode, AI_INPUT_DIM["standard"])
 
     def _cam_tracker(self, code):
-        """每路一个独立的 PersonTracker（共用一个会让不同考场的轨迹互相串号）"""
+        """每路一个独立的检测器（共用一个会让不同考场的轨迹互相串号）。
+
+        多模态开启时用 VlmPersonTracker（多模态为主 + YOLO11n 兜底）；
+        构造失败或没开多模态时，退回原来的 PersonTracker。
+        """
         tracker = self._cam_trackers.get(code)
         if tracker is not None:
             return tracker
-        try:
-            tracker = pd_mod.PersonTracker(**self._ai_tracker_kwargs())
-        except TypeError:
-            tracker = pd_mod.PersonDetector(margin_ratio=self._ai_margin_ratio())
-        except Exception as e:
-            err = str(e)
-            self.mon_ai.set(False)
-            self.mon_ai_chk.config(state="disabled")
-            self.mon_status.config(text="AI检测不可用：%s" % err,
-                                   foreground=CAM_COLORS["error"])
+        kwargs = self._ai_tracker_kwargs()
+        tracker = None
+        cls = vlm_mod.tracker_class_for(kwargs.get("vlm_provider"))
+        if cls is not None:
             try:
-                self._ai_error_file.write_text(err, encoding="utf-8")
-            except Exception:
-                pass
-            return None
+                tracker = cls(**kwargs)
+            except Exception as e:
+                self._mon_log_line("多模态检测器创建失败，回落 YOLO11n：%s" % e)
+                tracker = None
+        if tracker is None:
+            base_params = set(inspect.signature(pd_mod.PersonTracker.__init__).parameters)
+            base_kwargs = dict((k, v) for k, v in kwargs.items() if k in base_params)
+            try:
+                tracker = pd_mod.PersonTracker(**base_kwargs)
+            except TypeError:
+                tracker = pd_mod.PersonDetector(margin_ratio=self._ai_margin_ratio())
+            except Exception as e:
+                err = str(e)
+                self.mon_ai.set(False)
+                self.mon_ai_chk.config(state="disabled")
+                self.mon_status.config(text="AI检测不可用：%s" % err,
+                                       foreground=CAM_COLORS["error"])
+                try:
+                    self._ai_error_file.write_text(err, encoding="utf-8")
+                except Exception:
+                    pass
+                return None
         self._cam_trackers[code] = tracker
         return tracker
 
@@ -1613,17 +1797,6 @@ class App(object):
                             if hasattr(tracker, "stable_count") else len(persons)
                         # 分析分辨率 -> 显示分辨率 的比例
                         panel["ai_scale"] = disp.shape[1] / float(ai_frame.shape[1])
-                        # 手机识别：记录本路"使用手机"的人数与手机类峰值置信度。
-                        # 峰值不受阈值影响——拿手机却检不出时，看它就知道是
-                        # "模型没认出来(≈0)" 还是 "认出来了但阈值高"。
-                        panel["ai_phone"] = sum(1 for p in persons
-                                                if p.get("has_phone"))
-                        try:
-                            panel["ai_phone_peak"] = (tracker.phone_peak()
-                                                      if hasattr(tracker, "phone_peak")
-                                                      else 0.0)
-                        except Exception:
-                            panel["ai_phone_peak"] = 0.0
                         # 人脸框带出来给 draw_boxes 画
                         for p in persons:
                             tr = getattr(tracker, "_tracks", {}).get(p["pid"])
@@ -1659,19 +1832,17 @@ class App(object):
         panel["density_level"] = level
         panel["persons"] = persons
         self._cam_set_density(code, level)
-        # 状态边框：越界红 > 使用手机红 > 异常橙 > 正常绿
-        if viol or panel.get("ai_phone"):
+        # 状态边框：越界红 > 异常橙 > 正常绿
+        if viol:
             self._cam_set_border(code, "error")
         elif any(p.get("behaviors") for p in persons):
             self._cam_set_border(code, "stalled")
         else:
             self._cam_set_border(code, "playing")
-        # 显示平滑后的人数（避免读数在 15/16/17 之间乱跳），并带上手机告警
-        phone_txt = ""
-        if panel.get("ai_phone"):
-            phone_txt = "　📱 手机 %d" % panel["ai_phone"]
-        self._cam_set_ai(code, panel.get("ai_count", len(persons)),
-                         viol, extra=phone_txt)
+        # 显示平滑后的人数（避免读数在 15/16/17 之间乱跳）
+        # —— 作弊识别要在这一行之前喂帧，否则面板上的作弊风险会慢一帧
+        self._cam_cheat_update(code, panel, persons, ai_shape)
+        self._cam_set_ai(code, panel.get("ai_count", len(persons)), viol)
         # 顶部信息条与汇总限频刷新，避免每路每次分析都去改 Tk 控件
         now_ms = time.time() * 1000.0
         if (now_ms - getattr(self, "_info_ts", 0.0)) >= INFO_BAR_MS:
@@ -1727,11 +1898,87 @@ class App(object):
         except tk.TclError:
             pass
 
-    def _cam_set_ai(self, code, n_person, n_cross, extra=""):
-        """逐路显示 AI 识别人数：正常绿、有越界橙红，未开 AI 时留空。
+    # ---------------- 作弊识别（cheatdetect 时序引擎） ----------------
+    def _cheat_feed_hz(self):
+        """真实送帧频率 = AI 分析频率（窗口 2s / 最短持续 1s 都按帧数换算，必须如实填）"""
+        return max(0.2, 1000.0 / float(max(1, self._cam_ai_interval_ms())))
 
-        extra：附加文本（目前用于"📱 手机 N"手机告警）。
-        """
+    def _cheat_watch_for(self, code):
+        watch = getattr(self, "_cheat_watches", {}).get(code)
+        if watch is None:
+            try:
+                import cheat_bridge
+            except Exception as e:
+                self._mon_log_line("作弊识别不可用：%s" % e)
+                return None
+            watch = cheat_bridge.CheatWatch(feed_hz=self._cheat_feed_hz())
+            self._cheat_watches[code] = watch
+            self._mon_log_line(watch.describe())
+            notes = watch.signal_notes()
+            if notes:
+                self._mon_log_line("作弊识别信号可得性（引擎自述）：%s" % notes)
+        return watch
+
+    @staticmethod
+    def _cheat_bar_text(panel):
+        """面板 AI 行里追加的作弊风险文字（正常时不占地方）"""
+        r = (panel or {}).get("cheat")
+        if not r:
+            return ""
+        if not r.get("ok"):
+            return "　｜　作弊识别：%s" % (r.get("reason") or "不可用")
+        if r.get("triggered"):
+            return "　｜　作弊风险：%s %.0f【%s】" % (
+                r.get("level", ""), r.get("risk", 0),
+                r.get("pattern_desc") or "告警中")
+        if float(r.get("risk", 0)) >= 42.0:        # 阈值 60 的 70%
+            return "　｜　作弊风险：%s %.0f" % (r.get("level", ""), r.get("risk", 0))
+        return ""
+
+    def _cam_cheat_update(self, code, panel, persons, ai_shape):
+        """把本帧的逐人结果喂给时序引擎；只有"持续/组合"成模式时才告警"""
+        if not (getattr(self, "mon_cheat", None) and self.mon_cheat.get()):
+            panel["cheat"] = None
+            return
+        watch = self._cheat_watch_for(code)
+        if watch is None:
+            return
+        if not watch.ok:
+            panel["cheat"] = {"ok": False, "reason": watch.import_error}
+            return
+        r = watch.push_persons(persons,
+                               frame_shape=(ai_shape or panel.get("ai_shape")))
+        panel["cheat"] = r
+        if not r.get("ok") or not r.get("just_triggered"):
+            return
+        dev = self._dev_by_code(code)
+        text = "作弊预警 %s #%s：%s（风险 %.0f）" % (
+            r.get("level", ""), r.get("pid"), r.get("pattern_desc") or "",
+            float(r.get("risk", 0)))
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        self._behavior_history.append({"ts": ts, "code": code, "text": text})
+        self._behavior_history = self._behavior_history[-50:]
+        panel["history"] = (panel.get("history", []) + [
+            {"ts": ts[-8:], "text": text}])[-10:]
+        self._mon_log_line("【%s】%s 风险 %.0f：%s"
+                           % (code, r.get("pattern_desc") or "作弊行为模式",
+                              float(r.get("risk", 0)), r.get("reason_text") or ""))
+        self._beep()
+        self._cam_set_border(code, "error")
+        try:
+            import linkage_bridge
+            linkage_bridge.report_behavior(
+                device_code=code,
+                behavior="作弊行为模式：%s" % (r.get("pattern_desc")
+                                        or r.get("pattern") or ""),
+                pid=int(r.get("pid") or 0), crosses=0,
+                room_id=dev.room_id if dev else "", seat_no="",
+                operator=self.user.username if self.user else "02_ai")
+        except Exception:
+            pass
+
+    def _cam_set_ai(self, code, n_person, n_cross):
+        """逐路显示 AI 识别人数：正常绿、有越界橙红，未开 AI 时留空"""
         panel = self._mon_panels.get(code)
         if panel is None:
             return
@@ -1739,11 +1986,10 @@ class App(object):
         if ai is None or not ai.winfo_exists():
             return
         if n_cross:
-            text = "AI 识别中：%d 人，越界 %d" % (n_person, n_cross)
+            text, color = "AI 识别中：%d 人，越界 %d" % (n_person, n_cross), CAM_AI_COLOR
         else:
-            text = "AI 识别中：%d 人" % n_person
-        text += extra or ""
-        color = CAM_AI_COLOR if (n_cross or extra) else CAM_COLORS["playing"]
+            text, color = "AI 识别中：%d 人" % n_person, CAM_COLORS["playing"]
+        text += self._cheat_bar_text(panel)
         # 内容没变就不碰控件（Tk 的 config 会触发重绘，路数一多非常吃 CPU）
         if panel.get("ai_text") == text:
             return
@@ -1755,11 +2001,43 @@ class App(object):
         except tk.TclError:
             pass
 
+    def _vlm_bar_text(self):
+        """状态栏里的多模态一句话（没配多模态就返回空串，界面保持原样）。
+
+        如实反映"现在到底是谁在出框"：有路拿到模型结果算"新鲜"，
+        否则算"回落 YOLO11n" —— 不美化、不假装。
+        """
+        try:
+            cfg = vlm_mod.VlmConfig.from_settings(self._ai_settings or {})
+        except Exception:
+            return ""
+        if not cfg.enabled:
+            return ""
+        trackers = [t for t in (getattr(self, "_cam_trackers", {}) or {}).values()
+                    if hasattr(t, "vlm_status_dict")]
+        if not trackers:
+            return "　｜　多模态：%s（待启动）" % cfg.model
+        fresh = 0
+        for t in trackers:
+            try:
+                if t.vlm_status_dict().get("fresh"):
+                    fresh += 1
+            except Exception:
+                pass
+        if fresh == len(trackers):
+            state = "结果新鲜"
+        elif fresh:
+            state = "%d/%d 路新鲜，其余回落 YOLO11n" % (fresh, len(trackers))
+        else:
+            state = "回落 YOLO11n"
+        return "　｜　多模态 %s：%s" % (cfg.model, state)
+
     def _mon_ai_summary(self):
         """全局状态标签：汇总已开启 AI 的机位人数、越界数、异常行为数、高密度机位数"""
         total_p, total_c, n = 0, 0, 0
         abnormal = 0
         high = 0
+        cheat_alarm = 0
         for panel in self._mon_panels.values():
             if panel.get("ai_text") is None:
                 continue
@@ -1770,9 +2048,14 @@ class App(object):
                 abnormal += len(p.get("behaviors", []))
             if panel.get("density_level") == DENSITY_HIGH:
                 high += 1
+            cr = panel.get("cheat") or {}
+            if cr.get("triggered"):
+                cheat_alarm += 1
         if n:
-            self.mon_status.config(text="AI：%d 路　%d 人　越界 %d　异常 %d　高密度 %d"
-                                        % (n, total_p, total_c, abnormal, high),
+            cheat_txt = ("　作弊预警 %d 路" % cheat_alarm) if cheat_alarm else ""
+            self.mon_status.config(text="AI：%d 路　%d 人　越界 %d　异常 %d　高密度 %d%s%s"
+                                        % (n, total_p, total_c, abnormal, high,
+                                           cheat_txt, self._vlm_bar_text()),
                                    foreground=GRAY_HINT)
         elif any(self._cam_running.values()):
             self.mon_status.config(text="AI 待命（画面播放中，尚未产出识别结果）",
