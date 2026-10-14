@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-00 集成联动 · 三套系统互相调用
+00 集成联动 · 多套系统互相调用
 
   01 人脸识别与身份核对   ->  who（身份是不是本人）
   02 摄像头核查与视频质量诊断 -> whether（画面可不可信）
   03 智能终端操作         ->  what to do（告警怎么处置、怎么留痕）
+  06 智能安检与手机作弊器材检测 -> block（手机/无线耳机/金属器材挡在门外）
 
 隔离方式：各套各有一个 integration_api.py，本模块用**子进程 + JSON** 调用它们。
-（三套都有 config.py / models.py，同进程 import 必然撞名，子进程最稳。）
+（都有 config.py / models.py，同进程 import 必然撞名，子进程最稳。）
 
 联动链（本模块把这条链真正跑通）：
   ① 02 巡检/抽查发现机位画质异常
@@ -15,6 +16,8 @@
   ③ 03 接入告警时按该系数降权；系数 < 0.6 时红色预警自动降级为橙色（防误报堆积）
   ④ 01 做人脸核验；若该机位画质不可信，核验结论也标注"画质降权"
   ⑤ 处置结果（复核结论）回流 03 留痕，画质问题由 02 的工单闭环
+  ⑥ 06 安检门一次过检 -> 判据引擎 -> 报警；报警经本模块进 03（手机/耳机走
+     PHONE_DETECTED 红色，金属/强磁走 SECURITY_ALARM 橙色），复检结论在 06 留痕
 """
 import json
 import os
@@ -30,6 +33,7 @@ PROJECTS = {
     "01": os.path.join(ALL_DIR, "01_人脸识别与身份核对", "01_人脸识别与身份核对"),
     "02": os.path.join(ALL_DIR, "02_摄像头核查与视频质量诊断"),
     "03": os.path.join(ALL_DIR, "03_智能终端操作"),
+    "06": os.path.join(ALL_DIR, "06_智能安检与手机作弊器材检测"),
 }
 
 
@@ -89,19 +93,25 @@ class Project(object):
     """对某一套系统的调用句柄（子进程 + JSON）"""
 
     # 各套的数据目录重定向环境变量（用于"沙箱自检"，不污染真实数据）
-    HOME_ENV = {"01": "EXAM_HOME", "02": "EXAM_CAMERA_HOME", "03": "EXAM_TERMINAL_HOME"}
+    HOME_ENV = {"01": "EXAM_HOME", "02": "EXAM_CAMERA_HOME", "03": "EXAM_TERMINAL_HOME",
+                "06": "EXAM_SEC_HOME"}
 
     # 单次子进程调用的默认上限：旧版 180 秒，只要对端卡在取流/网络等待上，
     # 调用方（界面/巡检）就会跟着"沉默"三分钟，看起来就是卡死。
     DEFAULT_TIMEOUT = 60
 
-    def __init__(self, key, python=None, timeout=DEFAULT_TIMEOUT, home=None):
+    def __init__(self, key, python=None, timeout=DEFAULT_TIMEOUT, home=None,
+                 env_extra=None):
         self.key = key
         self.dir = PROJECTS[key]
         self.python = python or sys.executable
         self.timeout = timeout
         self.script = os.path.join(self.dir, "integration_api.py")
         self.home = home                      # None = 用各套真实数据目录
+        # 其它系统的沙箱重定向也要跟着传下去：跨系统调用是**嵌套**的
+        # （例如 06 收到报警后会自己再调 03），只传自己那一个变量的话，
+        # 嵌套调用就会漏回真实数据目录 —— 沙箱自检会污染真实运行数据。
+        self.env_extra = {k: v for k, v in (env_extra or {}).items() if v}
 
     def available(self):
         if not os.path.isdir(self.dir):
@@ -115,6 +125,7 @@ class Project(object):
         if not ok:
             raise LinkageError("[%s] %s" % (self.key, why))
         env = dict(os.environ)
+        env.update(self.env_extra)
         env["PYTHONIOENCODING"] = "utf-8"
         if self.home:
             os.makedirs(self.home, exist_ok=True)
@@ -195,14 +206,27 @@ class Linkage(object):
         def home(key):
             return os.path.join(sandbox_root, key) if (sandbox_root and key in keys) else None
 
-        self.p01 = Project("01", python=python, timeout=timeout, home=home("01"))
-        self.p02 = Project("02", python=python, timeout=timeout, home=home("02"))
-        self.p03 = Project("03", python=python, timeout=timeout, home=home("03"))
+        # 沙箱重定向环境变量要**整套传给每个子进程**（嵌套调用才不会漏回真实目录）
+        redirects = {}
+        for key in ("01", "02", "03", "06"):
+            h = home(key)
+            if h:
+                redirects[Project.HOME_ENV[key]] = h
+
+        self.p01 = Project("01", python=python, timeout=timeout, home=home("01"),
+                           env_extra=redirects)
+        self.p02 = Project("02", python=python, timeout=timeout, home=home("02"),
+                           env_extra=redirects)
+        self.p03 = Project("03", python=python, timeout=timeout, home=home("03"),
+                           env_extra=redirects)
+        self.p06 = Project("06", python=python, timeout=timeout, home=home("06"),
+                           env_extra=redirects)
 
     # ---------- 各自状态 ----------
     def status(self):
         out = {}
-        for key, proj in (("01", self.p01), ("02", self.p02), ("03", self.p03)):
+        for key, proj in (("01", self.p01), ("02", self.p02), ("03", self.p03),
+                          ("06", self.p06)):
             ok, why = proj.available()
             if not ok:
                 out[key] = {"ok": False, "reason": why}
@@ -268,3 +292,26 @@ class Linkage(object):
 
     def alerts(self, limit=20):
         return self.p03.call("list_alerts", {"limit": limit})
+
+    # ---------- 06 智能安检（事前阻断） ----------
+    def security_pass(self, payload):
+        """
+        让 06 判一次过检：payload 给 device_code / candidate_id / sensors 等，
+        返回 {result, kinds, level, alarm_id, detail}。真设备走各自的行协议，
+        这里给的是**脚本/联动自检**用的入口（06 自己也会主动把报警推给 03）。
+        """
+        return self.p06.call("ingest_pass", payload)
+
+    def security_status(self):
+        """06 概览：设备数、过检数、待处置报警、保管柜占用、检出率指标"""
+        return self.p06.call("status", {})
+
+    def security_alarms(self, limit=20, pending_only=True):
+        return self.p06.call("list_alarms", {"limit": limit,
+                                             "pending_only": pending_only})
+
+    def security_reinspect(self, alarm_id, result="release", operator="linkage",
+                           note="联动处置"):
+        """把 06 的一条安检报警结案（放行/暂扣/转人工通道/误报）"""
+        return self.p06.call("reinspect", {"alarm_id": alarm_id, "result": result,
+                                           "operator": operator, "note": note})

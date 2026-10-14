@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-00 集成联动 · 端到端自检：把 01 / 02 / 03 三套真的串起来跑一遍
+00 集成联动 · 端到端自检：把 01 / 02 / 03 / 06 几套真的串起来跑一遍
 
 链路：
   ① 02 登记机位并采基准图
@@ -8,8 +8,9 @@
   ③ 03 接入告警：红色预警在低可信度机位上自动降级为橙色（防画质误报堆积）
   ④ 01 做人脸核验；同一机位画质不可信时，结论标注"需人工复核"
   ⑤ 03 复核结论回流留痕 + 审计链校验
+  ⑥ 06 安检门判出手机报警 -> 经 00 送进 03 处置 -> 06 复检结论留痕
 
-默认把 02 / 03 的数据目录重定向到临时目录（不污染真实运行数据）；
+默认把 02 / 03 / 06 的数据目录重定向到临时目录（不污染真实运行数据）；
 01 用真实数据（否则没有人脸库可核验，演示不出效果）。
 """
 import argparse
@@ -69,24 +70,28 @@ def main(argv=None):
         print("00 集成联动 · 端到端自检（01 人脸核验 + 02 画质核查 + 03 终端处置）")
         print("02/03 数据目录：%s" % (tmp if tmp else "真实目录"))
         print("=" * 78)
-        lk = linkage.Linkage(sandbox_root=tmp)
+        lk = linkage.Linkage(sandbox_root=tmp, sandbox_keys=("02", "03", "06"))
         work = tempfile.mkdtemp(prefix="linkage_imgs_")
         p_normal, p_blur = make_images(work)
 
-        # ---------- 0. 三套连通性 ----------
-        print("\n[1/6] 三套系统连通性")
+        # ---------- 0. 各套连通性 ----------
+        print("\n[1/7] 各套系统连通性")
         st = lk.status()
         for key, name in (("01", "人脸识别与身份核对"), ("02", "摄像头核查与视频质量诊断"),
-                          ("03", "智能终端操作")):
+                          ("03", "智能终端操作"), ("06", "智能安检与手机作弊器材检测")):
             ok = bool(st.get(key, {}).get("ok"))
             check("%s %s 可调用" % (key, name), ok,
                   st.get(key, {}).get("reason") or st.get(key, {}).get("system", ""))
         check("01 已建档考生可供核验",
               bool(st.get("01", {}).get("candidates")),
               "考生：%s" % "、".join(st.get("01", {}).get("candidates") or []) or "无")
+        check("06 样本库就绪（检出率的分母）",
+              bool(st.get("06", {}).get("metrics")) or
+              bool(st.get("06", {}).get("thresholds")),
+              "阈值 %s" % (st.get("06", {}).get("thresholds") or "无"))
 
         # ---------- 1. 02 登记机位 + 基准图 ----------
-        print("\n[2/6] 02 登记机位并采集基准图")
+        print("\n[2/7] 02 登记机位并采集基准图")
         d = lk.p02.call("save_device", {"code": ns.device, "room_id": "A-01",
                                         "position": "前墙左上", "fov_deg": 90,
                                         "operator": "linkage"})
@@ -161,7 +166,7 @@ def main(argv=None):
             check("01 有考生数据（跳过核验演示）", False, "01 尚未导入考生/建档")
 
         # ---------- 5. 复核回流 + 审计 ----------
-        print("\n[6/6] 处置结果回流 03 并留痕")
+        print("\n[6/7] 处置结果回流 03 并留痕")
         cl = lk.close_alert(a_bad.get("alert_id"), "confirmed", "画质不可信，已现场核实",
                             operator="linkage")
         check("复核结论已回流留痕", cl.get("ok"), cl.get("message"))
@@ -178,6 +183,39 @@ def main(argv=None):
         check("03 审计链完整", s3.get("audit_ok") is True
               and s3.get("system") == "03_智能终端操作", s3.get("audit_chain"))
 
+        # ---------- 6. 06 安检 -> 03 终端 ----------
+        print("\n[7/7] 06 智能安检报警进 03 终端（事前阻断 -> 处置留痕）")
+        sp = lk.security_pass({"device_code": "GATE-LINK-1", "room_id": "A-01",
+                               "seat_no": "21", "candidate_id": "LINK-1",
+                               "candidate_name": "联动考生",
+                               "sensors": {"phone": 0.91, "millimeter": 0.72}})
+        check("06 判出手机报警（双判据 -> 红）",
+              sp.get("ok") and sp.get("result") == "alarm" and sp.get("level") == "red",
+              "%s %s" % (sp.get("kinds"), str(sp.get("detail"))[:60]))
+        rp = lk.p06.call("report_alarm", {"alarm_id": sp.get("alarm_id")})
+        check("安检报警已送进 03 终端", rp.get("ok") and bool(rp.get("alert_id")),
+              "告警号 %s 级别 %s" % (rp.get("alert_id"), rp.get("level")))
+        al3 = lk.alerts(limit=30)
+        items3 = al3.get("alerts", [])
+        hit = [x for x in items3 if x["alert_id"] == rp.get("alert_id")]
+        check("03 能查到该安检告警", bool(hit), "共 %d 条" % len(items3))
+        check("告警码为 PHONE_DETECTED（手机/耳机类）",
+              bool(hit) and hit[0].get("code") == "PHONE_DETECTED",
+              hit[0].get("code") if hit else "-")
+        lk6 = lk.p06.call("add_locker", {"code": "LOCK-LINK", "name": "联动保管柜",
+                                         "cells_total": 10})
+        check("06 保管柜可登记（查获器材要能入柜）", lk6.get("ok"),
+              "柜格 %s" % lk6.get("cells_total"))
+        rj = lk.security_reinspect(sp.get("alarm_id"), "detain", operator="linkage")
+        check("复检结论在 06 留痕（查获暂扣并入柜）",
+              rj.get("ok") and "保管柜" in str(rj.get("message")), rj.get("message"))
+        st6 = lk.security_status()
+        check("06 概览可查（过检/待处置/效率/样本指标）",
+              st6.get("ok") and "throughput_ppm" in st6,
+              "过检 %s 条，待处置 %s，效率 %.1f 人/分钟"
+              % (st6.get("passes"), st6.get("pending_alarms"),
+                 st6.get("throughput_ppm", 0)))
+
         # ---------- 汇总 ----------
         total = len(RESULTS)
         passed = sum(1 for _, o, _ in RESULTS if o)
@@ -191,6 +229,7 @@ def main(argv=None):
                     print("   FAIL %s　%s" % (name, detail))
         print("链路：02 查画质 -> 02 出可信度 -> 03 告警按可信度降级 -> 01 核验带画质上下文")
         print("      -> 复核回流 03 留痕 -> 02 画质问题走工单闭环")
+        print("      -> 06 安检判据出报警 -> 经 00 进 03 处置 -> 06 复检结论留痕")
         print("=" * 78)
         return 0 if passed == total else 1
     finally:

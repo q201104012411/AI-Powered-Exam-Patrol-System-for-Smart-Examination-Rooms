@@ -146,6 +146,11 @@ ALERT_CODE_LEVEL = {
     "SLEEPY": LEVEL_ORANGE,             # 闭眼/趴睡
     "HEAD_TURN": LEVEL_ORANGE,          # 转脸偏头
     "PERSON_BEHAVIOR_ABNORMAL": LEVEL_ORANGE,  # 其他异常行为兜底
+    # ---- 06 智能安检与手机作弊器材检测（事前阻断） ----
+    "SECURITY_ALARM": LEVEL_ORANGE,            # 安检报警（金属/强磁/鞋底等非手机类）
+    "SECURITY_REINSPECT_TIMEOUT": LEVEL_ORANGE,  # 安检报警复检超时未处置
+    "SECURITY_SPECIAL_CHANNEL": LEVEL_ORANGE,  # 特殊考生转人工安检通道
+    "LOCKER_ABNORMAL": LEVEL_ORANGE,           # 手机保管柜异常（含超时未取）
 }
 
 # 告警码 -> 中文含义（界面显示用）
@@ -160,6 +165,11 @@ ALERT_CODE_TEXT = {
     "VIDEO_BLUR": "视频模糊",
     "OFFLINE": "设备离线",
     "CLOCK_DRIFT": "时钟偏差",
+    # ---- 06 智能安检与手机作弊器材检测 ----
+    "SECURITY_ALARM": "安检报警",
+    "SECURITY_REINSPECT_TIMEOUT": "安检复检超时",
+    "SECURITY_SPECIAL_CHANNEL": "特殊考生人工安检通道",
+    "LOCKER_ABNORMAL": "手机保管柜异常",
 }
 
 # ---------------- 复核结论（第二节第 2 条） ----------------
