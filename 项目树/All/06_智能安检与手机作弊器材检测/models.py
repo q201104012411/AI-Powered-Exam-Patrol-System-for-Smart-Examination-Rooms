@@ -21,8 +21,14 @@ def now_ts(epoch=None):
 
 
 def new_id(prefix):
-    """短 ID：前缀 + 时间 + 4 位随机，便于人工口头报号。"""
-    return "%s%s%04d" % (prefix, time.strftime("%H%M%S"), uuid.uuid4().int % 10000)
+    """
+    短 ID：前缀 + 时分秒 + 6 位随机（hex）。便于人工口头报号。
+
+    随机位用 **6 位 hex** 而不是 4 位数字：同一秒内连续落库的几条记录（例如一次现场
+    实测逐样本录入）在 4 位数字下会偶发撞号，撞号会被 INSERT OR REPLACE 覆盖 ——
+    表现为"少了一条记录"。这类偶发丢数据必须从 ID 生成上根除。
+    """
+    return "%s%s%s" % (prefix, time.strftime("%H%M%S"), uuid.uuid4().hex[:6].upper())
 
 
 def jdump(obj):
