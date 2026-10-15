@@ -85,17 +85,21 @@ def has_hog(py):
 
 
 def install_common(py):
-    """安装 02/03/01 都需要的通用包（opencv-python 固定 4.x，5.x 已移除 HOGDescriptor）
+    """安装 01/02/03/05/08/09/10/12/13 都需要的通用包（opencv-python 固定 4.x，5.x 已移除 HOGDescriptor）
 
     onnxruntime：YOLO11n ONNX 检测器（02/03/11 的主力检测链）的推理依赖，
     缺它检测链会静默回落到 HOG+SVM —— 装了才能真用上 models\\yolo11n.onnx。
     scipy：匈牙利匹配跟踪（可选，缺失时自动回退贪婪最近邻）。
+    cryptography：03/06/08/09 的字段级加密（Fernet）；缺它这些模块会**如实降级为明文**
+                  并在界面/报告里写明未加密（不假装加密），所以能装就装。
+    flask：02 网页核查面板、08 网页监控面板的服务端；缺它只能用桌面界面。
+    requests：部分联动/上报脚本的可选客户端（项目主链路用标准库 urllib，不强制）。
     """
     log("安装/升级通用依赖：opencv-python<5、numpy、Pillow、cryptography、"
-        "onnxruntime、scipy")
+        "onnxruntime、scipy、flask")
     run([py, "-m", "pip", "install", "--upgrade",
          "opencv-python<5", "numpy", "Pillow", "cryptography",
-         "onnxruntime", "scipy"])
+         "onnxruntime", "scipy", "flask"])
 
 
 def install_face(py):
@@ -106,6 +110,16 @@ def install_face(py):
         run([py, "-m", "pip", "install", "-r", req])
     else:
         log("未找到 01 requirements-face.txt，跳过")
+
+
+def install_05(py):
+    """安装 05 考生数据保护依赖（有 requirements 就装）"""
+    req = os.path.join(ROOT, "05_考生数据保护", "requirements.txt")
+    if os.path.exists(req):
+        log("安装 05 考生数据保护依赖：%s" % req)
+        run([py, "-m", "pip", "install", "-r", req])
+    else:
+        log("05 无 requirements.txt，跳过（其依赖已在通用包里）")
 
 
 def fix_opencv_hog(py):
@@ -131,6 +145,8 @@ def check_all(py):
         ("numpy", "numpy", "NumPy 数值计算"),
         ("PIL", "Pillow", "Pillow 图像显示"),
         ("onnxruntime", "onnxruntime", "YOLO11n ONNX 推理（缺则检测链回落 HOG）"),
+        ("cryptography", "cryptography", "字段级加密（03/06/08/09；缺则如实降级明文）"),
+        ("flask", "flask", "网页面板（02 核查面板 / 08 监控面板；缺则只用桌面界面）"),
     ]
     ok = True
     log("=" * 50)
@@ -147,6 +163,54 @@ def check_all(py):
     else:
         log("[FAIL] HOGDescriptor 缺失，02 AI 越界检测将不可用")
         ok = False
+    log("-" * 50)
+    log("模块自检（能跑就跑，个别模块缺依赖时如实跳过）")
+    log("-" * 50)
+    module_checks = [
+        ("02 火检模块（13 融入）", "02_摄像头核查与视频质量诊断",
+         ["-c", "import sys; sys.path.insert(0, r'02_摄像头核查与视频质量诊断'); "
+                "import fire_detect; d=fire_detect.load_settings(); "
+                "assert fire_detect.FireWatch and fire_detect.build_detector; "
+                "print('后端:', fire_detect.describe_backend("
+                "fire_detect.build_detector(d)[0]))"]),
+        ("03 驾驶舱/主题", "03_智能终端操作",
+         ["-c", "import sys; sys.path.insert(0, r'03_智能终端操作'); "
+                "import theme, dashboard; print('主题色', theme.ACCENT, '驾驶舱 OK')"]),
+        ("03 数据维护（清空能力）", "03_智能终端操作",
+         ["-c", "import sys, tempfile, os; "
+                "os.environ['EXAM_TERMINAL_HOME']=tempfile.mkdtemp(prefix='envchk_'); "
+                "sys.path.insert(0, r'03_智能终端操作'); "
+                "import storage; s=storage.Store(); "
+                "assert hasattr(s,'purge_data') and hasattr(s,'purge_rows'); "
+                "print('清空能力 OK（范围=%d）' % len(s.PURGE_SCOPES))"]),
+        ("03 跨机账号管理", "03_智能终端操作",
+         ["-c", "import sys, tempfile, os; "
+                "os.environ['EXAM_TERMINAL_HOME']=tempfile.mkdtemp(prefix='envchk2_'); "
+                "sys.path.insert(0, r'03_智能终端操作'); "
+                "import account_bridge as ab; b=ab.AccountBridge(); "
+                "print('可管理模块:', '、'.join(ab.TARGETS))"]),
+        ("03 跨模块态势聚合", "03_智能终端操作",
+         ["-c", "import sys, tempfile, os; "
+                "os.environ['EXAM_TERMINAL_HOME']=tempfile.mkdtemp(prefix='envchk3_'); "
+                "sys.path.insert(0, r'03_智能终端操作'); "
+                "import remote_status as rs; print('聚合模块数:', len(rs.MODULES))"]),
+        ("00 设备端命令执行器", "00_集成联动",
+         ["-c", "import sys; sys.path.insert(0, r'00_集成联动'); "
+                "import command_runner as cr; print('支持命令:', '、'.join(cr.SUPPORTED))"]),
+    ]
+    for name, cwd, args in module_checks:
+        d = os.path.join(ROOT, cwd)
+        if not os.path.isdir(d):
+            log("[SKIP] %s —— 目录不存在" % name)
+            continue
+        p = subprocess.run([py] + args, capture_output=True, text=True, timeout=60, cwd=d)
+        if p.returncode == 0:
+            log("[OK] %s —— %s" % (name, (p.stdout or "").strip().splitlines()[-1:][0]
+                                   if (p.stdout or "").strip() else "通过"))
+        else:
+            log("[FAIL] %s —— %s" % (name, (p.stderr or "").strip().splitlines()[-1:][0]
+                                     if (p.stderr or "").strip() else "失败"))
+            ok = False
     log("=" * 50)
     return ok
 
@@ -162,6 +226,7 @@ def main():
 
     install_common(py)
     install_face(py)
+    install_05(py)
 
     if not fix_opencv_hog(py):
         log("WARNING: HOGDescriptor 修复失败，02 的 AI 越界检测功能不可用")
