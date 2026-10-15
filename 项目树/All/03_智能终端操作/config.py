@@ -174,6 +174,13 @@ ALERT_CODE_LEVEL = {
     "SECURITY_REINSPECT_TIMEOUT": LEVEL_ORANGE,  # 安检报警复检超时未处置
     "SECURITY_SPECIAL_CHANNEL": LEVEL_ORANGE,  # 特殊考生转人工安检通道
     "LOCKER_ABNORMAL": LEVEL_ORANGE,           # 手机保管柜异常（含超时未取）
+    # ---- 13 AI 火场识别与自动报警（2026-10-15 融入） ----
+    # 火警是**人身安全事件**，按最严处理：确认火警=红（强制确认 + 60s SLA），
+    # 仅烟雾/疑似=橙（待复核）。
+    # 注意：这两个码以前没注册，13 送过来的 FIRE_ALARM 会被 models 的兜底降成橙色
+    # （ALERT_CODE_LEVEL.get(code, LEVEL_ORANGE)），与 13 的承诺相反 —— 已修。
+    "FIRE_ALARM": LEVEL_RED,                   # 火焰确认（红）
+    "FIRE_SMOKE": LEVEL_ORANGE,                # 烟雾/疑似（橙）
 }
 
 # 告警码 -> 中文含义（界面显示用）
@@ -195,6 +202,9 @@ ALERT_CODE_TEXT = {
     "SECURITY_REINSPECT_TIMEOUT": "安检复检超时",
     "SECURITY_SPECIAL_CHANNEL": "特殊考生人工安检通道",
     "LOCKER_ABNORMAL": "手机保管柜异常",
+    # ---- 13 AI 火场识别与自动报警 ----
+    "FIRE_ALARM": "火警（火焰确认）",
+    "FIRE_SMOKE": "烟雾疑似（待复核）",
 }
 
 # ---------------- 复核结论（第二节第 2 条） ----------------
@@ -223,18 +233,32 @@ ROLE_TEXT = {ROLE_OWNER: "所有者", ROLE_ADMIN: "管理员", ROLE_PATROL: "巡
 
 # 全部动作（所有者拥有这一整套）
 ALL_ACTIONS = frozenset({"view", "review", "report", "dispatch", "export", "verify",
-                         "manage"})          # manage = 终端账户管理（仅所有者）
+                         "manage",        # 终端账户管理（仅所有者）
+                         "maintain"})     # 数据维护：清空远端记录/告警留痕/补传队列
 
 # 各角色能做的动作（权限最小化：默认拒绝，显式放行）
 ROLE_ACTIONS = {
     ROLE_OWNER:       set(ALL_ACTIONS),                    # 最高权限
-    # 管理员：日常全权，但没有 manage（终端账户管理），也没有清空本地数据
+    # 管理员：日常全权 + 数据维护（清空类操作），但没有 manage（终端账户管理）；
+    # 其中"硬删除"仍额外要求所有者角色（在 storage.purge_data 的调用侧判定）。
     ROLE_ADMIN:       set(ALL_ACTIONS) - {"manage"},
     ROLE_PATROL:      {"view", "review", "report", "dispatch", "export"},
     ROLE_INVIGILATOR: {"view", "report"},                 # 不能复核（避免自己判自己）
     ROLE_COMMANDER:   {"view", "dispatch", "export"},      # 不直接复核
     ROLE_CHECKER:     {"view", "verify"},
     ROLE_VIEWER:      {"view"},
+}
+
+#: 可以执行"硬删除"（真删数据）的角色：只有所有者。
+#: 管理员可做 mark（标记清空，数据仍在、可审计）与队列清理。
+HARD_PURGE_ROLES = frozenset({ROLE_OWNER})
+
+#: 数据维护动作 -> 中文名（界面按钮与提示用）
+MAINTAIN_TEXT = {
+    "remote": "清空远端记录（01/02 经局域网送上来的数据）",
+    "local": "清空本机告警与复核留痕",
+    "queue": "清空补传队列（丢弃待补传，不删业务数据）",
+    "all": "清空以上全部",
 }
 
 # ---------------- 脱敏（第二节第 4 条：默认脱敏展示） ----------------
@@ -259,6 +283,24 @@ PLATFORM_URL = os.environ.get("EXAM_PLATFORM_URL", "").strip()     # 项目四 �
 EDGE_URL = os.environ.get("EXAM_EDGE_URL", "").strip()             # 项目一 边缘 AI 节点
 AUTH_URL = os.environ.get("EXAM_AUTH_URL", "").strip()             # 项目三 统一身份认证
 HTTP_TIMEOUT_SEC = 5
+
+# ---------------- 局域网接入服务（03 当接收端，跨设备联动） ----------------
+# 场景：另一台设备（跑 01/02）与终端在**同一局域网**，把操作记录 / 核验结论 /
+# 画质核查结论 / 业务告警传送到本终端（`lan_service.py` 提供接收端）。
+# 三条硬约束，都是"默认安全、要用才开"：
+#   1) 默认只监听 127.0.0.1。跨设备必须显式设 EXAM_TERMINAL_LAN_HOST=0.0.0.0；
+#   2) 非本机访问**必须有令牌**。令牌取 EXAM_TERMINAL_TOKEN，未设置时首次启动
+#      自动生成并写入 data\lan_token.txt（该目录已被 .gitignore 排除）；
+#   3) 监听非本机而又拿不到令牌时，服务**拒绝启动**（fail-closed），不静默裸奔。
+LAN_HOST = os.environ.get("EXAM_TERMINAL_LAN_HOST", "127.0.0.1").strip() or "127.0.0.1"
+LAN_PORT = int(os.environ.get("EXAM_TERMINAL_LAN_PORT", "9113") or 9113)
+LAN_TOKEN_FILE = DATA_ROOT / "lan_token.txt"
+LAN_REMOTE_LIMIT = int(os.environ.get("EXAM_TERMINAL_LAN_REMOTE_LIMIT", "20000") or 20000)
+LAN_BATCH_MAX = 500                 # 单批最多接收多少条（超出即拒，防止一次塞爆）
+LAN_LOOPBACK = ("127.0.0.1", "::1", "localhost")
+
+# 本机在局域网里的角色标识（上报出去的 device_id；留空则用计算机名）
+LAN_DEVICE_ID = os.environ.get("EXAM_DEVICE_ID", "").strip()
 
 # 01 人脸核验模块所在目录（"手持核验终端"通过隔离子进程调用它）
 FACE_MODULE_DIR = os.environ.get(

@@ -7,7 +7,12 @@
   reviews    复核留痕（独立成表，便于审计与误报闭环统计）
   audit      哈希链审计日志（告警接入 / 确认 / 复核 / 管控指令 全部留痕）
   commands   统一管控指令队列（远程配置、白名单、远程擦除）
+
+局域网联动另加两张表（**不与本机 audit 链合并**，见各自注释）：
+  remote_records  远端设备（01/02）送上来的操作记录 / 核验结论 / 核查结论
+  remote_devices  远端设备台账（最后活跃、声明的链头、累计条数）
 """
+import hashlib
 import json
 import sqlite3
 import threading
@@ -108,13 +113,70 @@ class Store(object):
 
             CREATE TABLE IF NOT EXISTS commands (
                 cmd_id TEXT PRIMARY KEY, kind TEXT, payload TEXT, created_at TEXT,
-                applied INTEGER DEFAULT 0, applied_at TEXT, operator TEXT
+                applied INTEGER DEFAULT 0, applied_at TEXT, operator TEXT,
+                -- 发布命令（03 -> 01/02）的回执：ok/fail + 结果 JSON
+                status TEXT, result TEXT
             );
 
             CREATE TABLE IF NOT EXISTS kv (
                 k TEXT PRIMARY KEY, v TEXT
             );
+
+            -- ---- 局域网联动：远端设备送上来的记录（与本地审计链**分链**存储）----
+            -- 为什么不并进 audit 表：audit 是本机 sha256 哈希链，塞进别人的记录会让
+            -- verify_chain() 立刻报"被篡改"。远端记录单独一张表，按 device_id 分组，
+            -- 本机只在自己链上写一条"收到 X 设备 N 条"的回执。
+            CREATE TABLE IF NOT EXISTS remote_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT, device_name TEXT, kind TEXT, record_id TEXT,
+                ts TEXT, action TEXT, detail TEXT, operator TEXT,
+                raw TEXT, received_at TEXT, received_epoch REAL, dedupe TEXT,
+                UNIQUE(device_id, kind, dedupe)
+            );
+            CREATE INDEX IF NOT EXISTS idx_remote_dev ON remote_records(device_id, kind);
+            CREATE INDEX IF NOT EXISTS idx_remote_epoch ON remote_records(received_epoch);
+
+            -- 远端设备台账：最后活跃时间、声明过的链头、累计条数
+            CREATE TABLE IF NOT EXISTS remote_devices (
+                device_id TEXT PRIMARY KEY, device_name TEXT, kinds TEXT,
+                chain_algo TEXT, chain_head TEXT, chain_count INTEGER,
+                chain_verified TEXT, first_seen TEXT, last_seen TEXT,
+                records INTEGER DEFAULT 0, chain_changes INTEGER DEFAULT 0
+            );
+
+            -- ---- 数据维护留痕（清空操作）----
+            -- 为什么单独一张表：清空是"删除数据"的动作，而 audit 是**只追加**的哈希链；
+            -- 把"删了多少、删的什么范围、谁删的、为什么删"记在这里，既留了痕，
+            -- 又不影响 audit 链的完整性（verify_chain 仍然全绿）。
+            CREATE TABLE IF NOT EXISTS purge_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT, scope TEXT, mode TEXT, deleted INTEGER,
+                detail TEXT, operator TEXT, reason TEXT, audit_hash TEXT
+            );
             """)
+
+        # ---- 老库迁移：补 alerts 的清空标记列（mark 模式需要） ----
+        # 幂等：列已存在就跳过。不做这一步，mark 模式会因缺列直接报错。
+        self._migrate()
+
+    def _migrate(self):
+        """给老库补列（幂等）。新库由 CREATE TABLE 直接带列。"""
+        want = {
+            "alerts": [("purged", "INTEGER DEFAULT 0"),
+                       ("purged_at", "TEXT"),
+                       ("purged_by", "TEXT"),
+                       ("purge_reason", "TEXT")],
+            # 老库的 commands 表没有回执列 —— 发布命令功能需要，必须补
+            "commands": [("status", "TEXT"),
+                         ("result", "TEXT")],
+        }
+        with self._lock, self._conn() as c:
+            for table, cols in want.items():
+                have = {r["name"] for r in
+                        c.execute("PRAGMA table_info(%s)" % table).fetchall()}
+                for name, decl in cols:
+                    if name not in have:
+                        c.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, decl))
 
     # ---------------- 告警 ----------------
     def save_alert(self, alert):
@@ -252,6 +314,99 @@ class Store(object):
             c.execute("UPDATE commands SET applied=1, applied_at=? WHERE cmd_id=?",
                       (models.now_ts(), cmd_id))
 
+    # ---------------- 发布命令（03 -> 01/02 局域网，可回执） ----------------
+    #: 允许下发的命令白名单（**两侧共同遵守**，防止变成任意代码执行通道）
+    COMMAND_TYPES = {
+        "ping": "连通性与版本探测",
+        "status": "回报运行状态",
+        "logs_tail": "回报最近日志（行数可指定，最多 200 行）",
+        "rebuild_index": "重建人脸特征索引（仅 01）",
+        "selftest": "跑一次本模块自检并回报结果",
+    }
+
+    def push_target_command(self, target, kind, params=None, operator="", note=""):
+        """下发一条命令给某个目标设备（01/02/…）。返回 cmd_id。
+
+        target 用设备标识（如 PC-A-01）或模块代号（01/02）；
+        kind 必须在 COMMAND_TYPES 白名单里，否则拒绝（不写库）。
+        """
+        kind = (kind or "").strip()
+        if kind not in self.COMMAND_TYPES:
+            return ""
+        payload = {"target": (target or "").strip(), "kind": kind,
+                   "params": params or {}, "note": note or ""}
+        cmd_id = self.push_command("devcmd", payload, operator or "terminal")
+        self.log("下发命令", "目标=%s 类型=%s 参数=%s"
+                 % (target, kind, json.dumps(params or {}, ensure_ascii=False)),
+                 operator or "terminal")
+        return cmd_id
+
+    def commands_for(self, target, limit=20, pending_only=True):
+        """某目标待执行的命令（按时间正序）。target 为空表示不过滤。"""
+        sql = ("SELECT cmd_id, payload, created_at, operator FROM commands "
+               "WHERE kind='devcmd' AND applied=0")
+        args = []
+        if target:
+            # 注意：SQL 的 LIKE 通配符是 %，而 Python 的 % 是格式化符 ——
+            # 这里用字符串拼接而非 % 运算，避免 '%"target": "x"' 被当成格式串。
+            sql += " AND payload LIKE ?"
+            args.append('%' + '"target": "' + target + '"' + '%')
+        sql += " ORDER BY created_at ASC LIMIT ?"
+        args.append(int(limit))
+        with self._lock, self._conn() as c:
+            rows = c.execute(sql, args).fetchall()
+        out = []
+        for r in rows:
+            try:
+                pl = json.loads(r["payload"] or "{}")
+            except Exception:
+                pl = {}
+            tgt = (pl.get("target") or "").strip()
+            if target and tgt and tgt != target:
+                continue                      # LIKE 只是粗筛，这里精确比对
+            out.append({"cmd_id": r["cmd_id"], "kind": pl.get("kind", ""),
+                        "params": pl.get("params") or {}, "note": pl.get("note", ""),
+                        "created_at": r["created_at"], "operator": r["operator"],
+                        "target": tgt})
+        return out
+
+    def finish_command(self, cmd_id, ok=True, result=None, operator=""):
+        """记录命令回执（成功/失败 + 结果摘要），并标记已执行。"""
+        with self._lock, self._conn() as c:
+            c.execute("UPDATE commands SET applied=1, applied_at=?, status=?, "
+                      "result=? WHERE cmd_id=?",
+                      (models.now_ts(), "ok" if ok else "fail",
+                       json.dumps(result if result is not None else {}, ensure_ascii=False),
+                       cmd_id))
+        self.log("命令回执", "命令=%s 结果=%s" % (cmd_id, "成功" if ok else "失败"),
+                 operator or "remote")
+
+    def list_commands(self, limit=50):
+        with self._lock, self._conn() as c:
+            rows = c.execute("SELECT * FROM commands WHERE kind='devcmd' "
+                             "ORDER BY created_at DESC LIMIT ?", (int(limit),)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["payload_obj"] = json.loads(d.get("payload") or "{}")
+            except Exception:
+                d["payload_obj"] = {}
+            try:
+                d["result_obj"] = json.loads(d.get("result") or "{}")
+            except Exception:
+                d["result_obj"] = {}
+            out.append(d)
+        return out
+
+    def clear_finished_commands(self):
+        """清理已完成的命令台账（applied=1）。**不动审计链** —— 下发/回执留痕仍在。"""
+        with self._lock, self._conn() as c:
+            cur = c.execute("DELETE FROM commands WHERE kind='devcmd' AND applied=1")
+            n = cur.rowcount
+        self.log("清理命令台账", "已删除 %d 条已完成记录" % n, "terminal")
+        return max(0, n)
+
     # ---------------- 键值（终端配置快照） ----------------
     def set_kv(self, k, v):
         with self._lock, self._conn() as c:
@@ -267,6 +422,250 @@ class Store(object):
             return json.loads(r["v"])
         except (ValueError, TypeError):
             return default
+
+    # ---------------- 局域网联动：远端记录 ----------------
+    @staticmethod
+    def _norm_remote(kind, rec):
+        """
+        把上报来的一条记录规整成统一列（认不出来也照存 raw，不丢数据）。
+        归一化的目的：01 的操作日志、01 的核验记录、02 的核查结论、02 的工单
+        字段名各不相同，而终端上要能**同一张表按时间混排**看。
+        """
+        if not isinstance(rec, dict):
+            rec = {"detail": str(rec)}
+        raw = models.canonical(rec)
+        ts = str(rec.get("ts") or rec.get("created_at") or rec.get("time")
+                 or rec.get("received_at") or "")
+        action = str(rec.get("action") or rec.get("code") or rec.get("title")
+                     or rec.get("status") or kind)
+        detail = str(rec.get("detail") or rec.get("reason") or rec.get("message")
+                     or rec.get("note") or "")
+        operator = str(rec.get("operator") or rec.get("user") or rec.get("reviewer")
+                       or rec.get("assigned_to") or "")
+        rid = str(rec.get("record_id") or rec.get("id") or rec.get("alert_id")
+                  or rec.get("check_id") or rec.get("order_id") or "")
+        dedupe = hashlib.sha1(("%s|%s|%s|%s|%s|%s" % (kind, rid, ts, action, detail,
+                                                      raw)).encode("utf-8")).hexdigest()
+        return {"record_id": rid, "ts": ts, "action": action, "detail": detail,
+                "operator": operator, "raw": raw, "dedupe": dedupe}
+
+    def save_remote_batch(self, device_id, device_name, kind, records, chain=None,
+                          operator="远端接入"):
+        """
+        接入一批远端记录。返回：
+          {accepted, duplicated, total, chain_head, chain_changed, first_seen,
+           device_records}
+
+        · 幂等：同一条记录（内容相同）重复上报只会算 duplicated，不会写第二行；
+        · **不碰本机 audit 链**：远端记录进 remote_records，本机链只写一条回执；
+        · 链头变更如实记录（说明对端重建过链/清过日志），本机无法替它对账，
+          只把"变更"这件事留痕，不假装校验通过。
+        """
+        device_id = str(device_id or "").strip() or "unknown"
+        kind = str(kind or "audit").strip() or "audit"
+        chain = dict(chain or {})
+        recs = list(records or [])
+        now = models.now_ts()
+        epoch = models.now_epoch()
+        accepted = duplicated = 0
+
+        with self._lock, self._conn() as c:
+            for rec in recs:
+                n = self._norm_remote(kind, rec)
+                cur = c.execute(
+                    "INSERT OR IGNORE INTO remote_records "
+                    "(device_id, device_name, kind, record_id, ts, action, detail, "
+                    " operator, raw, received_at, received_epoch, dedupe) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (device_id, device_name or "", kind, n["record_id"], n["ts"],
+                     n["action"], data_crypto.encrypt_field(n["detail"]),
+                     n["operator"], data_crypto.encrypt_field(n["raw"]),
+                     now, epoch, n["dedupe"]))
+                if cur.rowcount:
+                    accepted += 1
+                else:
+                    duplicated += 1
+
+            row = c.execute("SELECT * FROM remote_devices WHERE device_id=?",
+                            (device_id,)).fetchone()
+            old_head = (row["chain_head"] if row else "") or ""
+            new_head = str(chain.get("head") or "")
+            # 只在"对端明确声明了链头"且与上次不同、且不是首次登记时算一次变更
+            changed = bool(old_head and new_head and old_head != new_head)
+            first_seen = bool(row is None)
+            kinds = ""
+            if row:
+                kinds = row["kinds"] or ""
+            kinds = "、".join(sorted(set([k for k in kinds.split("、") if k] + [kind])))
+            total = (row["records"] if row else 0) + accepted
+            changes = ((row["chain_changes"] if row else 0) or 0) + (1 if changed else 0)
+            c.execute(
+                "INSERT OR REPLACE INTO remote_devices "
+                "(device_id, device_name, kinds, chain_algo, chain_head, chain_count, "
+                " chain_verified, first_seen, last_seen, records, chain_changes) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (device_id, device_name or (row["device_name"] if row else ""), kinds,
+                 str(chain.get("algo") or ""), new_head or old_head,
+                 int(chain.get("count") or 0), str(chain.get("verified", "")),
+                 (row["first_seen"] if row else now), now, total, changes))
+
+        # 本机审计链上的回执：只有"谁在什么时候送来了多少条"，不含远端明细
+        self.log("远端记录接入",
+                 "%s（%s）kind=%s 收到=%d 重复=%d 声明链头=%s%s"
+                 % (device_id, device_name or "-", kind, accepted, duplicated,
+                    (new_head[:16] + "…") if len(new_head) > 16 else (new_head or "-"),
+                    "（链头与上次不同，已留痕）" if changed else ""),
+                 operator)
+        return {"accepted": accepted, "duplicated": duplicated, "total": total,
+                "chain_head": new_head or old_head, "chain_changed": changed,
+                "first_seen": first_seen, "device_records": total,
+                "device_id": device_id, "kind": kind}
+
+    def list_remote_records(self, device_id=None, kind=None, limit=200):
+        """远端记录（按接收时间倒序）。detail/raw 落库时加密，这里解密后返回。"""
+        sql = "SELECT * FROM remote_records WHERE 1=1"
+        args = []
+        if device_id:
+            sql += " AND device_id=?"
+            args.append(device_id)
+        if kind:
+            sql += " AND kind=?"
+            args.append(kind)
+        sql += " ORDER BY received_epoch DESC, id DESC LIMIT ?"
+        args.append(int(limit))
+        with self._lock, self._conn() as c:
+            rows = c.execute(sql, args).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["detail"] = data_crypto.decrypt_field(d.get("detail"))
+            d["raw"] = data_crypto.decrypt_field(d.get("raw"))
+            out.append(d)
+        return out
+
+    def remote_devices(self):
+        with self._lock, self._conn() as c:
+            rows = c.execute("SELECT * FROM remote_devices "
+                             "ORDER BY last_seen DESC").fetchall()
+        return [dict(r) for r in rows]
+
+    def remote_summary(self):
+        with self._lock, self._conn() as c:
+            total = c.execute("SELECT COUNT(*) n FROM remote_records").fetchone()["n"]
+            devs = c.execute("SELECT COUNT(*) n FROM remote_devices").fetchone()["n"]
+            rows = c.execute("SELECT kind, COUNT(*) n FROM remote_records "
+                             "GROUP BY kind").fetchall()
+            last = c.execute("SELECT MAX(received_at) t FROM remote_records").fetchone()["t"]
+        return {"records": total, "devices": devs, "last_received": last or "",
+                "by_kind": {r["kind"]: r["n"] for r in rows}}
+
+    def prune_remote(self, keep=None):
+        """远端记录只增不减会撑爆库；超过上限按接收时间裁掉最旧的（本地审计链留痕）。"""
+        keep = int(keep or config.LAN_REMOTE_LIMIT)
+        with self._lock, self._conn() as c:
+            n = c.execute("SELECT COUNT(*) n FROM remote_records").fetchone()["n"]
+            if n <= keep:
+                return 0
+            c.execute("DELETE FROM remote_records WHERE id IN ("
+                      "SELECT id FROM remote_records ORDER BY received_epoch ASC "
+                      "LIMIT ?)", (n - keep,))
+        self.log("远端记录裁剪", "上限 %d 条，已裁掉最旧的 %d 条" % (keep, n - keep), "system")
+        return n - keep
+
+    # ---------------- 数据维护：清空（追加式留痕，保哈希链） ----------------
+    #: 清空范围（scope）与中文名
+    PURGE_SCOPES = {
+        "remote": "远端记录（01/02 经局域网送上来的数据）",
+        "local": "本机告警与复核留痕",
+        "queue": "补传队列与本地缓存",
+    }
+
+    def purge_data(self, scope, mode="hard", operator="", reason=""):
+        """
+        清空指定范围的数据。**不删数据库文件**（运行中删 .db 必然被占用锁住，
+        实测报 WinError 32），而是在事务里删表内行；审计链与 purge_log 保留。
+
+        scope: remote | local | queue | all
+        mode : hard（真删）| mark（只标记，数据仍在，可查不可办）
+        reason: 必填（数据维护属敏感操作，要能解释为什么删）
+        返回 (ok, 说明, 删除条数明细 dict)
+        """
+        import time as _t
+        if scope not in self.PURGE_SCOPES and scope != "all":
+            return False, "未知清空范围：%s" % scope, {}
+        if not (reason or "").strip():
+            return False, "必须填写清空原因（数据维护要能解释）", {}
+        mode = "mark" if str(mode).lower() == "mark" else "hard"
+        scopes = list(self.PURGE_SCOPES) if scope == "all" else [scope]
+        detail = {}
+
+        with self._lock, self._conn() as c:
+            for sc in scopes:
+                if mode == "hard":
+                    n = 0
+                    if sc == "remote":
+                        n = c.execute("SELECT COUNT(*) n FROM remote_records").fetchone()["n"]
+                        c.execute("DELETE FROM remote_records")
+                        # 台账的累计条数是历史事实，不跟着删；但"当前存量"要归零，
+                        # 否则界面显示"2 台设备 12 条"而列表是空的，像 bug。
+                        c.execute("UPDATE remote_devices SET records=0")
+                    elif sc == "local":
+                        n = c.execute("SELECT COUNT(*) n FROM alerts").fetchone()["n"]
+                        n += c.execute("SELECT COUNT(*) n FROM reviews").fetchone()["n"]
+                        c.execute("DELETE FROM alerts")
+                        c.execute("DELETE FROM reviews")
+                    elif sc == "queue":
+                        n = c.execute("SELECT COUNT(*) n FROM alerts "
+                                      "WHERE synced=0").fetchone()["n"]
+                        # 队列数据 = alerts 里未同步那些；补传走 synced 标记，
+                        # 所以"清空队列"是把未同步的标记为已同步（丢弃待补传），
+                        # 而不是删掉告警本身——否则等于顺手删了业务数据。
+                        c.execute("UPDATE alerts SET synced=1 WHERE synced=0")
+                    detail[sc] = n
+                else:
+                    n = 0
+                    if sc == "remote":
+                        # remote_records 无状态列，mark 模式改为"超限裁剪到 0"以外的做法：
+                        # 这里只能如实说明不可标记，退回硬删 0 条以免误导。
+                        detail[sc] = 0
+                        continue
+                    elif sc == "local":
+                        n = c.execute("SELECT COUNT(*) n FROM alerts "
+                                      "WHERE purged=0").fetchone()["n"]
+                        c.execute("UPDATE alerts SET purged=1, purged_at=?, "
+                                  "purged_by=?, purge_reason=? WHERE purged=0",
+                                  (models.now_ts(), operator, reason))
+                    elif sc == "queue":
+                        n = c.execute("SELECT COUNT(*) n FROM alerts "
+                                      "WHERE synced=0").fetchone()["n"]
+                        c.execute("UPDATE alerts SET synced=1 WHERE synced=0")
+                    detail[sc] = n
+
+        total = sum(detail.values())
+        desc = "；".join("%s %d 条" % (self.PURGE_SCOPES.get(k, k), v)
+                         for k, v in detail.items()) or "无数据"
+        h = self.log("数据清空",
+                     "范围=%s 模式=%s 明细=%s 原因=%s" % (scope, mode, desc, reason),
+                     operator or "system")
+        with self._lock, self._conn() as c:
+            c.execute("INSERT INTO purge_log (ts, scope, mode, deleted, detail, operator, "
+                      "reason, audit_hash) VALUES (?,?,?,?,?,?,?,?)",
+                      (models.now_ts(), scope, mode, total, desc, operator or "system",
+                       reason, h))
+        return True, "已清空：%s（模式 %s，共 %d 条；已写审计链与维护留痕）" % (desc, mode, total), detail
+
+    def purge_rows(self, limit=50):
+        """数据维护留痕（最近 N 条）"""
+        with self._lock, self._conn() as c:
+            rows = c.execute("SELECT * FROM purge_log ORDER BY id DESC LIMIT ?",
+                             (int(limit),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def vacuum(self):
+        """回收空间（清空后调用；运行中安全，但会短暂加锁）"""
+        with self._lock, self._conn() as c:
+            c.execute("VACUUM")
+        return True
 
     # ---------------- 统计 ----------------
     def summary(self, room_id=None):

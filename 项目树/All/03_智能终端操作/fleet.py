@@ -100,32 +100,41 @@ class FleetManager(object):
 
     def execute_wipe(self, confirm_code, operator):
         """
-        执行擦除：清空 data 目录下的运行数据（保留目录本身）。
-        必须传入 confirm_code == 'WIPE' 才会执行——避免误触。
+        执行远程擦除：清空运行数据（告警/复核留痕/补传队列/远端记录）。
+
+        **重要修正（2026-10-15）**：旧实现是"删 data 下的 .db 文件 + rmtree 附件与队列目录"，
+        但终端**正在运行**，SQLite 连接持有 terminal.db 的句柄 ⇒ 必然报
+        `WinError 32 另一个程序正在使用此文件`（用户实际遇到的就是这个），
+        而且 attachments/outbox 可能已被删、数据库没删掉 —— 半途状态比不擦更糟。
+
+        现在改为走 storage.purge_data 的**库内清理**：
+          · 不删数据库文件，因此运行中也能真正清干净；
+          · 不销毁终端账户（终端账户另有独立入口管理）；
+          · 审计链与本次擦除留痕保留（谁在什么时候擦了什么是可追溯的）。
+
+        必须传入 confirm_code == 'WIPE' 才会执行 —— 避免误触。
         """
         if confirm_code != "WIPE":
             return False, "确认码不正确（需输入 WIPE）"
         if not self.wipe_pending():
             return False, "没有待执行的擦除请求"
-        targets = [config.DB_PATH, config.ATTACH_DIR, config.QUEUE_DIR]
-        removed, failed = [], []
-        for t in targets:
-            try:
-                if os.path.isdir(str(t)):
-                    shutil.rmtree(str(t))
-                    os.makedirs(str(t), exist_ok=True)
-                elif os.path.exists(str(t)):
-                    os.remove(str(t))
-                removed.append(os.path.basename(str(t)))
-            except OSError as e:
-                failed.append("%s:%s" % (os.path.basename(str(t)), e))
+        try:
+            ok, msg, detail = self.store.purge_data("all", mode="hard",
+                                                    operator=operator,
+                                                    reason="远程擦除（fleet.execute_wipe）")
+        except Exception as e:                        # noqa: BLE001
+            return False, "擦除失败：%s" % e
+        if not ok:
+            return False, "擦除未完成：%s" % msg
+        try:
+            self.store.vacuum()
+        except Exception:
+            pass
         self.store.set_kv(WIPE_KEY, {"requested_at": "", "operator": operator,
                                      "reason": "已执行", "done": True})
-        self.store.log("远程擦除执行",
-                       "已清除=%s 失败=%s" % (",".join(removed) or "-",
-                                             ",".join(failed) or "-"), operator)
-        return True, "已清除：%s%s" % (", ".join(removed) or "无",
-                                      ("；失败：" + ", ".join(failed)) if failed else "")
+        # purge_data 已经写过审计链，这里不再重复写；把 detail 一起回给调用方便于排查
+        return True, "已清空运行数据（库内清理，未删除数据库文件）：%s" % (
+            msg or detail or "")
 
     # ---------------- 远程升级（任务登记） ----------------
     def push_upgrade(self, version, url, checksum="", operator="platform"):

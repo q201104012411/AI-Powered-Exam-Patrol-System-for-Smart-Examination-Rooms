@@ -220,8 +220,22 @@ def main(argv=None):
     check("擦除请求已登记待二次确认", fl.wipe_pending())
     ok, msg = fl.execute_wipe("wrong", "platform")
     check("错误确认码不执行擦除", not ok, msg)
+    # 擦除前造点数据，验证"真的清掉了"
+    store.save_alert(models.Alert(code="PHONE_DETECTED", title="擦除前", device_id="CAM-X"))
+    before_alerts = len(store.list_alerts(limit=100))
     ok, msg = fl.execute_wipe("WIPE", "platform")
     check("确认码正确才执行擦除", ok, msg)
+    # —— 这三项是 2026-10-15 补的：旧实现删 .db 文件必然 WinError 32，
+    #    而旧断言只检查消息里有没有"失败"两字，把这个缺陷放过去了。
+    check("擦除不删除数据库文件（WinError 32 的根因）",
+          os.path.exists(str(config.DB_PATH)))
+    check("擦除后告警确实被清空（不只是报了个成功）",
+          len(store.list_alerts(limit=100)) == 0,
+          "擦除前 %d 条" % before_alerts)
+    check("擦除后审计链仍完整（留痕可追溯）", store.verify_chain()[0],
+          store.verify_chain()[1])
+    check("擦除不销毁终端账户",
+          access.AccountStore(store).authenticate("owner", "EDY_POWERQ") is not None)
     for _ in range(3):
         fl.soak_tick(note="selfcheck")
     soak = fl.soak_status()

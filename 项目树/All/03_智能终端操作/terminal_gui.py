@@ -46,6 +46,7 @@ except Exception:
     HAS_VLM = False
 
 import access
+import access as access_mod
 import alerts as alerts_mod
 import bridge
 import camera_stream
@@ -208,6 +209,12 @@ class TerminalApp(object):
             self._cam_readers.clear()
         except Exception:
             pass
+        # 驾驶舱的 1 秒定时器也要停，否则退出时报 Tcl 错
+        try:
+            if getattr(self, "cockpit", None) is not None:
+                self.cockpit.stop()
+        except Exception:
+            pass
         self.root.destroy()
 
     # ================= 登录（建在主窗口内，避免 Toplevel 不显示） =================
@@ -255,6 +262,16 @@ class TerminalApp(object):
             w.destroy()
         self.root.geometry("1180x820")
         s = self.session
+        # 统一主题（大数据驾驶舱风格）：只在进入主界面时应用一次
+        try:
+            import theme as _theme
+            _theme.apply_ttk(self.root)
+            try:
+                self.root.configure(bg=_theme.BG)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
         top = ttk.Frame(self.root, padding=(10, 8))
         top.pack(fill="x")
@@ -266,28 +283,57 @@ class TerminalApp(object):
         nb = ttk.Notebook(self.root)
         nb.pack(fill="both", expand=True, padx=10, pady=(0, 6))
         self.nb = nb
+        # 驾驶舱放第一个页签（大屏展示用，默认可看）
+        self.tab_cockpit = ttk.Frame(nb, padding=8)
+        self.tab_cmd = ttk.Frame(nb, padding=8)          # 命令台（发布命令给 01/02）
         self.tab_alerts = ttk.Frame(nb, padding=8)
         self.tab_review = ttk.Frame(nb, padding=8)
         self.tab_verify = ttk.Frame(nb, padding=8)
         self.tab_ops = ttk.Frame(nb, padding=8)
+        self.tab_data = ttk.Frame(nb, padding=8)      # 数据维护（清空远端记录/告警/队列）
         # 监控查看：仅所有者、管理员、巡考员可见
         self.can_monitor = self.session.role in (config.ROLE_OWNER,
                                                  config.ROLE_ADMIN,
                                                  config.ROLE_PATROL)
         if self.can_monitor:
             self.tab_monitor = ttk.Frame(nb, padding=8)
+        nb.add(self.tab_cockpit, text="  🛰 驾驶舱  ")
+        # 命令台：具备 maintain 的角色可见（下发命令属管控操作）
+        self.can_maintain = self.session.can("maintain")
+        if self.can_maintain:
+            nb.add(self.tab_cmd, text="  📡 命令台  ")
         nb.add(self.tab_alerts, text="  告警处置  ")
         nb.add(self.tab_review, text="  复核留痕  ")
         nb.add(self.tab_verify, text="  手持核验  ")
         if self.can_monitor:
             nb.add(self.tab_monitor, text="  监控查看  ")
         nb.add(self.tab_ops, text="  运行状态与管控  ")
+        # 数据维护：具备 maintain 动作的角色（所有者/管理员）才看得到
+        if self.can_maintain:
+            nb.add(self.tab_data, text="  数据维护  ")
         self._build_alerts_tab()
         self._build_review_tab()
         self._build_verify_tab()
         if self.can_monitor:
             self._build_monitor_tab()
         self._build_ops_tab()
+        if self.can_maintain:
+            self._build_cmd_tab()
+        if self.can_maintain:
+            self._build_data_tab()
+        # 驾驶舱：数据来自本终端自己的库，任何角色都可看（只读态势）
+        self.cockpit = None
+        try:
+            import dashboard
+            self.cockpit = dashboard.CockpitTab(self.tab_cockpit, self)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            try:
+                ttk.Label(self.tab_cockpit, text="驾驶舱不可用：%s" % e,
+                          foreground="#f43f5e").pack(anchor="w")
+            except Exception:
+                pass
 
         # 常驻 AI 对话面板：放在 4 个标签页下方，切换界面始终可见
         self._build_ai_panel(self.root)
@@ -1871,6 +1917,308 @@ class TerminalApp(object):
         except Exception:
             pass
 
+    # ================= 命令台（发布命令给 01/02） =================
+    def _build_cmd_tab(self):
+        """
+        智能终端"发布命令"台：向 01/02 等设备下发命令并查看回执。
+
+        链路（真实局域网，不是同机调用）：
+          03 --POST /api/command--> 目标设备的 command_runner.py 轮询
+             --GET /api/command?target=xxx--> 执行（白名单）
+             --POST /api/command_result--> 03 落库并显示回执
+
+        安全：两侧共用同一份命令白名单（storage.COMMAND_TYPES 与
+        command_runner.SUPPORTED），**没有任意命令执行通道**。
+        """
+        f = self.tab_cmd
+        ttk.Label(f, text="发布命令（智能终端 → 01 / 02）", font=FONT_B).pack(anchor="w")
+        ttk.Label(f, foreground="#8ba3c7", justify="left",
+                  text=("命令只在**白名单**内下发（ping/status/logs_tail/selftest/rebuild_index），"
+                        "没有任意命令执行通道。\n"
+                        "目标设备需运行命令执行器：\n"
+                        "    python 00_集成联动\\command_runner.py --module 02 --loop 15\n"
+                        "（需先设 EXAM_TERMINAL_URL 与 EXAM_TERMINAL_TOKEN 两个环境变量）")
+                  ).pack(anchor="w", pady=(4, 8))
+
+        form = ttk.LabelFrame(f, text=" 下发指令 ", padding=8)
+        form.pack(fill="x")
+        row1 = ttk.Frame(form)
+        row1.pack(fill="x", pady=3)
+        ttk.Label(row1, text="目标设备：").pack(side="left")
+        self.cmd_target = tk.StringVar(value="PC-A-01")
+        ttk.Entry(row1, textvariable=self.cmd_target, width=22).pack(side="left", padx=(0, 12))
+        ttk.Label(row1, text="命令类型：").pack(side="left")
+        self.cmd_kind = tk.StringVar(value="ping")
+        ttk.Combobox(row1, textvariable=self.cmd_kind, state="readonly", width=16,
+                     values=tuple(self.store.COMMAND_TYPES.keys())).pack(side="left", padx=(0, 12))
+        ttk.Label(row1, text="参数(JSON，可留空)：").pack(side="left")
+        self.cmd_params = tk.StringVar(value="{}")
+        ttk.Entry(row1, textvariable=self.cmd_params, width=26).pack(side="left")
+
+        row2 = ttk.Frame(form)
+        row2.pack(fill="x", pady=(6, 0))
+        ttk.Button(row2, text="📡 下发命令", style="Accent.TButton",
+                   command=self._publish_command).pack(side="left")
+        ttk.Button(row2, text="🔄 刷新回执", command=self.refresh_commands).pack(side="left", padx=6)
+        self.cmd_msg = ttk.Label(row2, text="", foreground="#8ba3c7")
+        self.cmd_msg.pack(side="left", padx=12)
+
+        ttk.Label(f, text="命令白名单说明：" + "；".join(
+            "%s=%s" % (k, v) for k, v in self.store.COMMAND_TYPES.items()),
+            foreground="#5b739a", justify="left").pack(anchor="w", pady=(8, 4))
+
+        hist = ttk.LabelFrame(f, text=" 命令台账与回执（最近 50 条） ", padding=8)
+        hist.pack(fill="both", expand=True)
+        cols = ("time", "target", "kind", "state", "result")
+        self.cmd_tree = ttk.Treeview(hist, columns=cols, show="headings", height=12)
+        for c, t, w in (("time", "下发时间", 140), ("target", "目标", 100),
+                        ("kind", "命令", 110), ("state", "状态", 70),
+                        ("result", "回执 / 结果", 620)):
+            self.cmd_tree.heading(c, text=t)
+            self.cmd_tree.column(c, width=w, anchor="w")
+        self.cmd_tree.tag_configure("ok", foreground="#34d399")
+        self.cmd_tree.tag_configure("fail", foreground="#f43f5e")
+        self.cmd_tree.tag_configure("wait", foreground="#fbbf24")
+        vs = ttk.Scrollbar(hist, orient="vertical", command=self.cmd_tree.yview)
+        self.cmd_tree.configure(yscrollcommand=vs.set)
+        self.cmd_tree.pack(side="left", fill="both", expand=True)
+        vs.pack(side="right", fill="y")
+        ttk.Button(f, text="🗑 删除已完成的记录",
+                   command=self._clear_finished_commands).pack(anchor="w", pady=(6, 0))
+        self.refresh_commands()
+
+    def _publish_command(self):
+        """下发一条命令（含权限判定、白名单校验、审计留痕）"""
+        try:
+            self.session.require("maintain")
+        except access.AccessError as e:
+            messagebox.showerror("权限不足", str(e))
+            return
+        target = (self.cmd_target.get() or "").strip()
+        kind = (self.cmd_kind.get() or "").strip()
+        if not target:
+            messagebox.showwarning("缺少目标", "请填写目标设备标识（如 PC-A-01）")
+            return
+        if kind not in self.store.COMMAND_TYPES:
+            messagebox.showwarning("命令不合法", "命令类型必须在白名单内")
+            return
+        raw = (self.cmd_params.get() or "{}").strip() or "{}"
+        try:
+            params = json.loads(raw)
+            if not isinstance(params, dict):
+                raise ValueError("参数必须是 JSON 对象")
+        except ValueError as e:
+            messagebox.showwarning("参数不合法", "参数需为 JSON 对象：%s" % e)
+            return
+        ok_rep, note = self._report_sensitive_action(
+            "下发命令", "目标=%s 类型=%s 参数=%s" % (target, kind, raw))
+        if not ok_rep:
+            return
+        try:
+            cmd_id = self.store.push_target_command(
+                target, kind, params=params, operator=self.session.username, note=note)
+        except Exception as e:
+            messagebox.showerror("下发失败", str(e))
+            return
+        if not cmd_id:
+            messagebox.showerror("下发失败", "命令未写入队列（白名单校验未通过）")
+            return
+        self.cmd_msg.config(text="已下发 %s，等待「%s」回执…" % (cmd_id, target),
+                            foreground="#22d3ee")
+        self.refresh_commands()
+
+    def refresh_commands(self):
+        """刷新命令台账（含目标设备的回执）"""
+        tree = getattr(self, "cmd_tree", None)
+        if tree is None:
+            return
+        try:
+            rows = self.store.list_commands(limit=50)
+        except Exception:
+            return
+        for iid in tree.get_children():
+            tree.delete(iid)
+        for r in rows:
+            pl = r.get("payload_obj") or {}
+            res = r.get("result_obj") or {}
+            status = r.get("status") or ""
+            applied = int(r.get("applied") or 0)
+            if status == "ok":
+                state, tag = "成功", "ok"
+            elif status == "fail":
+                state, tag = "失败", "fail"
+            elif applied:
+                state, tag = "已执行", "ok"
+            else:
+                state, tag = "待执行", "wait"
+            if res:
+                txt = json.dumps(res, ensure_ascii=False)
+                if len(txt) > 400:
+                    txt = txt[:400] + "…"
+            else:
+                txt = "（尚无回执：目标设备需运行命令执行器）"
+            tree.insert("", "end", iid=r.get("cmd_id", ""), tags=(tag,), values=(
+                (r.get("created_at") or "")[:19], pl.get("target", ""),
+                pl.get("kind", ""), state, txt))
+
+    def _clear_finished_commands(self):
+        """清理已完成的命令记录（仅台账清理，不动审计链）"""
+        try:
+            self.session.require("maintain")
+        except access.AccessError as e:
+            messagebox.showerror("权限不足", str(e))
+            return
+        if not messagebox.askyesno("确认", "删除已完成的命令台账记录？\n"
+                                           "（审计链中的下发/回执留痕不会删除）"):
+            return
+        try:
+            n = self.store.clear_finished_commands()
+        except Exception as e:
+            messagebox.showerror("失败", str(e))
+            return
+        self.refresh_commands()
+        self.cmd_msg.config(text="已清理 %d 条已完成记录" % n, foreground="#34d399")
+
+    # ================= 数据维护（清空） =================
+    def _build_data_tab(self):
+        """
+        数据维护页：清空远端记录 / 本机告警与复核留痕 / 补传队列。
+
+        为什么要有这一页：
+          · 远端记录（01/02 经局域网送上来的数据）以前**只增不减**，界面又没入口，
+            用户看到的就是"收到了但清不掉"；
+          · 原来的"清空本地数据"是**直接删 .db 文件**，运行中必然被占用锁住
+            （实测 WinError 32），而且失败前已经把动作写进审计了 —— 等于没清还留了痕。
+        现在统一走 storage.purge_data：按范围在事务里清，**不删库文件**，
+        每次清空都写审计链 + purge_log 留痕，哈希链保持完整。
+        """
+        f = self.tab_data
+        ttk.Label(f, text="数据维护（清空）", font=FONT_B).pack(anchor="w")
+        hint = ("说明：清空**不会删除数据库文件**（运行中删文件必然失败），"
+                "而是在库内清理；每次清空都会写入审计链与维护留痕，可追溯。\n"
+                "· 标记清空(mark)：数据仍保留在库内，只做标记（最安全，可审计）\n"
+                "· 真删(hard)：行记录被删除，仅所有者可执行")
+        ttk.Label(f, text=hint, foreground="#666666", justify="left").pack(anchor="w", pady=(4, 8))
+
+        top = ttk.LabelFrame(f, text=" 选择清空范围 ", padding=8)
+        top.pack(fill="x")
+        self.purge_scope = tk.StringVar(value="remote")
+        for key in ("remote", "local", "queue", "all"):
+            ttk.Radiobutton(top, text=config.MAINTAIN_TEXT[key], value=key,
+                            variable=self.purge_scope).pack(anchor="w")
+
+        row = ttk.Frame(f)
+        row.pack(fill="x", pady=8)
+        ttk.Label(row, text="清空原因（必填）：").pack(side="left")
+        self.purge_reason = tk.StringVar()
+        ttk.Entry(row, textvariable=self.purge_reason, width=46).pack(side="left", padx=(0, 8))
+
+        btns = ttk.Frame(f)
+        btns.pack(fill="x", pady=(0, 6))
+        ttk.Button(btns, text="🧹 标记清空（mark，安全）",
+                   command=lambda: self._do_purge("mark")).pack(side="left")
+        if self.session.role in config.HARD_PURGE_ROLES:
+            ttk.Button(btns, text="🗑 真删（hard，不可恢复）",
+                       command=lambda: self._do_purge("hard")).pack(side="left", padx=6)
+        else:
+            ttk.Label(btns, text="（真删需所有者角色）",
+                      foreground="#999999").pack(side="left", padx=6)
+        ttk.Button(btns, text="🔄 刷新留痕", command=self.refresh_maintain).pack(side="right")
+
+        info = ttk.LabelFrame(f, text=" 当前存量 ", padding=8)
+        info.pack(fill="x", pady=(0, 6))
+        self.maintain_info = tk.Text(info, height=5, wrap="word", font=MONO)
+        self.maintain_info.pack(fill="x")
+
+        hist = ttk.LabelFrame(f, text=" 清空留痕（最近 50 条） ", padding=8)
+        hist.pack(fill="both", expand=True)
+        cols = ("time", "scope", "mode", "count", "operator", "reason")
+        self.purge_tree = ttk.Treeview(hist, columns=cols, show="headings", height=8)
+        for c, txt, w in (("time", "时间", 140), ("scope", "范围", 80), ("mode", "模式", 60),
+                          ("count", "条数", 60), ("operator", "操作人", 90),
+                          ("reason", "原因", 260)):
+            self.purge_tree.heading(c, text=txt)
+            self.purge_tree.column(c, width=w, anchor="w")
+        vs = ttk.Scrollbar(hist, orient="vertical", command=self.purge_tree.yview)
+        self.purge_tree.configure(yscrollcommand=vs.set)
+        self.purge_tree.pack(side="left", fill="both", expand=True)
+        vs.pack(side="right", fill="y")
+
+        warn = ("注意：清空动作会写入审计链（不可删除）。若是考试结束后清理，"
+                "建议先用「标记清空」保留可审计性。")
+        ttk.Label(f, text=warn, foreground="#b26a00", justify="left").pack(anchor="w", pady=(6, 0))
+        self.refresh_maintain()
+
+    def _do_purge(self, mode):
+        """执行清空：范围 + 模式 + 原因（硬删需二次确认 + 角色校验）"""
+        if not self.session.can("maintain"):
+            messagebox.showerror("权限不足", "当前角色无权执行数据维护")
+            return
+        if mode == "hard" and self.session.role not in config.HARD_PURGE_ROLES:
+            messagebox.showerror("权限不足", "真删（hard）仅所有者可执行；可改用「标记清空」")
+            return
+        scope = self.purge_scope.get()
+        reason = (self.purge_reason.get() or "").strip()
+        if not reason:
+            messagebox.showwarning("需要原因", "请先填写清空原因（数据维护要能解释为什么删）")
+            return
+        if mode == "hard":
+            if not messagebox.askyesno(
+                    "危险操作",
+                    "将**真删**「%s」的数据，不可恢复。\n\n继续？"
+                    % config.MAINTAIN_TEXT.get(scope, scope)):
+                return
+            code = simpledialog.askstring("二次确认", "请输入 清空 两个字以确认：",
+                                          parent=self.root)
+            if (code or "").strip() != "清空":
+                messagebox.showinfo("已取消", "确认码不正确，未执行。")
+                return
+        ok, note = self._report_sensitive_action(
+            "数据清空-%s" % mode, "范围=%s 原因=%s" % (scope, reason))
+        if not ok:
+            return
+        try:
+            ok2, msg, _detail = self.store.purge_data(scope, mode=mode,
+                                                      operator=self.session.username,
+                                                      reason=reason)
+        except Exception as e:
+            messagebox.showerror("清空失败", str(e))
+            return
+        if not ok2:
+            messagebox.showwarning("未执行", msg)
+            return
+        messagebox.showinfo("完成", msg + (("\n\n上报说明：%s" % note) if note else ""))
+        self.refresh_maintain()
+        self.refresh_all()
+
+    def refresh_maintain(self):
+        """刷新"当前存量"与"清空留痕"""
+        try:
+            rem = self.store.remote_summary()
+            al = len(self.store.list_alerts(limit=5000))
+            rv = len(self.store.list_reviews(limit=5000))
+            pend = len(self.store.pending_unsynced(limit=5000))
+            txt = ("远端记录：%d 条 / %d 台设备（最近接收 %s）\n"
+                   "本机告警：%d 条　复核留痕：%d 条\n"
+                   "待补传（队列）：%d 条\n"
+                   "数据库：%s" % (rem.get("records", 0), rem.get("devices", 0),
+                                  rem.get("last_received") or "—", al, rv, pend,
+                                  config.DB_PATH))
+            self.maintain_info.delete("1.0", "end")
+            self.maintain_info.insert("1.0", txt)
+        except Exception as e:
+            self.maintain_info.delete("1.0", "end")
+            self.maintain_info.insert("1.0", "统计失败：%s" % e)
+        try:
+            for iid in self.purge_tree.get_children():
+                self.purge_tree.delete(iid)
+            for r in self.store.purge_rows(limit=50):
+                self.purge_tree.insert("", "end", values=(
+                    r.get("ts", ""), r.get("scope", ""), r.get("mode", ""),
+                    r.get("deleted", ""), r.get("operator", ""), r.get("reason", "")))
+        except Exception:
+            pass
+
     def _build_ai_panel(self, parent):
         import ai_assistant
 
@@ -2211,6 +2559,171 @@ class TerminalApp(object):
             pass
 
     # ---------- 终端账户管理（所有者） ----------
+    # ================= 跨机账号管理（01/02 的登录账号） =================
+    def _show_cross_accounts(self):
+        """
+        03 作为"账号管理中心"：远程查看/新建/重置口令/删除 01、02 的登录账号。
+
+        四道闸（缺一不可）：
+          1) 本方法先 require("manage") —— 03 侧仅所有者可用；
+          2) 每次写操作调 _report_sensitive_action 留痕（并写本机审计链）；
+          3) 对端 01/02 的 accounts 会再判一次越级（只能管低于自己的角色）；
+          4) 口令只经内存传给对端子进程，03 不落库、不写日志。
+        """
+        try:
+            self.session.require("manage")
+        except access.AccessError as e:
+            messagebox.showerror("权限不足", str(e))
+            return
+        try:
+            import account_bridge as ab
+        except Exception as e:
+            messagebox.showerror("不可用", "跨机账号模块不可用：%s" % e)
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("跨机账号管理（01 / 02 的登录账号）")
+        win.geometry("760x460")
+        win.transient(self.root)
+        win.grid_columnconfigure(0, weight=1)
+        win.grid_rowconfigure(2, weight=1)
+
+        bar = ttk.Frame(win, padding=(12, 10, 12, 4))
+        bar.grid(row=0, column=0, sticky="ew")
+        ttk.Label(bar, text="目标模块：").pack(side="left")
+        tgt = tk.StringVar(value=getattr(self, "cross_target", tk.StringVar(value="01")).get())
+        ttk.Combobox(bar, textvariable=tgt, state="readonly", width=6,
+                     values=("01", "02")).pack(side="left", padx=(0, 8))
+        ttk.Label(bar, text="（01 人脸识别 / 02 摄像头核查 各自的登录账号）",
+                  foreground="#8ba3c7").pack(side="left")
+
+        note = ttk.Label(win, text="", foreground="#8ba3c7", justify="left", padding=(12, 0))
+        note.grid(row=1, column=0, sticky="w")
+
+        cols = ("user", "role", "name")
+        tree = ttk.Treeview(win, columns=cols, show="headings", height=10)
+        for c, t, w in (("user", "用户名", 180), ("role", "角色", 120), ("name", "姓名", 220)):
+            tree.heading(c, text=t)
+            tree.column(c, width=w, anchor="w")
+        tree.grid(row=2, column=0, sticky="nsew", padx=12)
+
+        foot = ttk.Frame(win, padding=12)
+        foot.grid(row=3, column=0, sticky="ew")
+        status = ttk.Label(foot, text="", foreground="#34d399")
+        status.pack(side="left")
+
+        bridge = ab.AccountBridge()
+        state = {"roles": {}}
+
+        def reload():
+            for iid in tree.get_children():
+                tree.delete(iid)
+            key = tgt.get()
+            r = bridge.list_accounts(key)
+            if not r.get("ok"):
+                note.config(text="%s 不可用：%s" % (key, r.get("reason") or ""),
+                            foreground="#f43f5e")
+                return
+            state["roles"] = r.get("roles") or {}
+            note.config(text="目标：%s　｜　账户口令由对端加盐存储，本界面不显示明文；"
+                             "写操作会写本机审计链" % (r.get("target_name") or key),
+                        foreground="#8ba3c7")
+            for a in r.get("accounts") or []:
+                tree.insert("", "end", iid=a.get("username", ""), values=(
+                    a.get("username", ""),
+                    state["roles"].get(a.get("role"), a.get("role", "")),
+                    a.get("display_name") or a.get("name") or ""))
+
+        def sel_user():
+            s = tree.selection()
+            return s[0] if s else ""
+
+        def ask_pwd(title, prompt):
+            return simpledialog.askstring(title, prompt, show="●", parent=win)
+
+        def do_reset():
+            u = sel_user()
+            if not u:
+                messagebox.showinfo("请先选择", "先在列表里选一个账户", parent=win)
+                return
+            pwd = ask_pwd("重置口令", "为「%s」设置新口令（至少 8 位）：" % u)
+            if not pwd:
+                return
+            ok_rep, note_txt = self._report_sensitive_action(
+                "跨机账号重置口令", "目标=%s 账户=%s" % (tgt.get(), u))
+            if not ok_rep:
+                return
+            r = bridge.reset_password(tgt.get(), u, pwd, operator=self.session.role)
+            self._cross_log("重置口令", tgt.get(), u, r, note_txt)
+            status.config(text=("成功：" if r.get("ok") else "失败：") + (r.get("message")
+                          or r.get("reason") or ""),
+                          foreground="#34d399" if r.get("ok") else "#f43f5e")
+            reload()
+
+        def do_delete():
+            u = sel_user()
+            if not u:
+                messagebox.showinfo("请先选择", "先在列表里选一个账户", parent=win)
+                return
+            if not messagebox.askyesno("确认删除",
+                                       "删除 %s 上的账户「%s」？此操作不可恢复。" % (tgt.get(), u),
+                                       parent=win):
+                return
+            ok_rep, note_txt = self._report_sensitive_action(
+                "跨机账号删除", "目标=%s 账户=%s" % (tgt.get(), u))
+            if not ok_rep:
+                return
+            r = bridge.delete(tgt.get(), u, operator=self.session.role)
+            self._cross_log("删除账户", tgt.get(), u, r, note_txt)
+            status.config(text=("成功：" if r.get("ok") else "失败：") + (r.get("message")
+                          or r.get("reason") or ""),
+                          foreground="#34d399" if r.get("ok") else "#f43f5e")
+            reload()
+
+        def do_new():
+            u = simpledialog.askstring("新建账户", "用户名：", parent=win)
+            if not u:
+                return
+            pwd = ask_pwd("新建账户", "口令（至少 8 位）：")
+            if not pwd:
+                return
+            name = simpledialog.askstring("新建账户", "显示名（可留空）：", parent=win) or u
+            roles = list(state["roles"].keys())
+            role = simpledialog.askstring(
+                "新建账户", "角色（%s）：" % " / ".join(roles),
+                initialvalue=(roles[-1] if roles else ""), parent=win)
+            if not role:
+                return
+            ok_rep, note_txt = self._report_sensitive_action(
+                "跨机账号新建", "目标=%s 账户=%s 角色=%s" % (tgt.get(), u, role))
+            if not ok_rep:
+                return
+            r = bridge.create(tgt.get(), u, pwd, role, display_name=name,
+                              operator=self.session.role)
+            self._cross_log("新建账户", tgt.get(), u, r, note_txt)
+            status.config(text=("成功：" if r.get("ok") else "失败：") + (r.get("message")
+                          or r.get("reason") or ""),
+                          foreground="#34d399" if r.get("ok") else "#f43f5e")
+            reload()
+
+        ttk.Button(foot, text="🔄 刷新", command=reload).pack(side="right", padx=(6, 0))
+        ttk.Button(foot, text="➕ 新建", command=do_new).pack(side="right", padx=(6, 0))
+        ttk.Button(foot, text="🔑 重置口令", command=do_reset).pack(side="right", padx=(6, 0))
+        ttk.Button(foot, text="🗑 删除", command=do_delete).pack(side="right")
+        tgt.trace_add("write", lambda *_: reload())
+        reload()
+
+    def _cross_log(self, action, target, user, result, note=""):
+        """把跨机账号操作写进本机审计链（对端也应各自留痕，两边可对账）"""
+        try:
+            detail = ("目标=%s 账户=%s 结果=%s %s%s"
+                      % (target, user, "成功" if result.get("ok") else "失败",
+                         result.get("message") or result.get("reason") or "",
+                         (" | 上报说明：%s" % note) if note else ""))
+            self.store.log("跨机账号-%s" % action, detail, self.session.username)
+        except Exception:
+            pass
+
     def _show_accounts(self):
         try:
             self.session.require("manage")
@@ -2243,6 +2756,15 @@ class TerminalApp(object):
         reload()
         msg = ttk.Label(win, text="", foreground="#0a7d28")
         msg.pack(anchor="w", padx=12, pady=4)
+        # 跨机账号管理：远程查看/新建/重置/删除 01、02 的登录账号
+        cross = ttk.Frame(win)
+        cross.pack(fill="x", padx=12, pady=(0, 6))
+        ttk.Label(cross, text="跨机账号：").pack(side="left")
+        self.cross_target = tk.StringVar(value="01")
+        ttk.Combobox(cross, textvariable=self.cross_target, state="readonly", width=8,
+                     values=("01", "02")).pack(side="left", padx=(0, 6))
+        ttk.Button(cross, text="🌐 管理 01/02 的登录账号",
+                   command=self._show_cross_accounts).pack(side="left")
 
         def sel():
             s = tree.selection()
@@ -2329,37 +2851,55 @@ class TerminalApp(object):
         ttk.Button(bar, text="关闭", command=win.destroy).pack(side="right")
 
     def _wipe_all(self):
-        """所有者：清空本地运行数据（告警/复核/队列/账户）——需二次确认+非所有者上报"""
+        """所有者：清空本地运行数据（告警/复核/队列）——需二次确认 + 非所有者上报。
+
+        历史缺陷（2026-10-15 修）：
+          旧实现是「遍历 data 目录删 .db / .db-wal / .db-shm」——
+          运行中 SQLite 连接持有着这些文件，**必然被占用锁住**
+          （实测报 WinError 32：另一个程序正在使用此文件），
+          而且它先把动作写进了审计、再删文件，于是"没清掉还留了痕"。
+        现在改为调用 storage.purge_data：在事务里清库内数据，
+        **不删数据库文件**，也不销毁终端账户；审计链与留痕保持完整。
+        需要连账户一起重置时，请单独用「终端账户」页删除账户。
+        """
         try:
-            self.session.require("manage")
+            self.session.require("maintain")
         except access.AccessError as e:
             messagebox.showerror("权限不足", str(e))
             return
-        if not messagebox.askyesno("危险操作",
-                                   "将清空本机终端数据（告警记录、复核留痕、补传队列、终端账户）。\n"
-                                   "此操作不可恢复，确定继续？"):
+        if not messagebox.askyesno(
+                "危险操作",
+                "将清空本机终端数据（告警记录、复核留痕、补传队列）。\n"
+                "· 不会删除数据库文件，也不会删除终端账户\n"
+                "· 审计链与本次清空留痕会保留（可追溯）\n"
+                "此操作不可恢复，确定继续？"):
             return
-        code = simpledialog.askstring("二次确认", "请输入 WIPE 以确认执行：", parent=self.root)
-        if code != "WIPE":
+        code = simpledialog.askstring("二次确认", "请输入 清空 两个字以确认：", parent=self.root)
+        if (code or "").strip() != "清空":
             messagebox.showinfo("已取消", "确认码不正确，未执行。")
             return
-        ok_report, note = self._report_sensitive_action("清空本地数据", "WIPE 二次确认通过")
+        ok_report, note = self._report_sensitive_action("清空本地数据", "清空 二次确认通过")
         if not ok_report:
             return
-        self.store.log("清空本地数据", "手动执行" + (" | 上报说明：%s" % note if note else ""),
-                       self.session.username)
-        import os as _os
         try:
-            for f in _os.listdir(str(config.DATA_ROOT)):
-                if f.endswith(".db") or f.endswith(".db-wal") or f.endswith(".db-shm"):
-                    _os.remove(_os.path.join(str(config.DATA_ROOT), f))
-            for d in (config.ATTACH_DIR, config.QUEUE_DIR):
-                shutil.rmtree(str(d), ignore_errors=True)
-        except OSError as e:
+            ok, msg, _d = self.store.purge_data("all", mode="hard",
+                                                operator=self.session.username,
+                                                reason="终端本地数据清空（按钮）")
+        except Exception as e:
             messagebox.showerror("失败", str(e))
             return
-        messagebox.showinfo("已清空", "本地数据已清空，程序将退出，请重新启动。")
-        self.root.destroy()
+        if not ok:
+            messagebox.showwarning("未执行", msg)
+            return
+        try:
+            self.store.vacuum()
+        except Exception:
+            pass
+        messagebox.showinfo("已清空", msg + (("\n\n上报说明：%s" % note) if note else "")
+                            + "\n\n界面将刷新；终端账户未被删除。")
+        self.refresh_all()
+        if self.can_maintain:
+            self.refresh_maintain()
 
     # ================= 逻辑 =================
     def refresh_all(self):

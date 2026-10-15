@@ -39,7 +39,9 @@ class Alert(object):
                  "candidate_id", "candidate_name", "device_id", "source", "created_at",
                  "created_epoch", "status", "acked_by", "acked_at", "review_conclusion",
                  "review_reason", "review_by", "review_at", "attachments", "synced",
-                 "queued_at", "false_positive", "sla_deadline", "extra")
+                 "queued_at", "false_positive", "sla_deadline", "extra",
+                 # 数据维护（清空）标记：见 __init__ 注释
+                 "purged", "purged_at", "purged_by", "purge_reason")
 
     def __init__(self, code, title="", detail="", room_id="", seat_no="",
                  candidate_id="", candidate_name="", device_id="", source="edge",
@@ -70,6 +72,12 @@ class Alert(object):
         self.synced = 0
         self.queued_at = ""
         self.false_positive = 0
+        # 数据维护（清空）标记：mark 模式下数据仍在库，但已"清空"、界面默认不显示，
+        # 保证既能清空又不破坏审计链（谁清的、为什么清都能查）。
+        self.purged = 0
+        self.purged_at = ""
+        self.purged_by = ""
+        self.purge_reason = ""
         self.sla_deadline = self.created_epoch + self.meta()["sla_sec"]
         self.extra = dict(extra or {})
 
@@ -103,6 +111,8 @@ class Alert(object):
             "attachments": json.dumps(self.attachments, ensure_ascii=False),
             "synced": self.synced, "queued_at": self.queued_at,
             "false_positive": self.false_positive,
+            "purged": self.purged, "purged_at": self.purged_at,
+            "purged_by": self.purged_by, "purge_reason": self.purge_reason,
             "sla_deadline": self.sla_deadline,
             "extra": json.dumps(self.extra, ensure_ascii=False),
         }
@@ -118,11 +128,14 @@ class Alert(object):
                 level=d.get("level"), alert_id=d.get("alert_id"),
                 created_at=d.get("created_at"))
         for k in ("status", "acked_by", "acked_at", "review_conclusion", "review_reason",
-                  "review_by", "review_at", "queued_at"):
+                  "review_by", "review_at", "queued_at",
+                  # 数据维护（清空）标记：必须一起读回，否则 mark 模式"写进去了但看不到"
+                  "purged_at", "purged_by", "purge_reason"):
             setattr(a, k, d.get(k) or "")
         a.created_epoch = d.get("created_epoch") or a.created_epoch
         a.synced = int(d.get("synced") or 0)
         a.false_positive = int(d.get("false_positive") or 0)
+        a.purged = int(d.get("purged") or 0)
         a.sla_deadline = d.get("sla_deadline") or a.sla_deadline
         try:
             a.attachments = json.loads(d.get("attachments") or "[]")
