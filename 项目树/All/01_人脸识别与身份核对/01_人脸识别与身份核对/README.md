@@ -50,7 +50,9 @@ python 网页操作面板\server\启动后端.bat      :: 浏览器访问 http:/
 ```
 01_人脸识别与身份核对\
 ├── *.py                 代码（平铺：Python 顶层模块互相导入，移入子目录会破坏导入）
+├── push_oplog.py        局域网联动上报：操作日志 + 核验记录哈希链（见 6) 与 346 行环境变量）
 ├── *.bat                入口脚本（平铺：内部用 %~dp0 相对定位）
+├── 上报到智能终端.bat     一键填 03 终端地址/令牌并上报（局域网联动）
 ├── README.md            本文件
 ├── data\                ★ 运行数据（数据库/特征索引/参考照/抓拍/日志/密钥）
 ├── 网页操作面板\         网页端 + 本地化前端库 + Excel 模板
@@ -316,6 +318,35 @@ set EDGE_UPLOAD_URL=http://<云端>/api/verify-records   :: 或配置一次，�
 | **边（考点服务器/边缘盒子）** | 检测、对齐、提特征、画质与姿态评估、增强、判定、审计哈希链、断网缓存 |
 | 云（省级平台） | 汇总统计、阈值下发、模型版本管理（通过 `flush-outbox` 上报结构化结论） |
 
+### 6) 局域网联动：把操作记录与核验记录上传到 03 智能终端（2026-10-15）
+
+同一局域网里，本机跑 01、另一台设备跑 03 智能终端时，用 `push_oplog.py` 上报：
+
+| 上报什么 | 数据源 | 说明 |
+| --- | --- | --- |
+| `oplog` 界面操作日志 | `data\logs\gui_action.log` | 写入时已脱敏，上报前再用 `pii.sanitize_for_log` 脱一次 |
+| `verify` 核验记录 | `data\audit.log`（哈希链） | 连带**链头哈希与本机自校验结论**一起报；证件类字段（`id_card*`）在上报前剔除 |
+
+```bat
+:: 一键：填终端地址与令牌，会记住到「终端上报配置.bat」
+双击 上报到智能终端.bat
+
+:: 或者手工
+set EXAM_TERMINAL_URL=http://192.168.1.20:9113
+set EXAM_TERMINAL_TOKEN=<在终端的「启动局域网接入服务.bat」里显示>
+python push_oplog.py            :: 补传积压 + 上报新增
+python push_oplog.py --status   :: 看水位线/积压/对端健康
+python push_oplog.py --loop 120 :: 常驻，每 120 秒一次
+python push_oplog.py --alert FACE_MISMATCH --detail "现场核验不符" --room A-01
+```
+
+- 传输、队列、断网补传、幂等由 `00_集成联动\lan_upload.py` 提供（只依赖标准库）；
+  断网时记录进本地队列，**恢复后自动补传**，水位线不前进就绝不会漏传。
+- 水位线存在 `data\lan_push_state.json`；旧操作日志被轮转/清空时水位线会重置并如实记录
+  （旧文件里的记录不再自动上报，仍在本地磁盘上，可用 `--file` 人工补传）。
+- 这是**单向只在局域网内**的上报：接收端令牌鉴权、只开放记录与告警接入。
+  端到端验证见 `00_集成联动\局域网联动自检.bat`（38 项）。
+
 ---
 
 ## 七、阈值标定（上线前必做）
@@ -344,6 +375,9 @@ set EDGE_UPLOAD_URL=http://<云端>/api/verify-records   :: 或配置一次，�
 | `FACE_EP` | auto | 推理后端（`cann`/`tensorrt`/`cuda`/`openvino`/`cpu`） |
 | `EDGE_PROFILE` | full | 起始边缘档位（`full`/`balanced`/`lite`） |
 | `EDGE_UPLOAD_URL` | 空 | 云端接收核验记录的地址 |
+| `EXAM_TERMINAL_URL` | 空 | 局域网里 03 智能终端接入服务地址（`push_oplog.py` 用） |
+| `EXAM_TERMINAL_TOKEN` | 空 | 接入令牌（终端侧 `lan_token.txt` 或 `EXAM_TERMINAL_TOKEN`） |
+| `EXAM_DEVICE_ID` | 计算机名 | 上报时用的本机标识（终端按它区分设备） |
 
 > 1:N 的阈值必须严于 1:1（误识率随底库规模放大）；底库规模超过 1000 人时建议重新标定并考虑阈值随 N 自适应。
 

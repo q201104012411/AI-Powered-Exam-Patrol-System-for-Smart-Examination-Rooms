@@ -1,4 +1,4 @@
-﻿# 智能终端操作端
+# 智能终端操作端
 
 > 实现《[智能终端.md](智能终端.md)》里**终端侧软件**的部分。
 > 本目录是真代码，可运行、有测试；**硬件与选型类要求（国产化整机、国密、三防 PAD、拼接大屏、MDM 服务端）
@@ -62,6 +62,7 @@
 | 与项目三统一身份认证（单点登录） | `bridge.PlatformLink.connectivity()`（预留 `EXAM_AUTH_URL`） | ⚠️ 目前用本机终端账户（`access.py`）；SSO 需认证服务就绪后接入 |
 | 手持核验终端：人脸核验、签到、抽签 | `bridge.FaceBridge`（隔离子进程调用 01） | ✅ 人脸核验已打通；签到/抽签为业务扩展点 |
 | 受控的运维入口（所有者完整 / 管理员仅 AI 辅助） | `console.py` + `bridge.CmdBridge` + `_cmd_bridge.py`（调用 01 的 `cmd_console`） | ✅ 已实现（默认关闭；分层与白名单复用 01，03 端不另立规则） |
+| 跨设备联动（另一台设备上的 01/02 记录上传到本终端） | `lan_service.py`（接入服务）+ `storage` 的 `remote_records`/`remote_devices` + 01/02 的 `push_oplog.py` | ✅ 已实现（默认只监听本机；跨设备需令牌，写入口只开放记录/告警接入）。**端到端 38 项自检在 `00_集成联动\lan_selftest.py`** |
 
 ### 验收要点对照
 
@@ -71,6 +72,7 @@
 | 断网降级与恢复测试 | `python main.py` 第 6 组（离线不丢数据 → 恢复批量补传 → 队列清空 → 审计留痕） |
 | 72 小时稳定性运行记录 | `fleet.soak_tick()` 写 `data/logs/soak.log`；`soak_status()` 算最长连续时长。**记录必须靠真实运行积累，未满即如实标注"未达标"** |
 | 权限矩阵验证（越权不通过） | 230 项单测里的 `TestAccess` / `TestReview` / `TestConsoleSwitch` / `TestCmdBridge`（监考员复核被拒、跨考场上报被拒、无 export 被拒、管理员拿不到 `full`、非所有者调桥接被 01 拒且命令未执行） |
+| 跨设备联动（记录上传到终端） | `python lan_service.py --selfcheck`（18 项）；端到端 38 项在 `00_集成联动\lan_selftest.py`（真起服务 + 真跑 01/02 客户端 + 断网补传 + 幂等 + 令牌鉴权） |
 
 ## 三、目录结构
 
@@ -80,7 +82,7 @@
 ├── 运行自检与测试.bat        一键体检（测试 + 自检）
 ├── config.py                路径/终端类型/分级/角色/阈值
 ├── models.py                Alert / ReviewRecord / 哈希链
-├── storage.py               SQLite（告警/复核/审计链/指令/键值）
+├── storage.py               SQLite（告警/复核/审计链/指令/键值 + 局域网远端记录两张表）
 ├── access.py                终端账户 + 角色动作矩阵 + 考场过滤 + 脱敏
 ├── alerts.py                告警接入、分级兜底、去重、确认、展示排序
 ├── review.py                复核留痕、附件留档、误报闭环、一键上报
@@ -88,14 +90,71 @@
 ├── fleet.py                 统一管控 + 稳定性取证
 ├── clock.py                 标准时间、偏差告警、指令播报
 ├── bridge.py                平台/边缘/认证 HTTP + 人脸核验桥接 + 命令控制台桥接
+├── lan_service.py           局域网接入服务（接收 01/02 的记录与告警；默认只监听本机）
+├── 启动局域网接入服务.bat    一键开启接收（跨设备时监听 0.0.0.0，并显示令牌）
 ├── _face_bridge.py          在隔离子进程里调用 01 人脸核验
 ├── _cmd_bridge.py           在隔离子进程里调用 01 命令控制台（原样传 role，不自行放行）
 ├── console.py               命令控制台开关（默认关闭）与权限层级（唯一判定入口）
 ├── terminal_gui.py          桌面界面（4 个页签，含命令控制台窗口）
 ├── main.py                  端到端自检（74 项）
-├── tests\                   单元测试（230 项；含 test_person_detect 68 项 + test_vlm_detect 38 项）
+├── tests\                   单元测试（含 test_lan_service 18 项；另含 test_person_detect 68 项 + test_vlm_detect 38 项）
 └── 文档\程序结构.txt
 ```
+
+## 三之二、局域网联动（03 作为接收端 · 2026-10-15 新增）
+
+**另一台设备上的操作记录能不能上传到本终端？** 能。设备 A 跑 01/02，设备 B 跑 03，
+同一局域网时：
+
+```
+设备 A（01 人脸识别 / 02 摄像头核查）                     设备 B（03 智能终端）
+  push_oplog.py  ──操作日志 + 核验记录哈希链──┐
+  push_oplog.py  ──审计 + 核查结论 + 工单────┤ POST http://<B的IP>:9113/api/records
+  push_oplog.py --alert 或 联动层 raise_alert ┼ POST http://<B的IP>:9113/api/ingest_alert
+                                             └→ lan_service.py ──→ terminal.db
+                                                                    ├ remote_records（分链存放）
+                                                                    ├ remote_devices（设备台账+链头）
+                                                                    └ audit（只写一条接入回执）
+```
+
+| 你在这台设备上做 | 命令 / 入口 |
+| --- | --- |
+| 开启接收（默认只监听本机） | 双击 `启动局域网接入服务.bat`；跨设备时监听地址填 `0.0.0.0` |
+| 查看/生成接入令牌 | `python lan_service.py --print-token`（或设 `EXAM_TERMINAL_TOKEN`） |
+| 自检接收端 | `python lan_service.py --selfcheck`（临时数据目录 + 临时端口） |
+| 端到端自检（00 里） | 双击 `00_集成联动\局域网联动自检.bat`（真起服务、真跑 01/02 客户端，38 项） |
+
+对端（01/02）做的事：双击各自目录下的 `上报到智能终端.bat`，填终端地址与令牌即可
+（会记住到 `终端上报配置.bat`）；也可 `python push_oplog.py --loop 120` 常驻上报。
+
+**三条安全约定（都写在代码里，不是口头承诺）**
+
+1. 默认只监听 `127.0.0.1`；跨设备必须显式 `EXAM_TERMINAL_LAN_HOST=0.0.0.0` 或 `--host 0.0.0.0`。
+2. 非本机来源**必须有令牌**（`X-Exam-Token`，`hmac.compare_digest` 按字节比较）；
+   要监听非本机又拿不到令牌时，服务**拒绝启动**（fail-closed），不裸奔。
+3. 写入口只开放**记录接入**与**告警接入**；`review_alert` / 远程擦除 / 命令控制台
+   **一律不经此端口**（`RemoteTerminal.ROUTES` 里根本没有这些 op）。被拒的访问会写审计链。
+
+**远端记录与本机审计链是分开的（重要）**：`audit` 是本机 `sha256(prev+规范化JSON)` 哈希链，
+把别人的记录并进去会立刻校验失败。所以远端记录进 `remote_records` 表（按 `device_id`
+分组，落库前逐字段加密），本机链上只写一条回执"收到 X 设备 N 条"。
+对端声明的链头哈希存进 `remote_devices`，链头变化会如实留痕 —— 但终端**不能**替对端
+校验完整链（只有增量记录，没有全链），所以它报告的是"对端自校验结果"，不是终端验证结论。
+
+### 对外接口（接入服务，供 01/02 与 00 联动层使用）
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET | `/health` | 健康与计数（本机免令牌；跨设备需令牌） |
+| GET | `/api/status` | 终端状态（告警数/复核数/链校验/远端记录数） |
+| GET | `/api/alerts?limit=&room_id=&level=&status=` | 告警列表（只读） |
+| GET | `/api/records?device_id=&kind=&limit=` | 远端记录与设备台账（只读） |
+| POST | `/api/records` | 批量上报操作记录/核验结论（幂等，按内容去重） |
+| POST | `/api/ingest_alert` | 上报业务告警（复用 03 的分级、画质降权、去重、强制确认） |
+
+`POST /api/records` 请求体：
+`{"device_id","device_name","kind","chain":{"algo","head","count","verified"},"records":[...]}`
+`kind` 取 `audit`/`oplog`/`check`/`order`/`verify`/`alert`；单批上限 500 条，超出返回 400。
 
 ## 四、对外接口约定（平台侧需实现）
 
@@ -111,6 +170,10 @@
 `EXAM_AUTH_URL`、`EXAM_FACE_MODULE_DIR`、`EXAM_CMD_CONSOLE_DIR`（01 的命令控制台目录，
 默认与 `EXAM_FACE_MODULE_DIR` 相同）。
 
+局域网接入服务另加：`EXAM_TERMINAL_LAN_HOST`（默认 `127.0.0.1`）、`EXAM_TERMINAL_LAN_PORT`
+（默认 `9113`）、`EXAM_TERMINAL_TOKEN`（接入令牌；未设置时用 `data\lan_token.txt`）、
+`EXAM_TERMINAL_LAN_REMOTE_LIMIT`（远端记录保留上限，默认 20000）、`EXAM_DEVICE_ID`（本机标识）。
+
 ## 五、范围说明（**未做**的部分，避免误解）
 
 1. **硬件整机**：国产化 OS（麒麟/统信）、信创整机、三防 PAD、拼接大屏、电子时钟终端 —— 采购事项。
@@ -125,6 +188,12 @@
    因此**不做（也做不到）命令白名单**——真正的防线是"谁能登录所有者 + 总开关是否打开"。
    所有者口令强度直接等于本机安全性，部署前必须改掉默认口令。管理员那一级有白名单
    （`ollama run`），但那是"能不能下放"的问题，不是"整机是否安全"的问题。
+9. **局域网联动只做"接入 + 鉴权"，不做传输加密与设备准入**：接入服务是 HTTP **明文**
+   （令牌也只是明文比对），只在**可信考场内网**里用；要跨不可信网络，
+   请置于反向代理 + HTTPS 之后，或改用项目三的统一身份认证/国密改造（见第 2、4 条）。
+   设备准入、802.1X、终端指纹这些仍属部署层面的能力，代码里没有。
+   另外，远端设备上报的记录由**对端负责脱敏**（01 已用 `pii.sanitize_for_log`，
+   02/03 的详情本身不含证件号）；终端侧落库时还会再逐字段加密一次。
 
 ## 六、作弊行为模式识别（结合 cheatdetect · 2026-10-14）
 

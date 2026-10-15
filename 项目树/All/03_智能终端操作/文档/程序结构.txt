@@ -36,6 +36,24 @@
   _face_bridge.py  子进程侧：把 01 目录放进 sys.path，调用其 verifier，
                以最后一行 JSON 回传；异常一律 ok=false 不伪装成功
 
+  lan_service.py 【局域网接入服务，2026-10-15 新增】
+               让**另一台设备**（跑 01/02）把操作记录 / 核验结论 / 核查结论 /
+               整改工单 / 业务告警送到本终端。默认只监听 127.0.0.1；
+               非本机来源必须带令牌(X-Exam-Token，按字节 hmac 比较)；
+               要监听非本机又拿不到令牌 -> 拒绝启动(fail-closed)。
+               路由：GET /health /api/status /api/alerts /api/records；
+                     POST /api/records(批量记录，按内容幂等去重)、
+                     POST /api/ingest_alert(复用本目录 integration_api 的
+                     ingest_alert，分级/画质降权/强制确认与本机告警同一套)。
+               **写入口只这两个**：复核、远程擦除、命令控制台不经此端口。
+               远端记录进 storage 的 remote_records（分链，见下），
+               本机 audit 链只写一条"收到 X 设备 N 条"回执。
+               storage.py 新增 remote_records / remote_devices 两表与
+               save_remote_batch / list_remote_records / remote_devices /
+               remote_summary / prune_remote（详情落库前逐字段加密）。
+               启动：启动局域网接入服务.bat；自检：python lan_service.py --selfcheck
+               （临时数据目录 + 临时端口，18 项）
+
   console.py   命令控制台开关与层级（默认**全部关闭**，标记文件语义）：
                console_enabled/set_console(总开关 data\cmd_console.on)、
                console_admin_allowed/set_console_admin(管理员授权

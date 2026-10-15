@@ -151,6 +151,38 @@ adj, factor, why = runner.adjust_alert_score("CAM-A01-2", 0.9)
 
 有 fail 级缺陷 ×0.5、仅 warn ×0.8、正常 ×1.0，下限 0.3（避免完全失效）。
 
+### 6.1 局域网联动：把记录上传到 03 智能终端（2026-10-15 新增）
+
+本机跑 02、另一台设备跑 03 智能终端且在同一局域网时，`push_oplog.py` 把三样东西送上去：
+
+| 上报什么 | 数据源 | 说明 |
+| --- | --- | --- |
+| `audit` 审计留痕 | `audit` 表（哈希链，按 `seq`） | 连带**链头哈希与自校验结论**；巡检/台账/工单动作全在内 |
+| `check` 机位核查结论 | `checks` 表 | 画质缺陷码、在线与否、操作人；终端可按机位/考场查 |
+| `order` 整改工单 | `workorders` 表 | 发现→派单→整改→复核的闭环进度 |
+
+```bat
+:: 一键：填终端地址与令牌，会记住到「终端上报配置.bat」
+双击 上报到智能终端.bat
+
+:: 或者手工
+set EXAM_TERMINAL_URL=http://192.168.1.20:9113
+set EXAM_TERMINAL_TOKEN=<在终端的「启动局域网接入服务.bat」里显示>
+python push_oplog.py                 :: 补传积压 + 上报新增
+python push_oplog.py --status        :: 水位线/积压/本机链校验/对端健康
+python push_oplog.py --loop 120      :: 常驻（巡检场景建议）
+python push_oplog.py --alert VIDEO_BLUR --detail "CAM-A01-1 画面模糊" --credibility 0.5
+```
+
+- **只读原则**：上报客户端用 `sqlite3 ... ?mode=ro` **只读**打开本库，并自己复刻链校验
+  （复用 `models.chain_hash`），不 new `storage.Store()` —— 因为 `Store()` 会执行
+  `PRAGMA journal_mode=WAL`，那对数据库是持久改动。上报不该改动被上报系统的数据。
+- 水位线用单调的 `seq`/`rowid`（不是行数），删过行也不会错位；上报失败水位线不前进，
+  数据进本地队列，网络恢复自动补传（传输逻辑在 `00_集成联动\lan_upload.py`）。
+- `--credibility` 让"低画质机位的红色告警自动降级为橙色"这条规则**跨设备依然生效**
+  （判定在终端侧用 03 自己的规则做，02 只是把系数带过去）。
+- 端到端验证：`00_集成联动\局域网联动自检.bat`（38 项，含真实 02 客户端上报）。
+
 ## 七、关键指标（第五节）
 
 `report.kpi_report()` / `PatrolRunner.kpi()` 逐项给出**实测值、要求、结论**：
@@ -171,6 +203,8 @@ adj, factor, why = runner.adjust_alert_score("CAM-A01-2", 0.9)
 02_摄像头核查与视频质量诊断\
 ├── 启动核查界面.bat / 启动核查网页版.bat / 停止核查网页版.bat
 ├── 切换命令行窗口.bat（隐藏↔显示黑窗口）/ 运行自检与测试.bat
+├── 上报到智能终端.bat  把审计/核查结论/工单上报到 03 智能终端（局域网联动，见 6.1 节）
+├── push_oplog.py   局域网联动的上报客户端：只读打开本库，带水位线与断网补传
 ├── config.py      路径、缺陷目录、质量/基准/录像/音频阈值、三级巡检、KPI、
 │                  隐藏命令行窗口标记(HIDE_CMD_FLAG)、ensure_stdio(pythonw 兜底)
 ├── web_accounts.py 账户与权限（桌面端与网页端共用）：口令哈希、权限矩阵 CAN、

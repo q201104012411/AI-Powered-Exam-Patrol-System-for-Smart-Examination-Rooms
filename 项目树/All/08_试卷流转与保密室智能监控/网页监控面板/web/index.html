@@ -1,0 +1,1142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>试卷流转与保密室智能监控 · 网页面板</title>
+<style>
+:root{
+  --bg:#f4f6f9; --panel:#ffffff; --line:#dfe4ec; --ink:#1f2633; --sub:#5c6779;
+  --brand:#1f4e8c; --brand2:#2f6fc4; --red:#c00000; --orange:#d98a00;
+  --ok:#1b7f1b; --warn:#b26a00; --shadow:0 1px 3px rgba(20,30,50,.08);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:14px/1.55 "Microsoft YaHei","PingFang SC",system-ui,sans-serif}
+button,input,select,textarea{font:inherit}
+.hide{display:none!important}
+
+/* 登录 */
+#login{max-width:380px;margin:9vh auto;background:var(--panel);border:1px solid var(--line);
+  border-radius:10px;padding:28px 26px;box-shadow:var(--shadow)}
+#login h1{font-size:19px;margin:0 0 4px}
+#login .sub{color:var(--sub);font-size:12px;margin-bottom:18px}
+#login label{display:block;font-size:12px;color:var(--sub);margin:10px 0 4px}
+#login input{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:6px}
+#login .tip{font-size:11px;color:#8b95a5;margin-top:14px;line-height:1.7}
+.err{color:var(--red);font-size:12px;min-height:18px;margin-top:6px}
+
+/* 布局 */
+header{background:var(--brand);color:#fff;padding:10px 18px;display:flex;
+  align-items:center;gap:14px;flex-wrap:wrap}
+header h1{font-size:16px;margin:0;font-weight:600}
+header .me{font-size:12px;opacity:.9}
+header .grow{flex:1}
+.badge{background:var(--red);color:#fff;border-radius:11px;padding:2px 10px;
+  font-size:12px;font-weight:600}
+.badge.zero{background:rgba(255,255,255,.2)}
+nav{background:var(--panel);border-bottom:1px solid var(--line);padding:0 12px;
+  display:flex;gap:4px;flex-wrap:wrap;position:sticky;top:0;z-index:20}
+nav button{background:none;border:none;padding:11px 14px;cursor:pointer;
+  border-bottom:2px solid transparent;color:var(--sub);font-size:13px}
+nav button.on{color:var(--brand);border-bottom-color:var(--brand);font-weight:600}
+main{padding:14px;max-width:1560px;margin:0 auto}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:9px;
+  padding:14px;margin-bottom:14px;box-shadow:var(--shadow)}
+.panel h2{font-size:14px;margin:0 0 10px;display:flex;align-items:center;gap:8px}
+.panel h2 .n{background:var(--brand);color:#fff;border-radius:4px;font-size:11px;
+  padding:1px 6px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+@media(max-width:1100px){.grid2,.grid3{grid-template-columns:1fr}}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+.row label{font-size:12px;color:var(--sub)}
+input,select,textarea{padding:6px 9px;border:1px solid var(--line);border-radius:6px;
+  background:#fff;color:var(--ink)}
+input[type=number]{width:90px}
+button.b{background:var(--brand);color:#fff;border:none;padding:7px 13px;border-radius:6px;
+  cursor:pointer;font-size:13px}
+button.b:hover{background:var(--brand2)}
+button.b.gray{background:#7b8798}
+button.b.red{background:var(--red)}
+button.b.ok{background:var(--ok)}
+button.b:disabled{opacity:.45;cursor:not-allowed}
+
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;
+  vertical-align:top}
+th{background:#f7f9fc;color:var(--sub);font-weight:600;white-space:nowrap}
+tr:hover td{background:#fbfcfe}
+td.mono,.mono{font-family:Consolas,"Courier New",monospace;font-size:12px}
+.tag{display:inline-block;padding:1px 7px;border-radius:9px;font-size:11px;
+  border:1px solid transparent}
+.tag.ok{background:#e8f5e9;color:var(--ok);border-color:#bfe3c0}
+.tag.bad{background:#ffe9e9;color:var(--red);border-color:#f3c2c2}
+.tag.na{background:#f1f3f6;color:var(--sub);border-color:#dde2ea}
+.tag.red{background:#ffe9e9;color:var(--red);border-color:#f3c2c2}
+.tag.orange{background:#fff5e0;color:var(--warn);border-color:#f0dcb0}
+.tag.live{background:#e7f4ff;color:var(--brand);border-color:#bcdcf7}
+
+/* 画面网格 */
+.cams{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:12px}
+.cam{border:1px solid var(--line);border-radius:8px;overflow:hidden;background:#0f1317}
+.cam .head{background:#1b2027;color:#cfe6ff;font-size:12px;padding:6px 9px;
+  display:flex;justify-content:space-between;align-items:center;gap:6px}
+.cam .head .st{font-size:11px;color:#9fb3c8}
+.cam .view{background:#0b0e12;min-height:186px;display:flex;align-items:center;
+  justify-content:center;color:#7d8party;position:relative}
+.cam .view img{display:block;width:100%;height:auto}
+.cam .view .ph{color:#7d8798;font-size:12px;padding:26px 10px;text-align:center}
+.cam .foot{background:#1b2027;padding:6px 9px;display:flex;gap:6px;flex-wrap:wrap}
+.cam .foot button{background:#2b3542;color:#dbe7f5;border:1px solid #3a4756;
+  border-radius:5px;padding:4px 9px;font-size:11.5px;cursor:pointer}
+.cam .foot button:hover{background:#374557}
+.kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:12.5px}
+.kv b{color:var(--sub);font-weight:500}
+pre{background:#0f1317;color:#d5e2f0;padding:12px;border-radius:7px;overflow:auto;
+  font-family:Consolas,"Courier New",monospace;font-size:12px;max-height:520px;
+  white-space:pre;line-height:1.5}
+.stat{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+.card{background:#f8fafd;border:1px solid var(--line);border-radius:8px;padding:11px 13px}
+.card .t{font-size:11.5px;color:var(--sub)}
+.card .v{font-size:20px;font-weight:700;margin-top:3px}
+.card .v.small{font-size:15px}
+.card.red .v{color:var(--red)} .card.ok .v{color:var(--ok)}
+ul.plain{margin:6px 0 0 18px;padding:0;font-size:12.5px;color:var(--sub)}
+ul.plain li{margin:3px 0}
+code{background:#eef2f8;border-radius:4px;padding:1px 5px;font-size:12px}
+.hint{font-size:11.5px;color:#8b95a5}
+.toast{position:fixed;right:18px;bottom:18px;background:#1b2027;color:#fff;
+  padding:10px 16px;border-radius:7px;font-size:13px;z-index:99;opacity:0;
+  transition:opacity .2s;pointer-events:none;max-width:420px}
+.toast.on{opacity:1}
+.split{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:900px){.split{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<div id="login">
+  <h1>试卷流转与保密室智能监控</h1>
+  <div class="sub">专题 08 · 智能化装备与考生数据保护</div>
+  <label>用户名</label>
+  <input id="u" value="owner" autocomplete="username">
+  <label>口令</label>
+  <input id="p" type="password" autocomplete="current-password">
+  <div class="err" id="lerr"></div>
+  <button class="b" style="width:100%;margin-top:8px" id="go">登 录</button>
+  <div class="tip">
+    默认账户：owner / EDY_POWERQ（所有者）<br>
+    teacher1 / teacher1（管理员）——登录后请尽快改口令
+  </div>
+</div>
+
+<div id="app" class="hide">
+  <header>
+    <h1>试卷流转与保密室智能监控</h1>
+    <span class="me" id="me"></span>
+    <span class="grow"></span>
+    <span class="badge zero" id="redbadge">未处置红色告警 0</span>
+    <button class="b gray" onclick="logout()">退出</button>
+  </header>
+
+  <nav>
+    <button data-tab="live" class="on">实时画面</button>
+    <button data-tab="vault">保密室监控</button>
+    <button data-tab="flow">试卷流转</button>
+    <button data-tab="alarm">告警中心</button>
+    <button data-tab="kpi">关键指标</button>
+    <button data-tab="sys">系统设置</button>
+  </nav>
+
+  <main>
+    <!-- ============ 实时画面 ============ -->
+    <section id="t-live">
+      <div class="panel">
+        <h2><span class="n">▶</span>连接摄像头 / 实时画面</h2>
+        <div class="row">
+          <label>来源</label>
+          <select id="srcKind">
+            <option value="local">本机摄像头</option>
+            <option value="url">RTSP/HTTP 地址</option>
+            <option value="file">本地视频文件（服务端路径）</option>
+          </select>
+          <input id="srcVal" placeholder="0 或 rtsp://user:pwd@ip:554/stream1" style="width:330px">
+          <button class="b" onclick="probeLocal()">探测本机摄像头</button>
+          <label style="margin-left:8px">机位ID</label>
+          <input id="camId" value="LIVE1" style="width:110px">
+          <button class="b" onclick="playAdhoc()">▶ 播放</button>
+          <button class="b gray" onclick="stopAdhoc()">■ 停止</button>
+        </div>
+        <div class="row">
+          <label>保密室</label>
+          <input id="adhocRoom" placeholder="如 SAFE-A" style="width:120px">
+          <label>朝向</label>
+          <select id="adhocFace"></select>
+          <button class="b" onclick="registerAdhoc()">＋ 登记为常设机位</button>
+          <span class="hint">登记后即可参与「六面覆盖核查」与「双路冗余」统计</span>
+        </div>
+        <div class="hint" id="liveHint">
+          浏览器里看的是服务端 MJPEG 流：不用装插件，
+          地址形如 <code>/api/stream/&lt;机位ID&gt;</code>。
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2><span class="n">▦</span>画面网格（点「开始」逐路取流）</h2>
+        <div class="row">
+          <button class="b ok" onclick="startAll()">▶ 全部开始取流</button>
+          <button class="b gray" onclick="stopAll()">■ 全部停止</button>
+          <button class="b gray" onclick="loadCameras()">⟳ 刷新机位</button>
+          <label>保密室</label>
+          <select id="roomFilter" onchange="loadCameras()"></select>
+        </div>
+        <div class="cams" id="camGrid"></div>
+      </div>
+    </section>
+
+    <!-- ============ 保密室监控 ============ -->
+    <section id="t-vault" class="hide">
+      <div class="panel">
+        <h2><span class="n">1</span>无死角视频 —— 六面覆盖核查</h2>
+        <div class="row">
+          <label>保密室</label>
+          <select id="vRoom" onchange="loadVault()"></select>
+          <button class="b gray" onclick="loadVault()">⟳ 刷新</button>
+        </div>
+        <div class="stat" id="vStats"></div>
+        <div id="vCover"></div>
+      </div>
+
+      <div class="split">
+        <div class="panel">
+          <h2><span class="n">2</span>七项能力体检</h2>
+          <div id="vCheck"></div>
+        </div>
+        <div class="panel">
+          <h2><span class="n">3</span>录像连续性与留存</h2>
+          <div class="row">
+            <button class="b gray" onclick="simSegments()">生成 7 天录像段</button>
+            <button class="b red" onclick="makeGap()">制造丢段</button>
+            <button class="b gray" onclick="loadRecords()">⟳ 刷新</button>
+          </div>
+          <div id="vRecords"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2><span class="n">4</span>事件注入与联调（真实部署接门禁 / 传感器 / 电子锁）</h2>
+        <div class="row">
+          <button class="b" onclick="simAccess(1)">① 双因子开门（正确）</button>
+          <button class="b" onclick="simAccess(0)">② 双因子开门（缺因子）</button>
+          <button class="b red" onclick="simAbnormalDoor()">③ 未授权开门</button>
+          <button class="b red" onclick="simIntrusion('ir_dual')">④ 红外双鉴</button>
+          <button class="b red" onclick="simIntrusion('door_mag')">⑤ 门窗磁</button>
+          <button class="b red" onclick="simIntrusion('vibration')">⑥ 震动</button>
+        </div>
+        <div class="row">
+          <button class="b red" onclick="simSafe(0)">⑦ 未授权开柜</button>
+          <button class="b" onclick="simSafe(1)">⑧ 授权开柜</button>
+          <button class="b" onclick="simEnv()">⑨ 环境异常（水浸+湿度）</button>
+          <button class="b" onclick="simPatrol()">⑩ 机器人巡查一轮</button>
+          <button class="b" onclick="toggleArmed()" id="armedBtn">🛡 布防 / 撤防</button>
+        </div>
+        <div class="row">
+          <label>环境读数</label>
+          温度 <input id="envT" type="number" value="26" step="0.5"> ℃
+          湿度 <input id="envH" type="number" value="45" step="1"> %
+          <label><input type="checkbox" id="envW"> 水浸</label>
+          <label><input type="checkbox" id="envS"> 烟感</label>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2><span class="n">5</span>事件流水（门禁 / 入侵 / 试卷柜 / 环境）</h2>
+        <div id="vEvents"></div>
+      </div>
+    </section>
+
+    <!-- ============ 试卷流转 ============ -->
+    <section id="t-flow" class="hide">
+      <div class="panel">
+        <h2><span class="n">1</span>试卷袋登记</h2>
+        <div class="row">
+          <input id="bId" placeholder="试卷袋编号（RFID）" style="width:190px">
+          <input id="bSub" placeholder="科目" style="width:110px">
+          <input id="bQty" type="number" value="30" style="width:80px">
+          <button class="b" onclick="addBag()">＋ 登记试卷袋</button>
+        </div>
+        <div id="bagTable"></div>
+      </div>
+
+      <div class="split">
+        <div class="panel">
+          <h2><span class="n">2</span>领取 / 交接（双人签字 + 人脸确认 + 扫码/RFID）</h2>
+          <div class="row">
+            <select id="hBag"></select>
+            <select id="hMethod"><option value="scan">扫码</option><option value="rfid">RFID</option></select>
+          </div>
+          <div class="row">
+            <input id="hFrom" placeholder="交出人" value="保密室" style="width:110px">
+            <input id="hTo" placeholder="接收人" value="王五" style="width:110px">
+          </div>
+          <div class="row">
+            <label>参与人（逗号分隔）</label>
+            <input id="hPersons" value="保密室,王五" style="width:180px">
+          </div>
+          <div class="row">
+            <label>已签字</label><input id="hSign" value="保密室,王五" style="width:150px">
+            <label>已人脸</label><input id="hFace" value="保密室,王五" style="width:150px">
+          </div>
+          <div class="hint">把「已人脸」删掉一个人试试 —— 系统应当报 <code>HANDOVER_FACE_MISS</code>（红）</div>
+          <div class="row" style="margin-top:8px"><button class="b" onclick="doHandover()">提交交接</button></div>
+
+          <h2 style="margin-top:16px"><span class="n">3</span>电子铅封</h2>
+          <div class="row">
+            <input id="sBag" placeholder="试卷袋" style="width:140px">
+            <input id="sSeal" placeholder="封签编号" value="SEAL-0001" style="width:140px">
+            <button class="b" onclick="doSeal()">正常封签</button>
+            <button class="b red" onclick="breakSeal()">上报异常开启</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2><span class="n">4</span>分发至考场 / 回收与封存</h2>
+          <div class="row">
+            <select id="dBag"></select>
+            <input id="dRoom" placeholder="考场" value="R001" style="width:100px">
+            <input id="dQty" type="number" value="30" style="width:80px">
+            <button class="b" onclick="doDeliver()">分发</button>
+          </div>
+          <div class="row">
+            <select id="rBag"></select>
+            <input id="rIssued" type="number" value="30" style="width:80px">
+            <input id="rGot" type="number" value="30" style="width:80px">
+            <label><input type="checkbox" id="rSeal" checked> 同时电子封存</label>
+            <button class="b" onclick="doRecycle()">回收核验</button>
+          </div>
+          <div class="hint">把实测份数改小（如 28）→ 应报 <code>RECYCLE_COUNT_MISMATCH</code>（红）</div>
+          <div id="flowStage" style="margin-top:12px"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2><span class="n">5</span>押运（北斗/GPS 定位 + 车内视频 + 路线偏离 ≤30 秒）</h2>
+        <div class="row">
+          <input id="ePlate" value="京A·12345" style="width:120px">
+          <input id="eDriver" value="赵六" style="width:100px">
+          <input id="ePersons" value="赵六,钱七" style="width:140px">
+          <input id="eBags" placeholder="试卷袋(逗号)" style="width:150px">
+          <input id="eVideo" value="rtsp://car-cam/stream1" style="width:200px">
+          <button class="b" onclick="escortStart()">创建押运任务</button>
+        </div>
+        <div class="row">
+          <label>规划路线（每行 lat,lng）</label>
+          <textarea id="eRoute" rows="4" style="width:290px;font-family:Consolas,monospace">39.9042,116.4074
+39.9100,116.4200
+39.9200,116.4400</textarea>
+          <label>轨迹点（每行 lat,lng,speed）</label>
+          <textarea id="ePts" rows="4" style="width:290px;font-family:Consolas,monospace">39.9045,116.4078,40
+39.9102,116.4205,45
+39.9300,116.5100,50</textarea>
+        </div>
+        <div id="escortTable"></div>
+      </div>
+
+      <div class="panel">
+        <h2><span class="n">6</span>全链条追溯（人 / 时 / 物 / 地点）</h2>
+        <div class="row"><select id="traceBag"></select>
+          <button class="b" onclick="loadTrace()">查看追溯</button></div>
+        <div id="traceBox"></div>
+      </div>
+    </section>
+
+    <!-- ============ 告警中心 ============ -->
+    <section id="t-alarm" class="hide">
+      <div class="panel">
+        <h2><span class="n">⚠</span>告警台账</h2>
+        <div class="row">
+          <select id="aFilter" onchange="loadAlarms()">
+            <option value="">全部</option>
+            <option value="pending">待处置</option>
+            <option value="acked">已确认</option>
+            <option value="handled">已处置</option>
+          </select>
+          <select id="aLevel" onchange="loadAlarms()">
+            <option value="">全部级别</option>
+            <option value="red">红色</option>
+            <option value="orange">橙色</option>
+          </select>
+          <button class="b gray" onclick="loadAlarms()">⟳ 刷新</button>
+          <button class="b ok" onclick="ackAllRed()">✔✔ 确认全部红色</button>
+        </div>
+        <div id="alarmTable"></div>
+      </div>
+    </section>
+
+    <!-- ============ 关键指标 ============ -->
+    <section id="t-kpi" class="hide">
+      <div class="panel">
+        <h2><span class="n">◎</span>关键指标（文档第三节）</h2>
+        <div class="row">
+          <label>保密室</label><select id="kRoom" onchange="loadKpi()"></select>
+          <button class="b gray" onclick="loadKpi()">⟳ 重新核算</button>
+          <button class="b" onclick="exportReport()">📄 生成验收报告</button>
+          <button class="b gray" onclick="loadAudit()">🔐 校验审计链</button>
+        </div>
+        <div id="kpiTable"></div>
+      </div>
+      <div class="panel">
+        <h2><span class="n">▤</span>验收报告预览</h2>
+        <pre id="reportBox">—</pre>
+      </div>
+      <div class="panel hide" id="auditPanel">
+        <h2><span class="n">🔐</span>审计哈希链</h2>
+        <div id="auditBox"></div>
+      </div>
+    </section>
+
+    <!-- ============ 系统设置 ============ -->
+    <section id="t-sys" class="hide">
+      <div class="grid2">
+        <div class="panel">
+          <h2><span class="n">⚙</span>运行与合规</h2>
+          <div class="kv" id="sysInfo"></div>
+        </div>
+        <div class="panel">
+          <h2><span class="n">👤</span>我的账户</h2>
+          <div class="row">
+            <input id="cpOld" type="password" placeholder="当前口令" style="width:150px">
+            <input id="cpNew" type="password" placeholder="新口令" style="width:150px">
+            <button class="b" onclick="changePwd()">修改口令</button>
+          </div>
+          <ul class="plain" id="permList"></ul>
+        </div>
+      </div>
+      <div class="panel" id="accPanel">
+        <h2><span class="n">👥</span>账户管理（仅所有者）</h2>
+        <div class="row">
+          <input id="aUser" placeholder="用户名" style="width:140px">
+          <input id="aPwd" type="password" placeholder="初始口令" style="width:140px">
+          <select id="aRole"></select>
+          <button class="b" onclick="createAccount()">＋ 新建账户</button>
+        </div>
+        <div id="accTable"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ================= 基础 ================= */
+let TOKEN = localStorage.getItem("sec_token") || "";
+let ME = null;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function toast(msg, ms) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("on");
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("on"), ms || 2600);
+}
+function can(act) { return ME && ME.actions && ME.actions.indexOf(act) >= 0; }
+function deny(act) {
+  toast("权限不足：当前角色（" + (ME ? ME.role_text : "?") + "）不能执行 " + act + "（服务端会返回 403）");
+}
+
+async function api(path, opts) {
+  opts = opts || {};
+  const h = Object.assign({"Content-Type": "application/json"}, opts.headers || {});
+  if (TOKEN) h["X-Token"] = TOKEN;
+  const r = await fetch(path, Object.assign({}, opts, {headers: h}));
+  let j = null;
+  try { j = await r.json(); } catch (e) { j = {ok: false, error: "响应不可解析"}; }
+  if (r.status === 401) { logout(true); throw new Error("登录已失效，请重新登录"); }
+  if (r.status === 403) { toast("权限不足（403）：" + (j.error || "")); }
+  return {status: r.status, body: j};
+}
+const POST = (p, d) => api(p, {method: "POST", body: JSON.stringify(d || {})});
+const DEL = (p) => api(p, {method: "DELETE"});
+
+/* ================= 登录 ================= */
+async function login() {
+  $("lerr").textContent = "";
+  const r = await fetch("/api/login", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({username: $("u").value.trim(), password: $("p").value})
+  });
+  const j = await r.json().catch(() => ({ok: false, error: "响应不可解析"}));
+  if (!j.ok) { $("lerr").textContent = "登录失败：" + (j.error || ""); return; }
+  TOKEN = j.token; localStorage.setItem("sec_token", TOKEN);
+  boot(j);
+}
+async function logout(silent) {
+  try { await POST("/api/logout"); } catch (e) {}
+  TOKEN = ""; localStorage.removeItem("sec_token");
+  $("app").classList.add("hide"); $("login").classList.remove("hide");
+  if (!silent) toast("已退出");
+}
+$("go").onclick = login;
+$("p").addEventListener("keydown", e => { if (e.key === "Enter") login(); });
+document.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !$("login").classList.contains("hide")) login();
+});
+
+/* ================= 启动 ================= */
+async function boot(meInfo) {
+  const r = await api("/api/me");
+  if (!r.body.ok) return;
+  ME = r.body;
+  $("login").classList.add("hide"); $("app").classList.remove("hide");
+  $("me").textContent = "当前用户：" + ME.username + "（" + ME.role_text + "）";
+  $("permList").innerHTML = "<li>本次会话可用动作：" +
+    (ME.actions || []).map(a => "<code>" + esc(a) + "</code>").join(" ") + "</li>";
+  if (!can("account_manage")) $("accPanel").classList.add("hide");
+  await loadFaces(); await loadRooms(); await loadCameras();
+  loadVault(); loadFlow(); loadAlarms(); loadKpi(); loadSys();
+  loadEscort(); loadRecords();
+}
+async function resume() {
+  if (!TOKEN) return;
+  const r = await api("/api/me");
+  if (r.body && r.body.ok) boot(r.body);
+}
+resume();
+
+/* ================= 页签 ================= */
+document.querySelectorAll("nav button").forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll("nav button").forEach(x => x.classList.remove("on"));
+    b.classList.add("on");
+    ["live","vault","flow","alarm","kpi","sys"].forEach(t => {
+      $("t-" + t).classList.toggle("hide", t !== b.dataset.tab);
+    });
+    const map = {live: loadCameras, vault: loadVault, flow: loadFlow,
+                 alarm: loadAlarms, kpi: loadKpi, sys: loadSys};
+    (map[b.dataset.tab] || (() => {}))();
+  };
+});
+
+/* ================= 配置 / 下拉 ================= */
+let CONFIG = null, FACES = [];
+async function loadFaces() {
+  const r = await api("/api/config");
+  if (!r.body.ok) return;
+  CONFIG = r.body; FACES = r.body.faces || [];
+  $("adhocFace").innerHTML = FACES.map(f =>
+    '<option value="' + f.key + '">' + esc(f.text) + "（" + f.key + "）</option>").join("");
+  $("sysInfo").innerHTML = [
+    ["数据目录", CONFIG.retain_days ? "" : "", ""].length ? "" : ""];
+  await loadSysInfo();
+}
+async function loadSysInfo() {
+  const r = await api("/api/overview");
+  if (!r.body.ok) return;
+  const o = r.body, rm = o.removal;
+  $("sysInfo").innerHTML = [
+    ["数据目录", "<span class='mono'>" + esc(rm.data_root) + "</span>"],
+    ["录像留存", rm.retain_days + " 天（写入即锁定 WORM：" + (rm.worm ? "开" : "关") + "）"],
+    ["开柜/开门告警时延要求", "≤ " + rm.sla_intrusion + " 秒"],
+    ["押运偏离告警时延要求", "≤ " + rm.sla_escort + " 秒"],
+    ["保密室覆盖率要求", "100%，无盲区（六面逐机位留档）"],
+    ["门禁", "人脸 + 刷卡/密码 双因子；双人双锁"],
+    ["环境阈值", "温度 5~35℃；湿度 20~70%；水浸/烟感为真即告警"],
+    ["布防时段", "18:00–次日 08:00（强布防）"],
+  ].map(x => "<b>" + esc(x[0]) + "</b><span>" + x[1] + "</span>").join("");
+}
+async function loadRooms() {
+  const r = await api("/api/overview");
+  if (!r.body.ok) return;
+  const rooms = r.body.rooms || [];
+  ["roomFilter","vRoom","kRoom"].forEach(id => {
+    const el = $(id);
+    el.innerHTML = rooms.length
+      ? rooms.map(x => '<option value="' + esc(x) + '">' + esc(x) + "</option>").join("")
+      : '<option value="">（暂无保密室）</option>';
+  });
+}
+
+/* ================= 实时画面 ================= */
+async function probeLocal() {
+  const r = await POST("/api/cameras/probe_local");
+  const idx = r.body.indexes || [];
+  if (!idx.length) {
+    toast("未探测到本机摄像头（可改用 RTSP 地址或本地视频文件）", 4200);
+    return;
+  }
+  $("srcKind").value = "local";
+  $("srcVal").value = String(idx[0]);
+  toast("探测到本机摄像头序号：" + idx.join("、") + "（已填入 " + idx[0] + "）");
+}
+async function playAdhoc() {
+  const kind = $("srcKind").value, val = $("srcVal").value.trim();
+  if (!val) { toast("请填写取流来源"); return; }
+  const camId = $("camId").value.trim() || "LIVE1";
+  const room = $("adhocRoom").value.trim();
+  if (room) {
+    /* 走常设机位：登记 -> 开始取流 */
+    const r = await POST("/api/cameras", {
+      cam_id: camId, room_id: room, name: camId, face: $("adhocFace").value,
+      url: val, channels: ["main","backup"],
+      checkpoints: (FACES.find(f => f.key === $("adhocFace").value) || {}).checkpoints || []
+    });
+    if (!r.body.ok) { toast("登记失败：" + (r.body.error || "")); return; }
+  }
+  const r2 = await POST("/api/cameras/" + encodeURIComponent(camId) + "/start");
+  toast(r2.body.message || (r2.body.ok ? "已开始取流" : "取流失败"));
+  await loadCameras(); await loadRooms();
+}
+async function stopAdhoc() {
+  const camId = $("camId").value.trim() || "LIVE1";
+  await POST("/api/cameras/" + encodeURIComponent(camId) + "/stop");
+  toast("已停止 " + camId); await loadCameras();
+}
+async function registerAdhoc() {
+  if (!can("device_manage")) { deny("device_manage（机位管理）"); return; }
+  const room = $("adhocRoom").value.trim();
+  if (!room) { toast("请先填写保密室编号"); return; }
+  const face = $("adhocFace").value;
+  const r = await POST("/api/cameras", {
+    cam_id: $("camId").value.trim() || "LIVE1", room_id: room,
+    name: $("camId").value.trim() || "LIVE1", face: face,
+    url: $("srcVal").value.trim(), channels: ["main","backup"],
+    checkpoints: (FACES.find(f => f.key === face) || {}).checkpoints || []
+  });
+  toast(r.body.ok ? "已登记为常设机位" : ("登记失败：" + (r.body.error || "")));
+  await loadCameras(); await loadRooms(); await loadVault();
+}
+async function startAll() {
+  const r = await api("/api/cameras");
+  const cams = (r.body.cameras || []).filter(c => c.url);
+  for (const c of cams) await POST("/api/cameras/" + encodeURIComponent(c.cam_id) + "/start");
+  toast("已对 " + cams.length + " 路发起取流"); await loadCameras();
+}
+async function stopAll() {
+  const r = await api("/api/cameras");
+  for (const c of (r.body.cameras || [])) {
+    if (c.live) await POST("/api/cameras/" + encodeURIComponent(c.cam_id) + "/stop");
+  }
+  toast("已停止全部取流"); await loadCameras();
+}
+async function loadCameras() {
+  const room = $("roomFilter").value || "";
+  const r = await api("/api/cameras" + (room ? "?room=" + encodeURIComponent(room) : ""));
+  if (!r.body.ok) return;
+  const cams = r.body.cameras || [];
+  const g = $("camGrid");
+  if (!cams.length) {
+    g.innerHTML = '<div class="hint" style="padding:18px">该保密室还没有登记机位。'
+      + '可在上方填写来源与朝向，点「登记为常设机位」。</div>';
+    return;
+  }
+  g.innerHTML = cams.map(c => {
+    const stCls = c.live ? "live" : "na";
+    const img = c.live
+      ? '<img src="/api/stream/' + encodeURIComponent(c.cam_id)
+        + "?token=" + encodeURIComponent(TOKEN) + '" alt="' + esc(c.name) + '">'
+      : '<div class="ph">' + esc(c.live_status || "未开始取流") + "</div>";
+    return '<div class="cam"><div class="head"><span>' + esc(c.cam_id) + " · "
+      + esc(c.face_text) + '</span><span class="st">'
+      + (c.live ? ("播放中 " + (c.live_fps || 0) + " fps") : "未取流") + "</span></div>"
+      + '<div class="view">' + img + "</div>"
+      + '<div class="foot">'
+      + (c.live
+          ? '<button onclick="camAct(\'' + c.cam_id + "','stop')\">■ 停止</button>"
+          : '<button onclick="camAct(\'' + c.cam_id + "','start')\">▶ 开始</button>")
+      + '<button onclick="camAct(\'' + c.cam_id + "','snapshot')\">📷 抓拍留证</button>"
+      + '<span class="st" style="color:#9fb3c8;font-size:11px;align-self:center">'
+      + esc(c.url || "无地址") + "</span></div>"
+      + (c.problems && c.problems.length
+          ? '<div style="background:#3a2a12;color:#ffd79a;font-size:11px;padding:4px 9px">⚠ '
+            + esc(c.problems.join("；")) + "</div>" : "")
+      + "</div>";
+  }).join("");
+}
+async function camAct(camId, act) {
+  if (act === "snapshot") {
+    const r = await POST("/api/cameras/" + encodeURIComponent(camId) + "/snapshot");
+    toast(r.body.ok ? ("已抓拍留证：" + r.body.path) : ("抓拍失败：" + (r.body.error || "")));
+    return;
+  }
+  await POST("/api/cameras/" + encodeURIComponent(camId) + "/" + act);
+  setTimeout(loadCameras, 500);
+}
+
+/* ================= 保密室 ================= */
+async function loadVault() {
+  const room = $("vRoom").value || "";
+  if (!room) { $("vCover").innerHTML = '<div class="hint">请先登记至少一个机位</div>'; return; }
+  const ov = await api("/api/overview?room=" + encodeURIComponent(room));
+  const o = ov.body;
+  $("vStats").innerHTML = [
+    ["六面覆盖率", (o.coverage_rate == null ? "—" : (o.coverage_rate * 100).toFixed(0) + "%"),
+      o.coverage_rate >= 1 ? "ok" : "red"],
+    ["盲区朝向", o.blind_spots.length ? o.blind_spots.join("、") : "无",
+      o.blind_spots.length ? "red" : "ok"],
+    ["已登记机位", o.cameras + " 个", ""],
+    ["机位在线", o.cameras_online + " 个", ""],
+    ["未处置红色告警", o.red_alarms + " 条", o.red_alarms ? "red" : "ok"],
+    ["今日告警", o.alarms_today + " 条", ""],
+    ["布防状态", o.armed ? "布防中" : "已撤防", ""],
+  ].map(x => '<div class="card ' + x[2] + '"><div class="t">' + esc(x[0])
+    + '</div><div class="v small">' + esc(x[1]) + "</div></div>").join("");
+  $("armedBtn").textContent = o.armed ? "🛡 当前：布防中（点击撤防）" : "🛡 当前：已撤防（点击布防）";
+
+  const cr = await api("/api/config");
+  const cols = cr.body.faces || [];
+  const camR = await api("/api/cameras?room=" + encodeURIComponent(room));
+  const cams = camR.body.cameras || [];
+  let h = '<table><thead><tr><th>朝向</th><th>机位</th><th>状态</th>'
+    + "<th>该朝向必拍要点</th><th>未覆盖要点</th></tr></thead><tbody>";
+  cols.forEach(f => {
+    const mine = cams.filter(c => c.face === f.key);
+    const conf = mine.filter(c => c.url);
+    const have = new Set(); mine.forEach(c => (c.checkpoints || []).forEach(x => have.add(x)));
+    const miss = (f.checkpoints || []).filter(x => !have.has(x));
+    h += "<tr><td>" + esc(f.text) + "</td><td>"
+      + (mine.length ? mine.map(c => esc(c.cam_id)).join("、") : "<span class='tag bad'>未登记</span>")
+      + "</td><td>" + (conf.length ? '<span class="tag ok">已配置</span>'
+                                   : '<span class="tag bad">缺失</span>')
+      + "</td><td>" + esc((f.checkpoints || []).join("、"))
+      + "</td><td>" + (miss.length ? '<span class="tag bad">' + esc(miss.join("、")) + "</span>" : "无")
+      + "</td></tr>";
+  });
+  h += "</tbody></table>";
+  $("vCover").innerHTML = h;
+
+  const ck = await api("/api/vault/check?room=" + encodeURIComponent(room));
+  if (ck.body.ok) {
+    $("vCheck").innerHTML = "<table><thead><tr><th>监控项</th><th>状态</th>"
+      + "<th>说明</th></tr></thead><tbody>"
+      + ck.body.items.map(it => '<tr><td>' + esc(it.name) + "</td><td>"
+          + (it.ok ? '<span class="tag ok">✔ 就绪</span>' : '<span class="tag bad">✘ 待处理</span>')
+          + "</td><td>" + esc(it.detail) + "</td></tr>").join("")
+      + "</tbody></table>";
+  }
+  const ev = await api("/api/vault/events?room=" + encodeURIComponent(room) + "&limit=30");
+  if (ev.body.ok) {
+    const B = ev.body;
+    $("vEvents").innerHTML =
+      '<h3 style="font-size:13px;margin:10px 0 4px">门禁事件 · 双因子/双人双锁</h3>'
+      + tbl(["时间","人员","因子/到场","结果","拒绝原因"],
+            B.access.map(e => [ts(e.ts), e.person,
+              (JSON.parse(e.factors||"[]").join("+")||"—") + " / " + JSON.parse(e.persons||"[]").length + "人",
+              e.result === "allow" ? '<span class="tag ok">放行</span>' : '<span class="tag bad">拒绝</span>',
+              e.deny_reason]))
+      + '<h3 style="font-size:13px;margin:12px 0 4px">入侵探测事件</h3>'
+      + tbl(["时间","类型","防区","布防"],
+            B.intrusion.map(e => [ts(e.ts), (CONFIG.intrusion_kinds||{})[e.kind] || e.kind,
+              e.zone, e.armed ? "是" : "否"]))
+      + '<h3 style="font-size:13px;margin:12px 0 4px">试卷柜开柜事件（含柜内状态）</h3>'
+      + tbl(["时间","柜号","人员","授权","柜门","柜内状态"],
+            B.safes.map(e => [ts(e.ts), e.safe_id, e.person,
+              e.authorized ? '<span class="tag ok">是</span>' : '<span class="tag bad">否</span>',
+              e.state, JSON.stringify(JSON.parse(e.inner||"{}"))]))
+      + '<h3 style="font-size:13px;margin:12px 0 4px">环境监测采样</h3>'
+      + tbl(["时间","温度℃","湿度%","水浸","烟感"],
+            B.env.map(e => [ts(e.ts), e.temp_c, e.humidity_pct,
+              e.water ? '<span class="tag bad">触发</span>' : "正常",
+              e.smoke ? '<span class="tag bad">触发</span>' : "正常"]));
+  }
+  loadRecords();
+}
+const ts = (s) => String(s || "").replace("T", " ").slice(0, 19);
+function tbl(head, rows) {
+  if (!rows.length) return '<div class="hint" style="padding:6px 0">暂无记录</div>';
+  return "<table><thead><tr>" + head.map(h => "<th>" + esc(h) + "</th>").join("")
+    + "</tr></thead><tbody>" + rows.map(r => "<tr>" + r.map(c =>
+        "<td>" + (c == null ? "" : c) + "</td>").join("") + "</tr>").join("")
+    + "</tbody></table>";
+}
+async function simAccess(ok) {
+  const room = $("vRoom").value; if (!room) return toast("请先选保密室");
+  const r = await POST("/api/vault/access", {
+    room_id: room, person: ME.username,
+    factors: ok ? ["face","card"] : ["card"],
+    persons: [ME.username, "witness1"]
+  });
+  toast(r.body.allow ? "放行（双因子 + 双人齐备）" : ("拒绝：" + (r.body.deny_reason || "")));
+  refreshAfter(); 
+}
+async function simAbnormalDoor() {
+  const room = $("vRoom").value; if (!room) return toast("请先选保密室");
+  await POST("/api/vault/access", {room_id: room, abnormal: true,
+    detail: "门磁检测到未授权开启（网页面板注入）"});
+  toast("已产生未授权开门红色告警"); refreshAfter();
+}
+async function simIntrusion(kind) {
+  const room = $("vRoom").value; if (!room) return toast("请先选保密室");
+  const r = await POST("/api/vault/intrusion",
+    {room_id: room, kind: kind, sensor_id: kind + "-01", zone: "保密室内区"});
+  toast(r.body.ok ? ("入侵事件已注入：" + ((CONFIG.intrusion_kinds||{})[kind] || kind)) : "失败");
+  refreshAfter();
+}
+async function simSafe(authorized) {
+  const room = $("vRoom").value; if (!room) return toast("请先选保密室");
+  await POST("/api/vault/safe", {room_id: room, safe_id: "SAFE-01",
+    authorized: !!authorized, inner: {paper_present: true}});
+  toast(authorized ? "授权开柜已记录（橙色留痕）" : "未授权开柜 -> 红色告警"); refreshAfter();
+}
+async function simEnv() {
+  const room = $("vRoom").value; if (!room) return toast("请先选保密室");
+  await POST("/api/vault/env", {room_id: room, temp_c: parseFloat($("envT").value),
+    humidity_pct: parseFloat($("envH").value), water: $("envW").checked,
+    smoke: $("envS").checked});
+  toast("环境采样已注入"); refreshAfter();
+}
+async function simPatrol() {
+  const room = $("vRoom").value; if (!room) return toast("请先选保密室");
+  await POST("/api/vault/patrol", {room_id: room});
+  toast("已登记一轮机器人巡查（值守替代）"); refreshAfter();
+}
+async function toggleArmed() {
+  const room = $("vRoom").value; if (!room) return toast("请先选保密室");
+  const r = await POST("/api/vault/armed", {room_id: room});
+  toast(r.body.armed ? "已布防" : "已撤防"); refreshAfter();
+}
+function refreshAfter() { loadVault(); loadAlarms(); }
+
+/* ================= 录像 ================= */
+async function simSegments() {
+  const room = $("vRoom").value; if (!room) return toast("请先选保密室");
+  const r = await POST("/api/records/simulate", {room_id: room});
+  toast(r.body.ok ? ("已生成 " + r.body.segments + " 段录像记录") : r.body.error);
+  loadRecords();
+}
+async function makeGap() {
+  const room = $("vRoom").value; if (!room) return toast("请先选保密室");
+  const r = await POST("/api/records/gap", {room_id: room});
+  toast(r.body.ok ? ("已制造丢段，核查发现 " + (r.body.problems||[]).length + " 处问题")
+                  : r.body.error);
+  loadRecords(); loadAlarms();
+}
+async function loadRecords() {
+  const room = $("vRoom").value || "";
+  const r = await api("/api/records" + (room ? "?room=" + encodeURIComponent(room) : ""));
+  if (!r.body.ok) return;
+  const t = r.body.retention;
+  $("vRecords").innerHTML =
+    "<div class=\"hint\" style=\"margin-bottom:6px\">留存 " + t.retain_days + " 天，"
+    + "写入即锁定：" + (t.worm ? "开" : "关") + "；共 " + t.total + " 段，"
+    + "留存期内 " + t.within_retention + " 段，<b style=\"color:"
+    + (t.unlocked ? "#c00000" : "#1b7f1b") + "\">未加锁 " + t.unlocked + " 段</b>"
+    + "（应为 0）</div>"
+    + tbl(["机位","通道","连续性","段数","缺口","不可回放","双路冗余"],
+      (r.body.rows || []).map(x => [x.cam_id, x.channel,
+        x.ok ? '<span class="tag ok">连续</span>' : '<span class="tag bad">有缺口</span>',
+        x.segments, x.gaps, x.unplayable,
+        x.redundant ? '<span class="tag ok">是</span>' : '<span class="tag bad">不足</span>']));
+}
+
+/* ================= 流转 ================= */
+async function loadFlow() {
+  const r = await api("/api/bags");
+  if (!r.body.ok) return;
+  const bags = r.body.bags || [];
+  $("bagTable").innerHTML = tbl(
+    ["试卷袋","RFID","科目","份数","封签号","铅封状态","当前环节"],
+    bags.map(b => [b.bag_id, b.rfid, b.subject, b.quantity, b.seal_id || "—",
+      b.seal_state === "sealed" ? '<span class="tag ok">已封</span>'
+        : (b.seal_state === "broken" ? '<span class="tag bad">异常开启</span>'
+        : '<span class="tag na">未知</span>'),
+      b.current_stage || "—"]));
+  const opts = bags.map(b => '<option value="' + esc(b.bag_id) + '">' + esc(b.bag_id)
+    + " / " + esc(b.subject || "-") + " / " + b.quantity + "份</option>").join("");
+  ["hBag","sBag","dBag","rBag","traceBag"].forEach(id => {
+    const el = $(id);
+    const keep = el.value;
+    el.innerHTML = opts || '<option value="">（无试卷袋）</option>';
+    if (keep) el.value = keep;
+  });
+  $("flowStage").innerHTML = "<h3 style='font-size:13px;margin:6px 0 4px'>各环节记录数</h3>"
+    + tbl(["环节","说明","记录数"],
+        Object.keys(r.body.stage_coverage || {}).map(k => {
+          const d = r.body.stage_coverage[k];
+          return [d.name, (CONFIG.flow_stages[k]||{}).desc || "", d.count];
+        }));
+  loadEscort();
+}
+async function addBag() {
+  const r = await POST("/api/bags", {bag_id: $("bId").value.trim(), subject: $("bSub").value,
+    quantity: parseInt($("bQty").value || "0", 10)});
+  if (!r.body.ok) return toast("登记失败：" + (r.body.error || ""));
+  toast("已登记试卷袋 " + r.body.bag.bag_id);
+  $("bId").value = ""; loadFlow();
+}
+function listOf(id) { return $(id).value.split(/[,，]/).map(s => s.trim()).filter(Boolean); }
+async function doHandover() {
+  const r = await POST("/api/flow/handover", {
+    bag_id: $("hBag").value, from_person: $("hFrom").value, to_person: $("hTo").value,
+    persons: listOf("hPersons"), signatures: listOf("hSign"), faces: listOf("hFace"),
+    method: $("hMethod").value, quantity: 0, room_id: $("vRoom").value || ""
+  });
+  if (!r.body.ok) return toast("失败");
+  const codes = (r.body.alarms || []).map(a => a.code);
+  toast(r.body.complete ? "交接已登记：记录完整、可追溯"
+                        : ("交接已登记但**不完整**：" + (r.body.problems || []).join("、")));
+  if (codes.length) toast("产生告警：" + codes.join("、"), 4000);
+  refreshAfter(); loadFlow();
+}
+async function doSeal() {
+  const r = await POST("/api/flow/seal", {bag_id: $("sBag").value,
+    seal_id: $("sSeal").value, room_id: $("vRoom").value || ""});
+  toast(r.body.ok ? "已电子封签" : "失败"); refreshAfter(); loadFlow();
+}
+async function breakSeal() {
+  const r = await POST("/api/flow/seal", {bag_id: $("sBag").value, state: "broken",
+    detail: "网页面板演练：电子铅封异常开启"});
+  toast(r.body.ok ? "已上报异常开启 -> 红色告警 SEAL_BROKEN" : "失败");
+  refreshAfter(); loadFlow();
+}
+async function doDeliver() {
+  const r = await POST("/api/flow/deliver", {bag_id: $("dBag").value,
+    room_id: $("dRoom").value, quantity: parseInt($("dQty").value || "0", 10)});
+  toast(r.body.ok ? ("分发已登记（问题 " + (r.body.problems||[]).length + " 项）") : "失败");
+  refreshAfter(); loadFlow();
+}
+async function doRecycle() {
+  const r = await POST("/api/flow/recycle", {bag_id: $("rBag").value,
+    room_id: $("dRoom").value, issued_qty: parseInt($("rIssued").value || "0", 10),
+    returned_qty: parseInt($("rGot").value || "0", 10),
+    seal_id: "SEAL-R" + Date.now().toString().slice(-5), auto_seal: $("rSeal").checked});
+  toast(r.body.ok ? ("回收已登记，差异 " + (r.body.recycle.diff > 0 ? "+" : "")
+    + r.body.recycle.diff) : "失败");
+  refreshAfter(); loadFlow();
+}
+async function loadTrace() {
+  const bid = $("traceBag").value;
+  if (!bid) return;
+  const r = await api("/api/bags/" + encodeURIComponent(bid) + "/trace");
+  if (!r.body.ok) return toast("试卷袋不存在");
+  const b = r.body.bag;
+  let h = '<div class="kv" style="margin-bottom:8px">'
+    + "<b>试卷袋</b><span class='mono'>" + esc(b.bag_id) + "</span>"
+    + "<b>科目</b><span>" + esc(b.subject || "-") + "</span>"
+    + "<b>份数</b><span>" + b.quantity + "</span>"
+    + "<b>封签</b><span>" + esc(b.seal_id || "-") + " / " + esc(b.seal_state) + "</span>"
+    + "<b>当前环节</b><span>" + esc(b.current_stage || "-") + "</span></div>";
+  h += "<h3 style='font-size:13px;margin:8px 0 4px'>流转链条（人 / 时 / 物 / 地点）</h3>"
+    + tbl(["时间","环节","操作人","说明"], (r.body.history || []).map(x =>
+        [ts(x.ts), x.stage_text || x.stage, x.person, x.note]));
+  h += "<h3 style='font-size:13px;margin:8px 0 4px'>交接记录</h3>"
+    + tbl(["时间","环节","交出→接收","参与人","已人脸","是否可追溯"],
+        (r.body.handovers || []).map(x => [ts(x.ts), x.stage,
+          esc(x.from_person) + "→" + esc(x.to_person),
+          JSON.parse(x.persons || "[]").length, JSON.parse(x.faces || "[]").length,
+          (x.problems === "[]" || !JSON.parse(x.problems || "[]").length)
+            ? '<span class="tag ok">可追溯</span>'
+            : '<span class="tag bad">不完整</span>']));
+  h += "<h3 style='font-size:13px;margin:8px 0 4px'>分发记录</h3>"
+    + tbl(["时间","考场","份数","责任人"], (r.body.deliveries || []).map(x =>
+        [ts(x.ts), x.room_id, x.quantity, x.person]));
+  h += "<h3 style='font-size:13px;margin:8px 0 4px'>回收记录</h3>"
+    + tbl(["时间","回收/发出","差异","封存","封签"], (r.body.recycles || []).map(x =>
+        [ts(x.ts), x.returned_qty + "/" + x.issued_qty,
+         (x.diff > 0 ? "+" : "") + x.diff,
+         x.sealed ? "是" : "否", x.seal_id || "—"]));
+  $("traceBox").innerHTML = h;
+}
+
+/* ================= 押运 ================= */
+async function escortStart() {
+  const route = $("eRoute").value.trim().split("\n").map(l =>
+    l.split(",").map(x => parseFloat(x.trim()))).filter(a => a.length >= 2 && !isNaN(a[0]));
+  const bags = $("eBags").value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+  const persons = listOf("ePersons");
+  const r = await POST("/api/escort/start", {plate: $("ePlate").value,
+    driver: $("eDriver").value, escort_persons: persons, bag_ids: bags, route: route,
+    video_url: $("eVideo").value});
+  if (!r.body.ok) return toast("创建失败：" + (r.body.error || ""));
+  const tid = r.body.task.task_id;
+  const pts = $("ePts").value.trim().split("\n").map(l => l.split(",").map(x => parseFloat(x.trim())))
+    .filter(a => a.length >= 2 && !isNaN(a[0]));
+  let dev = 0;
+  for (const p of pts) {
+    const rr = await POST("/api/escort/position", {task_id: tid, lat: p[0], lng: p[1],
+      speed_kmh: p[2] || 0});
+    if (rr.body.deviation_alarm) dev++;
+  }
+  await POST("/api/escort/video", {task_id: tid, online: true});
+  toast("押运任务已创建，上报 " + pts.length + " 个轨迹点，偏离告警 " + dev + " 次", 4000);
+  loadEscort(); loadAlarms();
+}
+async function loadEscort() {
+  const r = await api("/api/escort/tasks");
+  if (!r.body.ok) return;
+  $("escortTable").innerHTML = tbl(
+    ["任务","车牌","驾驶员","状态","轨迹点","偏离点","最大偏移(m)","车内视频","试卷袋"],
+    (r.body.tasks || []).map(x => {
+      const t = x.task, s = x.summary || {};
+      return ["<span class='mono'>" + esc(t.task_id) + "</span>", esc(t.plate),
+        esc(t.driver || "-"),
+        t.status === "done" ? '<span class="tag ok">已送达</span>'
+          : (t.status === "abnormal" ? '<span class="tag bad">异常</span>'
+          : '<span class="tag live">押运中</span>'),
+        s.points || 0,
+        (s.deviated_points ? '<span class="tag bad">' + s.deviated_points + "</span>" : "0"),
+        (s.max_offset_m || 0).toFixed(0),
+        t.video_online ? '<span class="tag ok">在线</span>' : '<span class="tag bad">中断</span>',
+        esc(JSON.parse(t.bag_ids || "[]").join("、") || "—")];
+    }));
+}
+
+/* ================= 告警 ================= */
+async function loadAlarms() {
+  const q = [];
+  if ($("aFilter").value) q.push("status=" + $("aFilter").value);
+  q.push("limit=300");
+  const r = await api("/api/alarms" + (q.length ? "?" + q.join("&") : ""));
+  if (!r.body.ok) return;
+  let rows = r.body.alarms || [];
+  const lv = $("aLevel").value;
+  if (lv) rows = rows.filter(a => a.level === lv);
+  $("alarmTable").innerHTML = tbl(
+    ["时间","级别","告警码","告警项","对象","时延","状态","处置人","备注","操作"],
+    rows.map(a => [
+      ts(a.created_at),
+      a.level === "red" ? '<span class="tag red">红色预警</span>'
+                        : '<span class="tag orange">橙色预警</span>',
+      "<span class='mono'>" + esc(a.code) + "</span>", esc(a.title), esc(a.scope || "—"),
+      a.latency_sec == null ? "—" : (Number(a.latency_sec).toFixed(3) + "s"),
+      ({pending:"待处置",acked:"已确认",handled:"已处置",closed:"已归档"})[a.status] || a.status,
+      esc(a.handled_by || a.acked_by || "—"), esc(a.handle_note || "—"),
+      (a.status === "pending"
+        ? '<button class="b" style="padding:3px 8px;font-size:11px" onclick="ackOne(\''
+          + a.alarm_id + '\')">确认</button> '
+          + '<button class="b ok" style="padding:3px 8px;font-size:11px" onclick="handleOne(\''
+          + a.alarm_id + '\')">处置</button>'
+        : (a.status === "acked"
+            ? '<button class="b ok" style="padding:3px 8px;font-size:11px" onclick="handleOne(\''
+              + a.alarm_id + '\')">处置</button>' : "—"))
+    ]));
+  const n = r.body.red_open || 0;
+  const b = $("redbadge");
+  b.textContent = "未处置红色告警 " + n;
+  b.className = "badge" + (n ? "" : " zero");
+}
+async function ackOne(id) {
+  const r = await POST("/api/alarms/" + id + "/ack", {note: "网页面板确认"});
+  if (r.status === 200) toast("已确认"); loadAlarms();
+}
+async function handleOne(id) {
+  const note = prompt("处置说明：", "已到现场核实并处理");
+  if (note === null) return;
+  const r = await POST("/api/alarms/" + id + "/handle", {note: note});
+  if (r.status === 200) toast("已处置"); loadAlarms();
+}
+async function ackAllRed() {
+  const r = await POST("/api/alarms/ack_all_red");
+  toast("已确认 " + (r.body.acked || 0) + " 条红色告警"); loadAlarms();
+}
+
+/* ================= 指标 / 报告 ================= */
+async function loadKpi() {
+  const room = $("kRoom").value || "";
+  const r = await api("/api/kpi" + (room ? "?room=" + encodeURIComponent(room) : ""));
+  if (!r.body.ok) return;
+  const s = r.body.summary;
+  $("kpiTable").innerHTML =
+    "<div class='stat' style='margin-bottom:10px'>"
+    + '<div class="card ok"><div class="t">达标</div><div class="v">' + s.pass + "</div></div>"
+    + '<div class="card red"><div class="t">未达标</div><div class="v">' + s.fail + "</div></div>"
+    + '<div class="card"><div class="t">样本不足（不当作达标）</div><div class="v">'
+    + s.insufficient + "</div></div>"
+    + '<div class="card"><div class="t">指标总数</div><div class="v">' + s.total + "</div></div>"
+    + "</div>"
+    + tbl(["指标项","要求","实测","结论","数据来源"], s.rows.map(x => [
+        esc(x.name), esc(x.required), esc(x.actual_text),
+        x.verdict === "达标" ? '<span class="tag ok">达标</span>'
+          : (x.verdict === "未达标" ? '<span class="tag bad">未达标</span>'
+          : '<span class="tag na">样本不足</span>'),
+        esc(x.how)]));
+  const rep = await api("/api/report" + (room ? "?room=" + encodeURIComponent(room) : ""));
+  if (rep.body.ok) $("reportBox").textContent = rep.body.text;
+}
+async function exportReport() {
+  const r = await POST("/api/report/export", {room: $("kRoom").value || null});
+  if (r.status === 403) return;
+  toast("验收报告已生成：" + (r.body.report || ""), 5000);
+}
+async function loadAudit() {
+  const r = await api("/api/audit");
+  if (r.status === 403) return;
+  $("auditPanel").classList.remove("hide");
+  const rows = r.body.rows || [];
+  $("auditBox").innerHTML =
+    "<div style='margin-bottom:8px'>校验结果："
+    + (r.body.verified ? '<span class="tag ok">通过</span>' : '<span class="tag bad">失败</span>')
+    + " <span class='hint'>" + esc(r.body.reason) + "</span></div>"
+    + tbl(["#","时间","动作","详情","操作人","哈希"],
+        rows.slice(-150).map(x => [x.seq, ts(x.ts), esc(x.action), esc(x.detail),
+          esc(x.operator), "<span class='mono'>" + esc((x.hash || "").slice(0, 16)) + "…</span>"]));
+}
+
+/* ================= 系统设置 ================= */
+async function loadSys() {
+  await loadSysInfo();
+  if (!can("account_manage")) return;
+  const r = await api("/api/accounts");
+  if (!r.body.ok) return;
+  $("aRole").innerHTML = (r.body.roles || []).filter(x => x.key !== "owner")
+    .map(x => '<option value="' + x.key + '">' + esc(x.text) + "（等级 " + x.level + "）</option>")
+    .join("");
+  $("accTable").innerHTML = tbl(["用户名","角色","状态","创建时间","操作"],
+    (r.body.accounts || []).map(a => [a.username, esc(a.role_text),
+      a.disabled ? '<span class="tag bad">已停用</span>' : '<span class="tag ok">启用</span>',
+      esc(a.created || "—"),
+      '<button class="b gray" style="padding:3px 8px;font-size:11px" onclick="toggleAcc(\''
+        + a.username + "'," + (a.disabled ? "false" : "true") + ')">'
+        + (a.disabled ? "启用" : "停用") + "</button> "
+        + '<button class="b red" style="padding:3px 8px;font-size:11px" onclick="delAcc(\''
+        + a.username + '\')">删除</button>']));
+}
+async function changePwd() {
+  const r = await POST("/api/change_password", {new_password: $("cpNew").value});
+  toast(r.body.message || (r.body.ok ? "已更新" : "失败"));
+  if (r.body.ok) $("cpNew").value = "";
+}
+async function createAccount() {
+  const r = await POST("/api/accounts", {username: $("aUser").value.trim(),
+    password: $("aPwd").value, role: $("aRole").value});
+  toast(r.body.message || (r.body.ok ? "已创建" : "失败"));
+  if (r.body.ok) { $("aUser").value = ""; $("aPwd").value = ""; loadSys(); }
+}
+async function toggleAcc(name, disabled) {
+  const r = await POST("/api/accounts/" + encodeURIComponent(name) + "/disabled",
+    {disabled: disabled});
+  toast(r.body.message || "已更新"); loadSys();
+}
+async function delAcc(name) {
+  if (!confirm("确认删除账户 " + name + " ？")) return;
+  const r = await DEL("/api/accounts/" + encodeURIComponent(name));
+  toast(r.body.message || "已删除"); loadSys();
+}
+
+/* 画面网格周期刷新状态（不重载 <img>，避免闪断） */
+setInterval(() => {
+  if (!TOKEN || $("app").classList.contains("hide")) return;
+  if ($("t-live").classList.contains("hide")) return;
+  api("/api/cameras" + ($("roomFilter").value
+      ? "?room=" + encodeURIComponent($("roomFilter").value) : "")).then(r => {
+    if (!r.body.ok) return;
+    (r.body.cameras || []).forEach(c => {
+      const el = document.querySelector('[data-st="' + c.cam_id + '"]');
+    });
+  });
+}, 5000);
+/* 告警角标周期刷新 */
+setInterval(() => {
+  if (!TOKEN || $("app").classList.contains("hide")) return;
+  api("/api/alarms?limit=1").then(r => {
+    if (!r.body.ok) return;
+    const n = r.body.red_open || 0;
+    const b = $("redbadge");
+    b.textContent = "未处置红色告警 " + n;
+    b.className = "badge" + (n ? "" : " zero");
+  });
+}, 8000);
+</script>
+</body>
+</html>

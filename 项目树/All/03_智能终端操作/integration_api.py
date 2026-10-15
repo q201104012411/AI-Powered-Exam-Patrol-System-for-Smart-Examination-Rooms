@@ -8,6 +8,10 @@ ops:
            画质可信度 < 0.6 时，红色预警自动降为橙色并标注，避免画质问题造成误报堆积
   review_alert {alert_id, conclusion, reason, operator}
   list_alerts  {limit}
+  list_remote  {limit, kind, device_id}
+        -> 局域网联动收到的**远端设备记录**（01 的操作日志/核验记录、
+           02 的核查结论/整改工单）。设备 A 用 01/02 的 push_oplog.py 上报，
+           这里读出来核对；与 03 的接入服务 GET /api/records 同义。
   status       {}
 用法：python integration_api.py --op ingest_alert --args "{...}"
 """
@@ -100,6 +104,16 @@ def op_list_alerts(a):
          "review_conclusion": x.review_conclusion} for x in rows]}
 
 
+def op_list_remote(a):
+    """局域网联动收到的远端记录（01 的操作日志/核验记录、02 的核查结论/工单）"""
+    store, _hub, _rev = _stack()
+    rows = store.list_remote_records(device_id=a.get("device_id") or None,
+                                     kind=a.get("kind") or None,
+                                     limit=int(a.get("limit") or 100))
+    return {"ok": True, "records": rows, "devices": store.remote_devices(),
+            "summary": store.remote_summary(), "source": "03_智能终端操作"}
+
+
 def op_status(a):
     import config
     store, _hub, _rev = _stack()
@@ -111,7 +125,8 @@ def op_status(a):
 
 
 OPS = {"ingest_alert": op_ingest_alert, "review_alert": op_review_alert,
-       "list_alerts": op_list_alerts, "status": op_status}
+       "list_alerts": op_list_alerts, "list_remote": op_list_remote,
+       "status": op_status}
 
 
 def main():

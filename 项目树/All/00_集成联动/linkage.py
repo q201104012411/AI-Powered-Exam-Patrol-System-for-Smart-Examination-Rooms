@@ -10,6 +10,11 @@
 隔离方式：各套各有一个 integration_api.py，本模块用**子进程 + JSON** 调用它们。
 （都有 config.py / models.py，同进程 import 必然撞名，子进程最稳。）
 
+**局域网（跨设备）**：设备 A 跑 01/02（+00）、设备 B 跑 03 时，用
+`Linkage(terminal_url="http://<设备B的IP>:9113", terminal_token="...")`
+把 p03 换成 `RemoteTerminal`（走 `03_智能终端操作\\lan_service.py`），
+上层编排逻辑一行都不用改；01/02 的操作记录另有 `01/02\\push_oplog.py` 持续上报。
+
 联动链（本模块把这条链真正跑通）：
   ① 02 巡检/抽查发现机位画质异常
   ② 02 给出该机位的告警可信度系数 credibility_factor
@@ -187,16 +192,98 @@ class Project(object):
         return data
 
 
+class RemoteTerminal(object):
+    """
+    把"03 智能终端跑在**另一台设备**上"这件事接进联动总线（局域网联动）。
+
+    背景：Project 是本机的子进程句柄。设备 A 跑 01/02（+00），设备 B 跑 03 时，
+    p03 换成这个对象即可 —— 上层 Linkage 的编排逻辑一行都不用改（同一套 op + JSON）。
+
+    只走 03 接入服务开放的那些口子，**不多开一个**：
+      ingest_alert   写：告警接入（复用 03 的分级/降权/去重/强制确认）
+      status         读：终端状态
+      list_alerts    读：告警列表
+      list_remote    读：远端记录（01/02 送上来的操作记录与核验/核查结论）
+    复核、远程擦除、命令控制台**不经网络**，所以这里没有对应 op —— 这不是遗漏。
+
+    令牌与地址：
+      Linkage(terminal_url="http://192.168.1.20:9113", terminal_token="...")
+      也可用环境变量 EXAM_TERMINAL_URL / EXAM_TERMINAL_TOKEN。
+    """
+
+    # op -> (HTTP 方法, 路径, 是否用 args 组装查询串)
+    ROUTES = {
+        "ingest_alert": ("POST", "/api/ingest_alert", False),
+        "status": ("GET", "/api/status", False),
+        "list_alerts": ("GET", "/api/alerts", True),
+        "list_remote": ("GET", "/api/records", True),
+    }
+
+    def __init__(self, url, token="", timeout=10):
+        self.url = (url or "").strip().rstrip("/")
+        self.token = (token or "").strip()
+        self.timeout = float(timeout)
+        self.dir = self.url          # 与 Project 同形：状态展示时会读它
+
+    def available(self):
+        if not self.url:
+            return False, "未配置终端接入地址（EXAM_TERMINAL_URL）"
+        return True, "远端接入：%s" % self.url
+
+    def call(self, op, args=None):
+        import urllib.error
+        import urllib.parse
+        import urllib.request
+        if op not in self.ROUTES:
+            raise LinkageError("[03-远端] 接入服务不提供 op=%s（写入口只开放告警接入）" % op)
+        method, path, use_query = self.ROUTES[op]
+        args = dict(args or {})
+        headers = {"Content-Type": "application/json"}
+        if self.token:
+            headers["X-Exam-Token"] = self.token
+        if method == "GET" and use_query and args:
+            path = path + "?" + urllib.parse.urlencode(
+                {k: v for k, v in args.items() if v not in (None, "")})
+        data = None
+        if method == "POST":
+            data = json.dumps(args, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(self.url + path, data=data, headers=headers,
+                                     method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                out = json.loads(r.read().decode("utf-8", "replace") or "{}")
+        except urllib.error.HTTPError as e:
+            try:
+                out = json.loads(e.read().decode("utf-8", "replace") or "{}")
+            except (ValueError, TypeError):
+                out = {"ok": False, "reason": "HTTP %s" % getattr(e, "code", "?")}
+            out.setdefault("ok", False)
+            out.setdefault("_error", out.get("reason"))
+            return out
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            raise LinkageError("[03-远端] 无法连接 %s：%s" % (self.url, str(e)[:160]))
+        if not isinstance(out, dict):
+            raise LinkageError("[03-远端] %s 返回的不是 JSON 对象" % op)
+        if not out.get("ok", True) and out.get("reason"):
+            out["_error"] = out["reason"]
+        return out
+
+
 class Linkage(object):
     """三套系统的联动总线"""
 
     def __init__(self, python=None, sandbox_root=None, sandbox_keys=("02", "03"),
-                 sandbox_01=False, timeout=Project.DEFAULT_TIMEOUT):
+                 sandbox_01=False, timeout=Project.DEFAULT_TIMEOUT,
+                 terminal_url="", terminal_token="", terminal_timeout=10):
         """
         sandbox_root 给定时，sandbox_keys 里的系统会把自己的数据目录重定向到
         <sandbox_root>/<key>，用于"联动自检"不污染真实运行数据。
         01 默认用真实数据（否则没人脸库可核验，演示不出效果）；需要时用 sandbox_01=True。
         timeout 是单次跨系统子进程调用的上限（超时会**强制终止整个进程树**）。
+
+        terminal_url 给定时，03 走**局域网接入服务**（不再起本机子进程）：
+        设备 A 跑 01/02+00、设备 B 跑 03 的部署方式就用这个参数。
+        地址/令牌留空时依次回退到环境变量 EXAM_TERMINAL_URL / EXAM_TERMINAL_TOKEN。
         """
         keys = set(sandbox_keys)
         if sandbox_01:
@@ -217,8 +304,16 @@ class Linkage(object):
                            env_extra=redirects)
         self.p02 = Project("02", python=python, timeout=timeout, home=home("02"),
                            env_extra=redirects)
-        self.p03 = Project("03", python=python, timeout=timeout, home=home("03"),
-                           env_extra=redirects)
+        url = (terminal_url or os.environ.get("EXAM_TERMINAL_URL", "")).strip()
+        token = (terminal_token or os.environ.get("EXAM_TERMINAL_TOKEN", "")).strip()
+        if url:
+            # 远端终端：不再需要沙箱重定向（数据在另一台机器上）
+            self.p03 = RemoteTerminal(url, token=token, timeout=terminal_timeout)
+            self.remote_terminal = True
+        else:
+            self.p03 = Project("03", python=python, timeout=timeout, home=home("03"),
+                               env_extra=redirects)
+            self.remote_terminal = False
         self.p06 = Project("06", python=python, timeout=timeout, home=home("06"),
                            env_extra=redirects)
 
@@ -292,6 +387,15 @@ class Linkage(object):
 
     def alerts(self, limit=20):
         return self.p03.call("list_alerts", {"limit": limit})
+
+    def remote_records(self, limit=50, kind="", device_id=""):
+        """
+        看 03 收到的**远端设备记录**（01 的操作日志/核验记录、02 的核查结论/工单）。
+        本机模式走 03 的 integration_api 的 list_remote op；远端模式走接入服务的
+        GET /api/records —— 两种模式同一个调用方法。
+        """
+        return self.p03.call("list_remote", {"limit": limit, "kind": kind,
+                                             "device_id": device_id})
 
     # ---------- 06 智能安检（事前阻断） ----------
     def security_pass(self, payload):

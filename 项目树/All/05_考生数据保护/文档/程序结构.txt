@@ -1,0 +1,218 @@
+考生数据保护 · 程序结构
+============================================================
+对应《考生数据保护.md》。本目录是可运行、可测试的工程实现：
+数据分类分级 -> 全生命周期控制 -> 工程技术措施 -> 管理措施 -> 权利响应 -> 验收指标。
+设计原则：**控制即留痕**——不产生可核查证据的控制等于没做。
+**核心铁律**：已加密的考生数据任何人都不能修改，只能删除或新增；
+加密由 哈希(SM3) + 非对称签名(SM2) 组成，任何直接改库都会被验签检出。
+
+【入口】
+  运行自检与测试.bat    -> 语法检查 + 单元测试(174) + 端到端自检(110) + 界面冒烟(16) + 验收指标(6)
+  安装依赖.bat          -> 安装 gmssl / cryptography 并自检 tkinter 与后端
+  启动服务.bat          -> 启动桌面管理界面（gui.py，Python / tkinter）
+  停止服务.bat          -> 关闭桌面管理界面
+  切换命令行窗口.bat     -> 显示/隐藏命令行窗口开关
+  查看验收报告.bat      -> 生成并打开验收报告、处理活动登记表、销毁记录台账
+  修复密钥环.bat        -> 密钥体检；确认后整目录备份 + 重建密钥与演示数据
+                          （换电脑/换 Windows 账户导致 DPAPI 0x8009000B 时用）
+  main.py               -> 端到端自检；默认用临时数据目录，--real 用真实目录；返回 0/1
+  cli.py                -> 命令行入口（report/summary/verify/demo/catalog/permission/
+                          kpi/algorithm/keyring/destroy/use/rights/incident）
+  gui.py                -> 桌面管理界面（tkinter，六标签页：概览 / 考生台账 / 上传登记 /
+                          完整性验签 / 审计与指标 / 数据分级目录）
+  demo_data.py          -> 演示数据生成（6 名考生 + 全套闭环，统一带 demo 标记）
+  integration_api.py    -> 供 00_集成联动 调用的 JSON 接口（子进程 + JSON）
+
+【包 dpp/ 模块与职责】
+  __init__.py     包说明与版本号。
+  config.py       路径解析（EXAM_DPP_HOME / dpp_home.txt / data\）、DB_PATH、KEYRING_DIR、
+                  EXPORT_DIR、REPORT_DIR、VAULT_DIR；角色体系：ROLE_OWNER/DPO/AUDITOR/
+                  OPERATOR/INVIGILATOR/VIEWER 的 ROLE_LEVEL、ROLE_TEXT、ROLE_ACTIONS（角色×
+                  动作白名单，默认拒绝）、ALL_ACTIONS、ACTION_TEXT；DEFAULT_ACCOUNTS（内置
+                  账户）；CAPTURE（fps_max、silent_start=False、consent_required=True、
+                  retention_image_days=30）；TRANSPORT（专网+加密+国密优先+禁明文协议）；
+                  DESTROY（auto、grace_days、double_confirm）；RIGHTS_SLA_DAYS；KPI 阈值；
+                  AUDIT_REQUIRED_ACTIONS；INCIDENT（report_within_hours=2）；水印配置。
+
+  catalog.py      数据分类分级目录（**唯一口径**）。Category 描述一条数据类别：敏感级别
+                  （高/中高/中）、典型内容、存储位置、留限期（retention_days/retention_text）、
+                  是否可自动销毁、必须加密的字段（required_encrypted_fields）。CATEGORIES
+                  含六类：face_template/face_image/exam_video/alert_clip/review_record/
+                  enroll_identity。提供 get()/keys()/retention_days()/level_of()/
+                  required_encrypted_fields()/auto_destroyable()/table_markdown()/validate()。
+                  validate() 校验自洽性（高敏必须登记加密字段、留限期与自动销毁不矛盾）。
+
+  crypto.py       国密优先加密。active_algorithm() 探测 gmssl -> SM4-CBC+SM3；
+                  否则 cryptography -> AES-256-GCM；都没有 -> none（拒绝落盘）。
+                  **绝不谎报**：algorithm_text() 与实际后端一致。master_key() 生成/加载主
+                  密钥并经 secure_store 包裹；key_fingerprint()/rotate_key()/reset_cache()
+                  （reset_cache 会一并清 integrity 的签名密钥缓存，防止"密钥串目录"）。
+                  encrypt_bytes/decrypt_bytes/encrypt_field/decrypt_field（enc: 前缀，幂等、
+                  空值安全、明文兼容）；is_encrypted() 判断是否密文；irreversible_template()
+                  落 tpl1: HMAC-SHA256 **不可逆摘要**（不是可还原的加密）；
+                  digest()/sha256_hex()/secure_bytes()。
+                  末尾另转发 integrity 的接口：integrity_text/available/describe/selftest/
+                  reset_cache、record_digest/record_sign/record_verify、canonical_record。
+
+  integrity.py    **完整性保护（本版核心新增）**：哈希(SM3) + 非对称签名(SM2)。
+                  能力探测 hash_algorithm()/signature_algorithm()/available()（国密优先，
+                  缺 gmssl 时如实回退 SHA-256 + RSA-2048，**绝不把 SHA-256 冒充 SM3**）。
+                  digest(data)（SM3 摘要）。canonical_record(parts)：把一条记录规范成可复现
+                  字符串（按 key 排序 + **数值归一化 _norm()**，避免 SQLite 读回 float 导致
+                  "没被改却验签失败"）。密钥：sign_key(create=True) 生成/加载 SM2 或 RSA 私钥，
+                  经 secure_store 包裹落 KEYRING_DIR/sign.key.enc，公钥落 sign.pub；
+                  _sm2_derive_pub() 用 gmssl 曲线表自算公钥（不自行发明曲线）。
+                  sign(payload)/verify(payload, signature)：带算法前缀（sigsm2:/sigrsa:）；
+                  SM2 签名已处理两个坑——必须同时传公钥（否则 Z 值错）、签名 hex 需左补零到
+                  128 位；verify 传 hex 串而非 bytes。public_key_text()/key_fingerprint()/
+                  describe()/selftest()（签名可验、篡改必被发现）。
+
+  secure_store.py 主密钥保护。后端优先级：Windows DPAPI（win32crypt.CryptProtectData）
+                  -> Fernet（cryptography）-> none。**取不到保护后端就拒绝写明文密钥**
+                  （SecureStoreUnavailable）。encrypt()/decrypt()/describe()。
+                  同一套策略也用于包裹 integrity 的 SM2/RSA 签名私钥。
+                  失败诊断：必须用 WinDLL(..., use_last_error=True)，否则
+                  ctypes.get_last_error() 恒为 0（"错误码 0"就是这么来的）；
+                  describe_error() 把 0x8009000B(NTE_BAD_KEY_STATE) 等翻译成中文建议，
+                  ForeignKeyError 表示"密钥由别的 Windows 用户/电脑包裹，本机解不开"；
+                  blob_master_key()/windows_master_key_ids()/probe_keyring() 用于体检。
+
+  keyring.py      密钥环体检 / 备份 / 重置。status() 汇总每个密钥文件能否解开；
+                  backup_data_root() 把 data\ 复制成同级 data_backup_<时间戳>\；
+                  reset(backup=True, seed_demo=False, seed_accounts=True) 在备份后删除
+                  旧密钥与"用旧密钥加密且已解不开"的数据（dpp.db/vault/exports/reports），
+                  再生成新主密钥与签名密钥、重建预置账户，可选重灌演示数据。
+                  入口：cli.py keyring [--reset --yes [--with-demo]]、修复密钥环.bat。
+
+  desensitize.py  去标识化展示与动态水印。掩码：mask_id_card（保前4后4）、mask_ticket_no、
+                  mask_seat_no、mask_name（张三->张*）、mask_generic；deidentify() 默认视图
+                  （只给编号/考场/座次）；reveal_text() 授权后仍打码；sanitize_for_log() 日志
+                  净化（18/15 位证件号、手机号，用非数字前后视断言，汉字相邻也不漏）。
+                  水印：watermark_text()（操作人+时间+终端）、watermark_image()（PIL 平铺；
+                  无 PIL 时**如实标注 applied=False**，不谎报已加水印）、watermark_info()。
+
+  models.py       领域模型 + 审计原语。now_ts/now_epoch/new_id/canonical/chain_hash
+                  （sha256(prev_hash + canonical_json)）。数据类：Candidate（含
+                  destroy_at_epoch/is_expired/display_deid）、Consent、UseRecord
+                  （PURPOSE_ALLOWED=作弊判定/身份核验；PURPOSE_FORBIDDEN=情绪分析/行为画像/
+                  商业用途/跨境传输）、RevealRecord、ShareRequest、DestroyRecord、
+                  RightsRequest（SLA/超期判定）、AlternateChannel、ManagementMeasure、Incident
+                  （report_delay_hours）。
+
+  storage.py      SQLite（WAL）。表：candidates/consents/uses/reveals/shares/destroys/rights/
+                  channels/measures/incidents/audits/kv/**signatures**。SENSITIVE_CAND_FIELDS
+                  落库前字段级加密、读出时解密；raw_candidate_row() 取密文原始行
+                  （验收逐列核对用）。valid_consent()（未撤回）、expired_candidates()、
+                  log()（写哈希链）、verify_chain()（返回 ok/说明/条数，篡改可定位）、
+                  audit_actions()、summary()。
+                  **只读不可改（append-only）纵深防御**：
+                    · save_candidate() 用 INSERT（非 REPLACE），已存在即抛 ReadOnlyViolation
+                      （class ReadOnlyViolation）；save_consent() 同理。
+                    · update_candidate_meta(cand_ref, **fields)：唯一能碰已存在考生行的路径，
+                      白名单仅 {legal_hold, legal_hold_reason, consent_id}，其余抛异常；
+                      改动后重签并留审计。
+                    · SQLite 触发器 trg_cand_no_update / trg_consent_no_update / trg_sig_no_update：
+                      按字段比对（WHEN OLD.x IS NOT NEW.x），改加密载荷直接 RAISE(ABORT)。
+                    · sign_record()/get_signature()/list_signatures()：写入/查询签名台账。
+                    · verify_record(ref)/verify_all_records()：用公钥验签，返回被篡改清单
+                      （bad_count 必须为 0）；记录被删除不计篡改（删除属允许操作）。
+                    · _dec_candidate()/_dec_consent() **容错解密**：敏感列出现非密文或解密失败
+                      时降级为"〈解密失败：密文异常〉"并记 _corrupted_fields，避免一条坏记录
+                      拖垮整表查询。
+
+  access.py       账户与会话。hash_pwd/verify_pwd（PBKDF2-HMAC-SHA256，120000 轮，格式
+                  pbkdf2$salt$dk）。Session：can()/require()（角色×动作，默认拒绝）、
+                  room_filter() 考场隔离、masked()、risk_level()/risk_text()/confirm_risky()
+                  （持续校验：深夜/未登记设备/未登记地点 -> 评分；高风险时 RISKY_ACTIONS
+                  需二次确认）、describe()。AccountStore：ensure_seed/list_accounts/create/
+                  reset_password/delete/authenticate（`by_role` 做角色等级校验，防越权建号）。
+                  visible_candidates() 按可见范围取数。
+
+  lifecycle.py    全生命周期控制。
+    采集 collect()：**同意硬前置**（无同意/已撤回 -> 拒绝并留痕）；禁止静默；图像最小必要
+                  且加密落到 vault（文件名随机）；特征模板不可逆；retention_days 上限。
+    _store_encrypted_image()/read_image()（授权读图 + 留痕 + 水印）
+    传输 check_transport()：专网 + 加密 + 禁明文协议，不通过就不许传。
+    存储 storage_audit()：逐类别逐字段核对密文，**三态**（True/False/None=样本不足），
+                  rate=None 时不冒充 100%。
+    使用 use()：目的限定；超目的拒绝并留痕。reveal_plain()：看明文必须填理由、留痕、带水印。
+    permission_matrix()：角色×动作矩阵（验收证据）。
+    共享 request_share()：字段白名单（ref/room_id/seat_no/ticket_no/alert_code/alert_time/
+                  conclusion），直接标识与生物特征禁止共享；approve_share() 审批 + 脱敏导出
+                  (_export() 只含必要字段)。
+    销毁 run_auto_destroy()：到期强制销毁（跳过法律保留并记录）；_purge() 清字段/文件/
+                  同意记录并返回覆盖清单；destroy_by_request()（force=True 需双人见证）；
+                  set_legal_hold()（必须写理由）。
+    stage_table()：六阶段控制与证据表。
+
+  rights.py       考生权利响应。RIGHTS=access/copy/correct/delete/withdraw；RIGHTS_TEXT 中文名。
+                  submit()：**先核验身份才受理**（未核验只登记并标"待核验身份"）；
+                  withdraw **即时生效**（_apply_withdraw 标记同意失效 + 检查替代通道可用性）。
+                  handle()：access/copy 返回**脱敏**数据；**correct = DELETE(旧) + INSERT(新)**
+                  （只读策略下不留原地修改，返回 new_cand_ref，同时删旧图像文件）；
+                  delete 遇法律保留应驳回（status=rejected）；withdraw 补结论。stats()：按权利
+                  统计 + open/done/overdue。
+
+  governance.py   管理措施与验收。MEASURE_KINDS=责任人/DPIA/权限审批/应急响应/培训；
+                  seed_default_measures()（默认台账，责任人未指定如实标注"未指定"）；
+                  add_measure()/complete_measure()/measure_summary()。
+                  替代通道：add_channel()/drill_channel()/channel_stats()（未演练不计入可用）。
+                  应急响应：report_incident()（要求 2 小时内上报）/incident_stats()。
+                  acceptance()：计算**六项** KPI，**样本不足 -> 未达标**，绝不用 0 冒充。
+                  第 6 项「加密数据不可修改（只读）」由 _readonly_probe() 实测：真去调
+                  update_candidate_meta 改加密字段，捕获 ReadOnlyViolation / 数据库异常即算拦住。
+
+  report.py       Reporter。full_report() 分节：分类分级/生命周期/技术措施/**完整性保护**/
+                  治理/权利/指标/证据。export_all()/export_activities()/export_destroys()。
+                  console_summary() 返回摘要文本（含 6 项 KPI 一行式）。**注意**：构造 Reporter
+                  时应注入 lifecycle/gov/rights，否则 KPI 会显示"样本不足"。
+
+  demo_flags.py   演示标记常量（DEMO/DEMO_TAG/DEMO_NOTE/is_demo_record）。单独成文件便于
+                  判断"当前数据目录是否演示环境"，也便于清理时不误删真实数据。
+
+【tests/ 单元测试（174 项，纯 unittest，全部在临时目录）】
+  _base.py              DppTestCase：临时数据目录 + 建库 + 常用会话 + collect_one() 脚手架
+  test_catalog.py       分类分级目录自洽性（类别齐全/级别/留限期/加密字段/自动销毁）
+  test_crypto.py        国密优先与不谎报、加解密往返、幂等、篡改拒绝、不可逆模板、
+                        密钥指纹与轮换、落库即密文、加密率 100%
+  test_integrity.py     **新增**：算法如实标注、签名验签、私钥不明文落盘、摘要数值归一化、
+                        字段顺序无关、登记即签名、直接改库被检出、坏记录不拖垮整表、
+                        save_candidate 拒覆盖、update_meta 白名单、触发器 ABORT、删除允许、
+                        更正=删+增、integration_api 结构/只读探针/游标回退 owner
+  test_desensitize.py   掩码、去标识化默认视图、日志净化（含汉字相邻）、水印不谎报
+  test_lifecycle.py     采集同意前置/撤回拒绝、传输校验、目的限定、共享最小字段与脱敏导出、
+                        到期自动销毁/法律保留/强制销毁双人
+  test_permissions.py   角色×动作默认拒绝、越权提升拦截、考场范围最小化、持续校验风险评分、
+                        账户 PBKDF2 与越权建号
+  test_audit.py         哈希链 genesis/链接、篡改/删改/插入可检出、动作覆盖、日志无明文
+  test_rights.py        六项权利、身份核验前置、撤回即时生效、SLA、法律保留驳回删除、
+                        更正=删旧+增新、留痕
+  test_governance.py    管理措施台账、替代通道演练、2 小时上报、**样本不足语义**、
+                        六项全达标（含只读约束）
+
+【验收指标（第六节）】
+  1 敏感数据加密率 100%      -> storage_audit() 逐字段核对；算法在证据里注明
+  2 操作审计覆盖率 100%      -> audits 哈希链；覆盖登录/查询/导出/删除/解密查看/共享/登记/
+                                同意/权利申请/销毁/账户
+  3 到期自动销毁执行率 100%  -> destroys(mode=auto) + 审计链
+  4 越权访问测试全部拦截     -> uses(allowed=0) + 逐角色越权用例
+  5 替代通道可用性 100%      -> 登记且有演练通过的通道占比
+  6 加密数据不可修改（只读） -> signatures 表 + 触发器 + save_candidate 拒绝；要求
+                                100% 验签通过且修改被拒（_readonly_probe 实测）
+  样本不足一律如实标注并判未达标，绝不冒充。
+
+【加密与密钥摘要】
+  加密算法：SM4-CBC+SM3（国密，gmssl）/ AES-256-GCM（cryptography 回退）
+  完整性算法：SM3 哈希 + SM2 签名（gmssl）/ SHA-256 + RSA-2048（cryptography 回退）
+  主密钥 / 签名私钥：Windows DPAPI 优先，Fernet 回退；拒绝写明文密钥
+  密文格式：字段 enc:<alg>|<...>；模板 tpl1:<HMAC-SHA256>；签名 sigsm2:<hex> / sigrsa:<b64>
+
+【与其它主题的关系】
+  与项目三（合规与数据治理）互为表里：项目三给法律依据与治理框架，本实现给可运行的技术
+  控制与验收证据。02/03 已有各自的 Fernet 字段加密（data_crypto.py），本主题库/密钥/目录
+  **相互独立**，不修改不接管，仅在分类分级目录里登记其口径与保留期。
+  与 00_集成联动：integration_api.py 提供 status/protect/redact/check_transport/verify_data/
+  readonly_probe/revoke/destroy/list_candidates/handoff 十个 op（子进程 + JSON）；
+  00 侧 linkage.Linkage 已接 protect_candidate/handoff_candidate/redact/check_transport/
+  verify_data_integrity/readonly_probe。联动调用若传业务标识（如 "linkage"）而非账户名，
+  会自动回退到 owner（内网互信通道，全程留痕）。
