@@ -87,7 +87,57 @@ def op_status(a):
             "data_dir": str(config.DATA_ROOT)}
 
 
-OPS = {"verify": op_verify, "status": op_status}
+# =====================================================================
+#  账户管理（供 03 智能终端远程管理本机登录账号）
+#  —— 安全前提：本接口本身不做鉴权，**调用方（03）必须在自己的权限模型里
+#     先判定并留痕**；这里再做一次越级防护（by_role），两道闸。
+#     by_role 是"调用方以什么角色发起"，取值范围与 accounts.ROLE_LEVEL 一致。
+# =====================================================================
+_ACCT_OPS_NOTE = ("账户管理属敏感操作：03 侧需 owner 权限 + 写审计链后才可调用本接口；"
+                  "本接口只做越级防护，不替代 03 的权限判定。")
+
+
+def op_account_list(a):
+    """列出本机账户（不含口令哈希）"""
+    import accounts
+    return {"ok": True, "accounts": accounts.list_users(),
+            "roles": accounts.ROLE_TEXT, "note": _ACCT_OPS_NOTE,
+            "source": "01_人脸识别与身份核对"}
+
+
+def op_account_create(a):
+    """新建账户。args: username, password, role(admin/teacher), display_name, by_role"""
+    import accounts
+    ok, msg = accounts.create_user(
+        a.get("username") or "", a.get("display_name") or a.get("username") or "",
+        a.get("password") or "", role=a.get("role") or accounts.ROLE_TEACHER,
+        by_role=a.get("by_role") or accounts.ROLE_OWNER)
+    return {"ok": bool(ok), "reason": "" if ok else msg, "message": msg,
+            "source": "01_人脸识别与身份核对"}
+
+
+def op_account_reset(a):
+    """重置口令（被重置账户下次登录强制改密——这是 accounts 既有行为）"""
+    import accounts
+    ok, msg = accounts.reset_user_password(
+        a.get("username") or "", a.get("password") or "",
+        by_role=a.get("by_role") or accounts.ROLE_OWNER)
+    return {"ok": bool(ok), "reason": "" if ok else msg, "message": msg,
+            "source": "01_人脸识别与身份核对"}
+
+
+def op_account_delete(a):
+    """删除账户（同样受"只能删等级低于自己"与"至少保留一名管理员"约束）"""
+    import accounts
+    ok, msg = accounts.delete_user(a.get("username") or "",
+                                   by_role=a.get("by_role") or accounts.ROLE_OWNER)
+    return {"ok": bool(ok), "reason": "" if ok else msg, "message": msg,
+            "source": "01_人脸识别与身份核对"}
+
+
+OPS = {"verify": op_verify, "status": op_status,
+       "account_list": op_account_list, "account_create": op_account_create,
+       "account_reset": op_account_reset, "account_delete": op_account_delete}
 
 
 def main():

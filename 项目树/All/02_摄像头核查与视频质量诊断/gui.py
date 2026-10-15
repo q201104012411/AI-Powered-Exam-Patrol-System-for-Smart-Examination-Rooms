@@ -1382,6 +1382,10 @@ class App(object):
         # 单帧瞬时动作会被时间维度抑制（正是"坐着没动却报偏转"那类误报的解药）
         self.mon_cheat = tk.BooleanVar(value=True)
         self._cheat_watches = {}
+        # 火场识别（13 融入本模块的 fire_detect）：火焰/烟雾，人身安全事件，
+        # 与作弊识别并行；单帧不算数（连续 confirm_frames 帧）且静态火色封顶
+        self.mon_fire = tk.BooleanVar(value=True)
+        self._fire_watches = {}
         self.mon_ai_chk = ttk.Checkbutton(
             mid, text="AI 辅助识别（逐人：绿=正常 橙=异常 红=越界，考场监控默认开启）",
             variable=self.mon_ai)
@@ -1390,6 +1394,10 @@ class App(object):
             mid, text="作弊识别（时序：动作持续才告警，单帧动作自动抑制）",
             variable=self.mon_cheat)
         self.mon_cheat_chk.pack(side="left", padx=(12, 0))
+        self.mon_fire_chk = ttk.Checkbutton(
+            mid, text="火场识别（火焰/烟雾，连续帧确认）",
+            variable=self.mon_fire)
+        self.mon_fire_chk.pack(side="left", padx=(12, 0))
 
         self.mon_status = ttk.Label(bar, text="就绪", foreground=GRAY_HINT)
         self.mon_status.pack(side="right")
@@ -1803,7 +1811,7 @@ class App(object):
                             fa = getattr(tr, "face_cache", None) if tr is not None else None
                             p["face"] = (fa or {}).get("face") if fa else None
                         self._cam_ai_side_effects(code, panel, persons, viol,
-                                                  ai_frame.shape)
+                                                  ai_frame.shape, ai_frame)
                 # ---- 3) 贴图：用缓存的框画在显示帧上（cv2 + 位图缓存，几乎零成本） ----
                 scale = panel.get("ai_scale")
                 if scale is None:
@@ -1826,7 +1834,7 @@ class App(object):
         except Exception as e:
             self._cam_set_status(code, "渲染失败：%s" % e, CAM_COLORS["error"])
 
-    def _cam_ai_side_effects(self, code, panel, persons, viol, ai_shape=None):
+    def _cam_ai_side_effects(self, code, panel, persons, viol, ai_shape=None, frame=None):
         """AI 分析后的界面更新与异常上报（只在真正跑过分析的帧上执行）"""
         level = self._density_level(persons, ai_shape or panel.get("ai_shape"))
         panel["density_level"] = level
@@ -1842,6 +1850,9 @@ class App(object):
         # 显示平滑后的人数（避免读数在 15/16/17 之间乱跳）
         # —— 作弊识别要在这一行之前喂帧，否则面板上的作弊风险会慢一帧
         self._cam_cheat_update(code, panel, persons, ai_shape)
+        # 火场识别（13 已融入本模块的 fire_detect）：与作弊识别并列，同样只在
+        # 真正跑过分析的帧上执行；用原始分析帧（小图会丢远处小火点）
+        self._cam_fire_update(code, panel, frame)
         self._cam_set_ai(code, panel.get("ai_count", len(persons)), viol)
         # 顶部信息条与汇总限频刷新，避免每路每次分析都去改 Tk 控件
         now_ms = time.time() * 1000.0
@@ -1977,6 +1988,88 @@ class App(object):
         except Exception:
             pass
 
+    # ================= 火场识别（13 融入本模块） =================
+    def _fire_watch_for(self, code):
+        """每路一个 FireWatch；不可用时如实说明，不静默假装在跑"""
+        watch = getattr(self, "_fire_watches", {}).get(code)
+        if watch is None:
+            try:
+                import fire_detect
+            except Exception as e:
+                self._mon_log_line("火场识别不可用：%s" % e)
+                return None
+            try:
+                watch = fire_detect.FireWatch()
+                self._mon_log_line("火场识别已启用：%s" % watch.backend_name)
+                self._fire_watches[code] = watch
+            except Exception as e:
+                self._mon_log_line("火场识别初始化失败：%s" % e)
+                return None
+        return watch
+
+    def _cam_fire_update(self, code, panel, frame):
+        """把原始分析帧喂给火检；只有确认火警（连续帧 + 冷却）才上报 03。"""
+        if not (getattr(self, "mon_fire", None) and self.mon_fire.get()):
+            panel["fire"] = None
+            return
+        if frame is None:
+            return
+        watch = self._fire_watch_for(code)
+        if watch is None:
+            panel["fire"] = {"ok": False, "reason": "火场识别不可用"}
+            return
+        try:
+            r = watch.push_frame(frame, camera_name=code)
+        except Exception as e:
+            panel["fire"] = {"ok": False, "reason": "火检异常：%s" % e}
+            return
+        panel["fire"] = r
+        if not r.get("ok") or not r.get("just_triggered"):
+            return
+        level = r.get("level") or "warning"
+        alert_code = "FIRE_ALARM" if level == "alarm" else "FIRE_SMOKE"
+        dev = self._dev_by_code(code)
+        text = "火警 %s %s：%s" % (code, level, r.get("reason") or "")
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        self._behavior_history.append({"ts": ts, "code": code, "text": text})
+        self._behavior_history = self._behavior_history[-50:]
+        panel["history"] = (panel.get("history", []) + [
+            {"ts": ts[-8:], "text": text}])[-10:]
+        self._mon_log_line("【%s】火场识别：%s（%s）"
+                           % (code, level, r.get("reason") or ""))
+        self._beep()
+        if level == "alarm":
+            self._cam_set_border(code, "error")
+        try:
+            import linkage_bridge
+            linkage_bridge.report_fire(
+                device_code=code, alert_code=alert_code,
+                score=float(r.get("score") or 0.0),
+                reason=r.get("reason") or "",
+                room_id=dev.room_id if dev else "",
+                operator=self.user.username if self.user else "02_ai")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _fire_bar_text(panel):
+        """面板 AI 行里追加的火检状态文字（正常时不占地方）"""
+        r = (panel or {}).get("fire")
+        if not r:
+            return ""
+        if not r.get("ok"):
+            return "　｜　火检：%s" % (r.get("reason") or "不可用")
+        if r.get("level"):
+            return "　｜　火情：%s %.2f" % (r.get("level"), float(r.get("score") or 0))
+        return ""
+
+    def _fire_available(self):
+        try:
+            import fire_detect                     # noqa: F401
+            return True
+        except Exception:
+            return False
+
     def _cam_set_ai(self, code, n_person, n_cross):
         """逐路显示 AI 识别人数：正常绿、有越界橙红，未开 AI 时留空"""
         panel = self._mon_panels.get(code)
@@ -1990,6 +2083,7 @@ class App(object):
         else:
             text, color = "AI 识别中：%d 人" % n_person, CAM_COLORS["playing"]
         text += self._cheat_bar_text(panel)
+        text += self._fire_bar_text(panel)
         # 内容没变就不碰控件（Tk 的 config 会触发重绘，路数一多非常吃 CPU）
         if panel.get("ai_text") == text:
             return

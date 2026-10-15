@@ -126,9 +126,65 @@ def op_status(a):
             "orders": store.workorder_summary(), "data_dir": str(config.DATA_ROOT)}
 
 
+# =====================================================================
+#  账户管理（供 03 智能终端远程管理本模块的网页/界面登录账号）
+#  —— 与 01 的口径一致：本接口只做越级防护（by=调用方角色），
+#     真正的权限判定与留痕在 03 侧完成（两道闸）。
+# =====================================================================
+_ACCT_NOTE = ("账户管理属敏感操作：03 侧需 owner 权限 + 写审计链后才可调用本接口；"
+              "本接口只做越级防护，不替代 03 的权限判定。")
+
+
+def op_account_list(a):
+    import web_accounts
+    store = _stack()[0]
+    acc = web_accounts.Accounts(store)
+    acc.ensure()
+    return {"ok": True, "accounts": acc.list_accounts(),
+            "roles": web_accounts.ROLE_TEXT, "note": _ACCT_NOTE,
+            "source": "02_摄像头核查与视频质量诊断"}
+
+
+def op_account_create(a):
+    import web_accounts
+    store = _stack()[0]
+    acc = web_accounts.Accounts(store)
+    acc.ensure()
+    ok, msg = acc.create(a.get("username") or "", a.get("password") or "",
+                         a.get("role") or web_accounts.ROLE_ADMIN,
+                         name=a.get("display_name") or a.get("name") or "",
+                         by=a.get("by_role") or web_accounts.ROLE_OWNER)
+    return {"ok": bool(ok), "reason": "" if ok else msg, "message": msg,
+            "source": "02_摄像头核查与视频质量诊断"}
+
+
+def op_account_reset(a):
+    import web_accounts
+    store = _stack()[0]
+    acc = web_accounts.Accounts(store)
+    acc.ensure()
+    ok, msg = acc.reset_password(a.get("username") or "", a.get("password") or "",
+                                 by=a.get("by_role") or web_accounts.ROLE_OWNER)
+    return {"ok": bool(ok), "reason": "" if ok else msg, "message": msg,
+            "source": "02_摄像头核查与视频质量诊断"}
+
+
+def op_account_delete(a):
+    import web_accounts
+    store = _stack()[0]
+    acc = web_accounts.Accounts(store)
+    acc.ensure()
+    ok, msg = acc.delete(a.get("username") or "",
+                         by=a.get("by_role") or web_accounts.ROLE_OWNER)
+    return {"ok": bool(ok), "reason": "" if ok else msg, "message": msg,
+            "source": "02_摄像头核查与视频质量诊断"}
+
+
 OPS = {"credibility": op_credibility, "inspect": op_inspect,
        "devices": op_devices, "save_device": op_save_device,
-       "baseline": op_baseline, "status": op_status}
+       "baseline": op_baseline, "status": op_status,
+       "account_list": op_account_list, "account_create": op_account_create,
+       "account_reset": op_account_reset, "account_delete": op_account_delete}
 
 
 def main():
