@@ -23,6 +23,12 @@
 只读接口另有：`GET /api/status`（终端状态）、`GET /api/alerts`（告警列表）、
 `GET /api/records`（远端记录），供 00 联动层在多机部署时远程查询、也供人工排查。
 
+网页版大数据驾驶舱（2026-10-18 新增）：
+  `GET /` 或 `GET /cockpit` 返回 `web\\cockpit.html`（单文件大屏页面，无任何外部 CDN 依赖）；
+  `GET /api/cockpit` 返回这一屏要的全部数据（KPI + 趋势 + 明细 + 模块态势，一次给全）。
+  页面本身不含数据、不鉴权；**数据接口仍走同一套令牌**（跨设备要在页面右上角填令牌）。
+  与 Py GUI 的驾驶舱是**同一份数据口径**（同一个 `store.stats()`），不存在两套统计。
+
 远端记录与本机审计链的关系（重要）：
   远端记录进 `remote_records` 表，**不并进本机 `audit` 哈希链** ——
   并进去本机链会立刻校验失败。本机链上只写一条回执："收到 X 设备 N 条"。
@@ -59,6 +65,34 @@ LOOPBACK = ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1")
 
 # 接收端认识的记录类别（与 00 的 lan_upload.KINDS 对齐；不在表里的也照存，只是标注"未分类"）
 KNOWN_KINDS = ("audit", "oplog", "check", "order", "verify", "alert")
+
+# ---- 网页驾驶舱（GET / 与 GET /api/cockpit）----
+# 为什么放在这个端口上：03 只有这一个监听口，网页版大屏要跟 Py GUI 看同一份数据，
+# 再起一个 Flask 服务既多一个端口又多一套鉴权；直接复用现有服务最省事。
+WEB_DIR = os.path.join(BASE, "web")
+COCKPIT_HTML = os.path.join(WEB_DIR, "cockpit.html")
+MODULE_TTL = 30.0          # 跨模块聚合缓存（网页 5 秒一刷，不能每次都起 8 个子进程）
+MODULE_TIMEOUT = 6.0       # 单个模块子进程超时
+CHAIN_TTL = 20.0           # 审计链全量校验间隔（O(全表)，不必每 5 秒一次）
+
+#: 网页驾驶舱 HTML 的 mtime 缓存（改完页面不用重启服务）
+_HTML_CACHE = {"mtime": 0.0, "data": b""}
+
+
+def read_cockpit_html():
+    """读取 web/cockpit.html（按 mtime 缓存）；文件缺失返回 None。"""
+    try:
+        mtime = os.path.getmtime(COCKPIT_HTML)
+    except OSError:
+        return None
+    if _HTML_CACHE["mtime"] != mtime or not _HTML_CACHE["data"]:
+        try:
+            with open(COCKPIT_HTML, "rb") as f:
+                _HTML_CACHE["data"] = f.read()
+            _HTML_CACHE["mtime"] = mtime
+        except OSError:
+            return None
+    return _HTML_CACHE["data"]
 
 
 def is_loopback(host):
@@ -111,6 +145,11 @@ class LanService(object):
         self.store = store
         self.token = token or ""
         self.allow_local_no_token = bool(allow_local_no_token)
+        # 网页驾驶舱用到的缓存（都是"代价高、变化慢"的东西）
+        self._mod_cache = None
+        self._mod_at = 0.0
+        self._chain = (True, "", 0)
+        self._chain_at = 0.0
 
     # ---------------- 鉴权 ----------------
     def authorized(self, client_ip, headers, path=""):
@@ -218,6 +257,127 @@ class LanService(object):
             "devices": self.store.remote_devices(),
             "summary": self.store.remote_summary(),
             "data_dir": str(config.DATA_ROOT)}
+
+    # ---------------- GET /api/cockpit（网页版驾驶舱的数据源） ----------------
+    def _modules(self, force=False):
+        """跨模块态势（带 TTL 缓存）。
+
+        网页每 5 秒拉一次数，如果每次都起 8 个子进程，浏览器那边就会一直等；
+        这里按 MODULE_TTL 缓存，只有缓存过期才真的去聚合。
+        """
+        now = time.time()
+        if not force and self._mod_cache is not None and (now - self._mod_at) < MODULE_TTL:
+            return self._mod_cache
+        rows = []
+        try:
+            import remote_status
+            agg = remote_status.ModuleStatus(ttl=MODULE_TTL, timeout=MODULE_TIMEOUT)
+            data = agg.all(force=force)
+            for (_key, _parts, _name), (name, text, ok) in zip(
+                    remote_status.MODULES, remote_status.ModuleStatus.brief(data)):
+                rows.append({"name": name, "brief": text, "ok": bool(ok)})
+        except Exception as e:                        # noqa: BLE001
+            rows = [{"name": "模块聚合不可用", "brief": str(e)[:80], "ok": False}]
+        self._mod_cache = rows
+        self._mod_at = now
+        return rows
+
+    def cockpit(self, force_modules=False):
+        """网页版大数据驾驶舱的一次性快照（只读，与 Py GUI 同一份数据口径）。
+
+        设计取舍：
+          · **一次请求给全**：KPI/图表/明细/模块态势一个 JSON 回来，避免浏览器打 6 个请求；
+          · 计数全部来自 `store.stats()` 的 SQL 聚合，不在服务端做"最多看 2000 条"的截断；
+          · 明细只给态势必需字段（考场/级别/状态），**不带考生姓名与证件号**；
+          · 审计链与模块聚合带 TTL，避免每 5 秒把库和子进程折腾一遍。
+        """
+        import config
+        t0 = time.time()
+        store = self.store
+        try:
+            st = store.stats(hours=24, days=7, recent=60)
+        except Exception as e:                        # noqa: BLE001
+            return {"ok": False, "reason": "本地库不可用：%s" % str(e)[:160]}
+        try:
+            remote = store.remote_summary()
+            devs = store.remote_devices()
+        except Exception:                             # noqa: BLE001
+            remote, devs = {}, []
+
+        now = time.time()
+        if self._chain_at and (now - self._chain_at) < CHAIN_TTL:
+            chain_ok, chain_msg, chain_n = self._chain
+        else:
+            try:
+                chain_ok, chain_msg, chain_n = store.verify_chain()
+            except Exception as e:                    # noqa: BLE001
+                chain_ok, chain_msg, chain_n = False, str(e)[:120], 0
+            self._chain = (bool(chain_ok), chain_msg, int(chain_n or 0))
+            self._chain_at = now
+
+        status_text = dict(config.ALERT_STATUS_TEXT)
+        by_level = dict(st.get("by_level") or {})
+        by_status = dict(st.get("by_status") or {})
+        codes = [(c, n) for c, n in (st.get("by_code") or [])]
+        code_map = dict(codes)
+
+        recent = []
+        for a in (st.get("recent") or [])[:60]:
+            try:
+                overdue = bool(a.status == "pending" and a.overdue())
+            except Exception:                         # noqa: BLE001
+                overdue = False
+            recent.append({
+                "time": (a.created_at or "")[5:16],
+                "level": a.level,
+                "level_name": config.LEVEL_META.get(a.level, {}).get("name", a.level),
+                "code": a.code,
+                "code_name": config.ALERT_CODE_TEXT.get(a.code, a.code),
+                "room": a.room_id or "—",
+                "status": a.status,
+                "status_name": status_text.get(a.status, a.status),
+                "overdue": overdue,
+            })
+
+        return {
+            "ok": True,
+            "server_time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "interval": 5,
+            "kpi": {
+                "total": int(st.get("total") or 0),
+                "red": int(by_level.get(config.LEVEL_RED, 0) or 0),
+                "orange": int(by_level.get(config.LEVEL_ORANGE, 0) or 0),
+                "pending": int(by_status.get("pending", 0) or 0),
+                "overdue": int(st.get("overdue") or 0),
+                "reviews": int(st.get("reviews") or 0),
+                "unsynced": int(st.get("unsynced") or 0),
+                "last_hour": int(st.get("last_hour") or 0),
+                "remote": int(remote.get("records") or 0),
+                "devices": int(remote.get("devices") or 0),
+                "fire": int(code_map.get("FIRE_ALARM", 0) or 0),
+                "smoke": int(code_map.get("FIRE_SMOKE", 0) or 0),
+                "audit": int(st.get("audits") or chain_n or 0),
+                "chain_ok": bool(chain_ok),
+                "chain_msg": chain_msg,
+                "remote_last": remote.get("last_received") or "",
+            },
+            "by_level": by_level,
+            "by_status": by_status,
+            "by_code": [{"code": c, "name": config.ALERT_CODE_TEXT.get(c, c), "count": n}
+                        for c, n in codes[:12]],
+            "hourly": [[int(ts), int(n)] for ts, n in (st.get("hourly") or [])],
+            "daily": [[int(ts), int(n)] for ts, n in (st.get("daily") or [])],
+            "recent": recent,
+            "devices": [{"id": d.get("device_id", ""),
+                         "name": d.get("device_name", ""),
+                         "records": int(d.get("records") or 0),
+                         "last": (d.get("last_seen") or "")[5:16]} for d in devs[:20]],
+            "modules": self._modules(force=force_modules),
+            "status_text": status_text,
+            "role_text": dict(config.ROLE_TEXT),
+            "data_dir": str(config.DATA_ROOT),
+            "cost_ms": round((time.time() - t0) * 1000.0, 1),
+        }
 
     # ---------------- POST /api/records ----------------
     def handle_records(self, body, client_ip="-"):
@@ -361,21 +521,64 @@ def make_handler(service):
         def log_message(self, fmt, *args):            # noqa: A003
             pass
 
+        def handle_one_request(self):
+            """浏览器/大屏刷新时会直接掐掉 keep-alive 连接。
+
+            http.server 默认会把 ConnectionResetError 打成整段 traceback，
+            服务窗口一天下来全是"远程主机强迫关闭了一个现有的连接"；
+            对端正常断开不是错误，静默收尾即可（真正的异常仍会抛给上层）。
+            """
+            try:
+                BaseHTTPRequestHandler.handle_one_request(self)
+            except (ConnectionResetError, ConnectionAbortedError,
+                    BrokenPipeError, TimeoutError):
+                self.close_connection = True
+
         # ---- 工具 ----
         def _client(self):
             return (self.client_address[0] if self.client_address else "") or ""
 
         def _send(self, status, obj):
             data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+            self._send_bytes(status, data, "application/json; charset=utf-8")
+
+        def _send_bytes(self, status, data, ctype):
             try:
                 self.send_response(status)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Cache-Control", "no-store")
+                self._cors()
                 self.end_headers()
                 self.wfile.write(data)
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
+
+        def _cors(self):
+            """只给"本机页面"放行跨源读取。
+
+            场景：大屏常把 cockpit.html 直接双击（file://）打开，再连 127.0.0.1:9113，
+            这属于跨源 + 自带 X-Exam-Token 头，浏览器会先发 OPTIONS 预检。
+            所以这里对 Origin=null（file://）与 127.0.0.1/localhost 回显 CORS 头，
+            其它来源一个头都不给 —— 浏览器直接读不到响应体，与"令牌把关"是两道独立的门。
+            """
+            origin = self.headers.get("Origin") or ""
+            allow = ""
+            if origin == "null":
+                allow = "null"
+            elif origin:
+                try:
+                    host = urllib.parse.urlparse(origin).hostname or ""
+                except ValueError:
+                    host = ""
+                if is_loopback(host):
+                    allow = origin
+            if allow:
+                self.send_header("Access-Control-Allow-Origin", allow)
+                self.send_header("Access-Control-Allow-Headers",
+                                 "%s, Content-Type" % TOKEN_HEADER)
+                self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+                self.send_header("Access-Control-Max-Age", "600")
 
         def _auth(self, path):
             ok, why = service.authorized(self._client(), self.headers, path)
@@ -405,6 +608,23 @@ def make_handler(service):
         def do_GET(self):                             # noqa: N802
             parsed = urllib.parse.urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
+            # ---- 网页版大数据驾驶舱（页面本身不含数据，故不要求令牌）----
+            if path in ("/", "/cockpit", "/index.html"):
+                html = read_cockpit_html()
+                if html is None:
+                    self._send(500, {"ok": False,
+                                     "reason": "缺少 web/cockpit.html（页面文件未随仓库提供？）"})
+                else:
+                    self._send_bytes(200, html, "text/html; charset=utf-8")
+                return
+            # ---- 驾驶舱数据（含告警态势，必须鉴权）----
+            if path == "/api/cockpit":
+                if not self._auth(path):
+                    return
+                q = urllib.parse.parse_qs(parsed.query)
+                force = (q.get("modules") or [""])[0] in ("1", "true", "force")
+                self._send(200, service.cockpit(force_modules=force))
+                return
             if path == "/health":
                 # 本机（回环）免令牌；跨设备一律要令牌 —— 未配令牌时服务根本不会监听非本机
                 if not self._auth(path):
@@ -445,10 +665,21 @@ def make_handler(service):
                 self._send(200, service.list_commands(limit))
                 return
             self._send(404, {"ok": False, "reason": "未知路径：%s" % path,
-                             "paths": ["/health", "/api/status", "/api/alerts",
-                                       "/api/records", "/api/command", "/api/commands",
+                             "paths": ["/", "/health", "/api/status", "/api/alerts",
+                                       "/api/cockpit", "/api/records", "/api/command",
+                                       "/api/commands",
                                        "POST /api/records", "POST /api/ingest_alert",
                                        "POST /api/command", "POST /api/command_result"]})
+
+        def do_OPTIONS(self):                         # noqa: N802
+            """CORS 预检（file:// 打开大屏时会用到；具体放行规则见 _cors）"""
+            try:
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self._cors()
+                self.end_headers()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
 
         def do_POST(self):                            # noqa: N802
             parsed = urllib.parse.urlparse(self.path)
@@ -547,6 +778,16 @@ def _selfcheck_child():
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read().decode("utf-8") or "{}")
 
+    def fetch_text(path):
+        """按原文取回（HTML 页面不是 JSON，call() 解析不了）"""
+        url = "http://127.0.0.1:%d%s" % (port, path)
+        try:
+            with urllib.request.urlopen(url, timeout=5) as r:
+                return (r.status, r.headers.get("Content-Type", ""),
+                        r.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as e:
+            return e.code, "", e.read().decode("utf-8", "replace")
+
     try:
         st, out = call("/health")
         chk("健康检查可用", st == 200 and out.get("ok"), "proto=%s" % out.get("proto"))
@@ -612,6 +853,33 @@ def _selfcheck_child():
             st == 200 and any(x.get("code") == "FACE_MISMATCH"
                               for x in out.get("alerts", [])),
             "告警列表=%d 条" % len(out.get("alerts", [])))
+
+        # ---- 网页版大数据驾驶舱 ----
+        import re
+        st, ctype, text = fetch_text("/")
+        # 判"零外链"要看真标签：先去掉 HTML 注释（注释里就写了"不要用 CDN"这类说明，
+        # 朴素子串判断会把说明文字当外链，误判过一次）
+        markup = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+        has_ext = bool(re.search(r"""(?:src|href)\s*=\s*["']\s*https?://""", markup,
+                                 re.I))
+        chk("网页驾驶舱页面可打开（无外部 CDN 依赖）",
+            st == 200 and "text/html" in (ctype or "") and "<canvas" in text
+            and not has_ext,
+            "%s %d 字节 外链=%s" % (ctype, len(text), "有" if has_ext else "无"))
+
+        st, out = call("/api/cockpit")
+        need = ("kpi", "by_level", "by_code", "hourly", "daily",
+                "recent", "devices", "modules", "status_text")
+        chk("驾驶舱数据接口字段齐全（页面按这些字段渲染）",
+            st == 200 and out.get("ok") and all(k in out for k in need),
+            "KPI=%d 项 模块=%d 个" % (len(out.get("kpi") or {}),
+                                     len(out.get("modules") or [])))
+
+        st, out = call("/api/cockpit")
+        total_db = store.summary().get("total", 0)
+        chk("驾驶舱计数与库内一致（同一份 SQL 聚合口径）",
+            st == 200 and (out.get("kpi") or {}).get("total") == total_db,
+            "接口=%s 库内=%s" % ((out.get("kpi") or {}).get("total"), total_db))
 
         summary = store.remote_summary()
         chk("远端记录落库分链存储", summary.get("records") == 2,

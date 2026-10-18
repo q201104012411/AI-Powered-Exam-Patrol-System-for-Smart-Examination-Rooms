@@ -164,6 +164,171 @@
   .tag.admin { background: #fee2e2; color: #b91c1c; }
   .tag.teacher { background: #dbeafe; color: #1e40af; }
 </style>
+<style id="cockpit-skin">
+/* ============================================================
+   驾驶舱皮肤（2026-10-18 追加；覆盖在上面的浅色样式之后）
+   目的：01 考生库网页面板与 03「大数据驾驶舱」（Py GUI / 网页版）同一套配色与质感。
+   01 原本是"深侧栏 + 白内容区"，这里把内容区也拉进驾驶舱色系。
+   ============================================================ */
+:root{
+  --primary:#22d3ee; --primary-dark:#3b82f6;
+  --success:#34d399; --danger:#f43f5e; --warning:#fbbf24; --gray:#6b7280;
+  --bg:#060c18; --card:#0d1a2e; --border:#1b3457; --text:#e8f1ff;
+  --text-light:#8ba3c7;
+  --ck-panel:#0d1a2e; --ck-panel2:#122542; --ck-line:#1b3457;
+  --ck-fg:#e8f1ff; --ck-dim:#8ba3c7; --ck-mute:#5b739a;
+  --ck-cyan:#22d3ee; --ck-amber:#fbbf24; --ck-red:#f43f5e; --ck-green:#34d399;
+}
+html{background:var(--bg)}
+body{
+  background:
+    radial-gradient(1200px 460px at 20% -18%, rgba(34,211,238,.13), transparent 62%),
+    var(--bg) !important;
+  background-attachment:fixed;color:var(--ck-fg) !important;
+}
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:
+    linear-gradient(rgba(27,52,87,.55) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(27,52,87,.55) 1px, transparent 1px);
+  background-size:46px 46px;opacity:.20;
+  -webkit-mask-image:radial-gradient(circle at 50% 28%, #000 30%, transparent 88%);
+  mask-image:radial-gradient(circle at 50% 28%, #000 30%, transparent 88%);
+}
+.login-wrap,.app,.status-bar,.modal-bg{position:relative;z-index:1}
+
+/* ---- 登录 ---- */
+.login-wrap{
+  background:
+    radial-gradient(900px 520px at 30% 0%, rgba(34,211,238,.16), transparent 62%),
+    radial-gradient(700px 420px at 100% 100%, rgba(59,130,246,.14), transparent 60%),
+    var(--bg) !important;
+}
+.login-box{
+  background:linear-gradient(180deg,var(--ck-panel2),#0b1526) !important;
+  border:1px solid var(--ck-line);color:var(--ck-fg) !important;
+  box-shadow:0 30px 80px -40px #000, inset 0 1px 0 rgba(255,255,255,.05) !important;
+}
+.login-box h2{
+  background:linear-gradient(92deg,var(--ck-fg),var(--ck-cyan) 72%,#3b82f6);
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
+}
+.login-box .sub{color:var(--ck-dim) !important}
+.login-box label{color:var(--ck-dim) !important}
+.login-box input{background:#08152a !important;color:var(--ck-fg) !important;
+  border:1px solid var(--ck-line) !important}
+.login-box input:focus{border-color:var(--ck-cyan) !important;
+  box-shadow:0 0 0 3px rgba(34,211,238,.14) !important}
+.login-box button{
+  background:linear-gradient(180deg,#1b3a68,#122542) !important;
+  border:1px solid var(--ck-cyan) !important;color:var(--ck-fg) !important;
+  box-shadow:0 0 22px -8px var(--ck-cyan);
+}
+.login-box button:hover{background:linear-gradient(180deg,#22508c,#1a3157) !important}
+
+/* ---- 侧栏 / 顶栏 ---- */
+.sidebar{
+  background:linear-gradient(180deg,#0d1a2e,#070d1a) !important;
+  border-right:1px solid var(--ck-line);color:var(--ck-dim) !important;
+}
+.sidebar .logo{color:var(--ck-fg) !important;border-bottom:1px solid var(--ck-line) !important}
+.sidebar .logo small{color:var(--ck-mute) !important}
+.nav-item{color:var(--ck-dim)}
+.nav-item:hover{background:rgba(34,211,238,.08) !important;color:var(--ck-fg) !important}
+.nav-item.active{background:rgba(34,211,238,.12) !important;color:var(--ck-cyan) !important;
+  border-left-color:var(--ck-cyan) !important;text-shadow:0 0 12px rgba(34,211,238,.4)}
+.main{background:transparent !important}
+.header h1{color:var(--ck-fg) !important}
+.header .user-info{color:var(--ck-dim) !important}
+.header .user-info b{color:var(--ck-cyan) !important}
+
+/* ---- 卡片 / 工具条 / 表格 ---- */
+.stat-card,.toolbar,.table-wrap{
+  background:linear-gradient(180deg,rgba(18,37,66,.72),rgba(10,20,36,.94)) !important;
+  border:1px solid var(--ck-line) !important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.035), 0 16px 40px -30px #000 !important;
+}
+.stat-card .label{color:var(--ck-dim) !important}
+.stat-card .value{color:var(--ck-cyan) !important;font-family:Consolas,monospace;
+  text-shadow:0 0 16px rgba(34,211,238,.4)}
+th{background:#0f1f38 !important;color:var(--ck-cyan) !important;font-weight:700}
+th,td{border-bottom:1px solid rgba(27,52,87,.7) !important}
+tr:hover td{background:rgba(34,211,238,.06) !important}
+td input{color:var(--ck-fg) !important}
+td input:focus{background:#08152a !important;border-color:var(--ck-cyan) !important;
+  box-shadow:0 0 0 3px rgba(34,211,238,.14) !important}
+.row-num,.empty{color:var(--ck-mute) !important}
+
+/* ---- 按钮 ---- */
+button{
+  background:linear-gradient(180deg,#1a3157,#122542) !important;
+  border:1px solid var(--ck-line) !important;color:var(--ck-fg) !important;
+  transition:.16s border-color,.16s transform,.16s background;
+}
+button:hover{background:linear-gradient(180deg,#22406f,#1a3157) !important;
+  border-color:var(--ck-cyan) !important;transform:translateY(-1px)}
+button.success{background:linear-gradient(180deg,#065f46,#064e3b) !important;
+  border-color:var(--ck-green) !important;color:#d1fae5 !important}
+button.danger{background:linear-gradient(180deg,#7f1d3a,#5a1529) !important;
+  border-color:var(--ck-red) !important;color:#ffe4e9 !important}
+button.secondary{background:#16253f !important;border-color:var(--ck-line) !important;
+  color:var(--ck-dim) !important}
+button.ghost{background:transparent !important;color:var(--ck-cyan) !important;
+  border:1px solid var(--ck-line) !important}
+button.ghost:hover{background:rgba(34,211,238,.10) !important;
+  border-color:var(--ck-cyan) !important}
+
+/* ---- 表单控件 ---- */
+.search,input,select,textarea{
+  background:#08152a !important;border:1px solid var(--ck-line) !important;
+  color:var(--ck-fg) !important;
+}
+input::placeholder{color:var(--ck-mute) !important}
+.search:focus,input:focus,select:focus,textarea:focus{
+  border-color:var(--ck-cyan) !important;outline:none;
+  box-shadow:0 0 0 3px rgba(34,211,238,.14) !important;
+}
+select option{background:#0b1526;color:var(--ck-fg)}
+
+/* ---- 提示条 / 弹窗 / 状态栏 ---- */
+.hint,.pwd-banner{
+  background:rgba(251,191,36,.10) !important;
+  border-left:4px solid var(--ck-amber) !important;
+  color:#ffe8b0 !important;
+}
+.hint code{background:rgba(251,191,36,.18) !important;color:#ffe8b0 !important}
+.mode-bar{
+  background:rgba(34,211,238,.08) !important;
+  border:1px solid rgba(34,211,238,.3) !important;color:#bfe9f5 !important;
+}
+.mode-bar b{color:var(--ck-cyan) !important}
+.mode-bar .warn{color:var(--ck-amber) !important}
+.modal-bg{background:rgba(3,8,18,.82) !important;backdrop-filter:blur(3px)}
+.modal{
+  background:linear-gradient(180deg,var(--ck-panel2),#0b1526) !important;
+  border:1px solid var(--ck-line);color:var(--ck-fg) !important;
+  box-shadow:0 30px 80px -40px #000 !important;
+}
+.modal p{color:var(--ck-dim) !important}
+.modal label{color:var(--ck-dim) !important}
+.status-bar{
+  background:#08152a !important;border-top:1px solid var(--ck-line) !important;
+  color:var(--ck-dim) !important;
+}
+.status-bar .dot{background:var(--ck-green) !important;
+  box-shadow:0 0 10px var(--ck-green)}
+a{color:var(--ck-cyan) !important}
+
+/* ---- 页面里写死的浅色 ---- */
+[style*="color:#6b7280"],[style*="color:#374151"],[style*="color:#888"]{color:var(--ck-dim) !important}
+[style*="color:#2d6cdf"],[style*="color:#1f56b8"]{color:var(--ck-cyan) !important}
+[style*="color:#0a7d28"]{color:var(--ck-green) !important}
+[style*="color:#c00000"],[style*="color:#b00"]{color:var(--ck-red) !important}
+[style*="color:#c07000"],[style*="color:#b45309"]{color:var(--ck-amber) !important}
+[style*="background:#fff"],[style*="background: #fff"],
+[style*="background:#ffffff"]{background:var(--ck-panel2) !important}
+</style>
+
 </head>
 <body>
 

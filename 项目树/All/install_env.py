@@ -174,8 +174,12 @@ def check_all(py):
                 "print('后端:', fire_detect.describe_backend("
                 "fire_detect.build_detector(d)[0]))"]),
         ("03 驾驶舱/主题", "03_智能终端操作",
-         ["-c", "import sys; sys.path.insert(0, r'03_智能终端操作'); "
-                "import theme, dashboard; print('主题色', theme.ACCENT, '驾驶舱 OK')"]),
+         ["-c", "import sys, os; sys.path.insert(0, os.getcwd()); "
+                "import theme, dashboard; "
+                "page = os.path.join('web', 'cockpit.html'); "
+                "assert os.path.isfile(page), '缺 web/cockpit.html'; "
+                "print('主题色', theme.ACCENT, '· Py 驾驶舱 + 网页驾驶舱 OK（%d 字节页面）' "
+                "% os.path.getsize(page))"]),
         ("03 数据维护（清空能力）", "03_智能终端操作",
          ["-c", "import sys, tempfile, os; "
                 "os.environ['EXAM_TERMINAL_HOME']=tempfile.mkdtemp(prefix='envchk_'); "

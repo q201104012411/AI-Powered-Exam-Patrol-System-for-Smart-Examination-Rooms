@@ -197,6 +197,41 @@ ALERT_CODE_TEXT = {
     "VIDEO_BLUR": "视频模糊",
     "OFFLINE": "设备离线",
     "CLOCK_DRIFT": "时钟偏差",
+    # ---- AI 行为识别码（02/03 实时监控共用；这些码以前只登记了分级、没登记中文，
+    #      于是界面直接显示英文码 GAZE_SHIFT / STAND_UP —— 补这里即可，不动分级） ----
+    "REPEATED_TOUCH_LINE": "多次触碰警戒线",
+    "PERSON_OUT_OF_BOUNDS": "人员越界",
+    "BIG_TURN": "大幅偏转/侧转回头",
+    "STAND_UP": "起立/站立",
+    "LEAN_FORWARD": "前倾/趴桌",
+    "GAZE_SHIFT": "眼神游移",
+    "SLEEPY": "闭眼/趴睡",
+    "HEAD_TURN": "转脸偏头",
+    "PERSON_BEHAVIOR_ABNORMAL": "异常行为（兜底）",
+    "CHEAT_PATTERN": "作弊行为模式（时序判定）",
+    "CHEAT_PATTERN_SUSPECT": "作弊风险升高（关注）",
+    # ---- 02 摄像头核查的缺陷码（02 经局域网把核查结论送到 03，会成为告警码） ----
+    # 只补**显示文案**：分级仍按 ALERT_CODE_LEVEL 兜底（不到这里就还是橙色），
+    # 不因为"补了个中文名"把现场的分级口径改掉。
+    "HEARTBEAT_LOST": "心跳丢失",
+    "STREAM_FAIL": "取流失败",
+    "BLUR": "画面模糊/失焦",
+    "UNDEREXPOSED": "画面过暗",
+    "OVEREXPOSED": "画面过曝",
+    "LOW_CONTRAST": "对比度过低",
+    "COLOR_CAST": "画面偏色",
+    "STRIPES": "条纹干扰",
+    "SNOW": "雪花/噪声过大",
+    "MOSAIC": "马赛克/块效应",
+    "FROZEN": "画面冻结",
+    "OCCLUDED": "镜头被遮挡",
+    "VIEW_OFFSET": "视角偏移",
+    "COVERAGE_LOW": "覆盖完整性不足",
+    "REC_GAP": "录像丢段",
+    "REC_MISSING": "无录像可回放",
+    "AUDIO_SILENT": "拾音器无声",
+    "AUDIO_NOISE": "持续噪声",
+    "LEDGER_MISMATCH": "台账不符",
     # ---- 06 智能安检与手机作弊器材检测 ----
     "SECURITY_ALARM": "安检报警",
     "SECURITY_REINSPECT_TIMEOUT": "安检复检超时",
@@ -205,6 +240,15 @@ ALERT_CODE_TEXT = {
     # ---- 13 AI 火场识别与自动报警 ----
     "FIRE_ALARM": "火警（火焰确认）",
     "FIRE_SMOKE": "烟雾疑似（待复核）",
+}
+
+# 告警状态 -> 中文（界面 / 网页驾驶舱 / 接口共用，避免各处各写一份）
+# 这里用字面量而不 import models：config 是被 models 依赖的底层，不能反向依赖。
+ALERT_STATUS_TEXT = {
+    "pending": "待处置",
+    "acked": "已确认",
+    "reviewed": "已复核",
+    "closed": "已归档",
 }
 
 # ---------------- 复核结论（第二节第 2 条） ----------------

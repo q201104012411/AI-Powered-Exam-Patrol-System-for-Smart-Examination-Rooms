@@ -113,6 +113,134 @@ code{background:#eef2f8;border-radius:4px;padding:1px 5px;font-size:12px}
 .split{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 @media(max-width:900px){.split{grid-template-columns:1fr}}
 </style>
+<style id="cockpit-skin">
+/* ============================================================
+   驾驶舱皮肤（2026-10-18 追加；覆盖在上面的浅色样式之后）
+   目的：08 保密室网页面板与 03「大数据驾驶舱」（Py GUI / 网页版）同一套配色与质感。
+   这个页面本来就是变量驱动的，所以先改 :root，再补几处写死的浅色。
+   ============================================================ */
+:root{
+  --bg:#060c18; --panel:#0d1a2e; --line:#1b3457; --ink:#e8f1ff; --sub:#8ba3c7;
+  --brand:#22d3ee; --brand2:#3b82f6; --red:#f43f5e; --orange:#fbbf24;
+  --ok:#34d399; --warn:#fbbf24;
+  --shadow:0 16px 40px -30px #000;
+  --ck-panel2:#122542; --ck-mute:#5b739a; --ck-cyan:#22d3ee;
+}
+html{background:var(--bg)}
+body{
+  background:
+    radial-gradient(1200px 460px at 20% -18%, rgba(34,211,238,.13), transparent 62%),
+    var(--bg) !important;
+  background-attachment:fixed;
+  color:var(--ink) !important;
+}
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:
+    linear-gradient(rgba(27,52,87,.55) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(27,52,87,.55) 1px, transparent 1px);
+  background-size:46px 46px;opacity:.20;
+  -webkit-mask-image:radial-gradient(circle at 50% 28%, #000 30%, transparent 88%);
+  mask-image:radial-gradient(circle at 50% 28%, #000 30%, transparent 88%);
+}
+#login,header,nav,main,.status-bar,.toast{position:relative;z-index:1}
+
+/* ---- 登录 ---- */
+#login{
+  background:linear-gradient(180deg,var(--ck-panel2),#0b1526) !important;
+  border:1px solid var(--line) !important;border-radius:12px !important;
+  box-shadow:0 30px 80px -40px #000, inset 0 1px 0 rgba(255,255,255,.05) !important;
+}
+#login h1{
+  background:linear-gradient(92deg,var(--ink),var(--brand) 70%,var(--brand2));
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
+}
+#login .tip{color:var(--ck-mute) !important}
+
+/* ---- 顶栏 / 页签 ---- */
+header{
+  background:linear-gradient(180deg,rgba(18,37,66,.96),rgba(6,12,24,.72)) !important;
+  border-bottom:1px solid var(--line);
+  position:sticky;top:0;z-index:25;backdrop-filter:blur(6px);
+}
+header h1{
+  background:linear-gradient(92deg,#e8f1ff,var(--brand) 72%,var(--brand2));
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
+  filter:drop-shadow(0 0 12px rgba(34,211,238,.25));
+}
+.badge.zero{background:rgba(255,255,255,.14) !important}
+nav{background:rgba(11,21,38,.92) !important;border-bottom:1px solid var(--line) !important;
+  backdrop-filter:blur(6px)}
+nav button{color:var(--sub) !important}
+nav button:hover{color:var(--ink) !important;background:rgba(34,211,238,.06)}
+nav button.on{color:var(--brand) !important;border-bottom-color:var(--brand) !important;
+  text-shadow:0 0 12px rgba(34,211,238,.45)}
+
+/* ---- 面板 / 表格 ---- */
+.panel{
+  background:linear-gradient(180deg,rgba(18,37,66,.72),rgba(10,20,36,.94)) !important;
+  border:1px solid var(--line) !important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.035), 0 16px 40px -30px #000 !important;
+}
+.panel h2{color:var(--ink) !important}
+.panel h2 .n{background:rgba(34,211,238,.16) !important;color:var(--brand) !important;
+  border:1px solid rgba(34,211,238,.4)}
+th{background:#0f1f38 !important;color:var(--brand) !important;font-weight:700}
+th,td{border-bottom:1px solid rgba(27,52,87,.7) !important}
+tr:hover td{background:rgba(34,211,238,.06) !important}
+.card{background:linear-gradient(180deg,var(--ck-panel2),var(--panel)) !important;
+  border:1px solid var(--line) !important}
+.card .v{font-family:Consolas,"Cascadia Mono",monospace;
+  text-shadow:0 0 16px rgba(34,211,238,.35)}
+code{background:#0f1f38 !important;color:#cfe0f7 !important}
+pre{background:#08152a !important;color:#cfe0f7 !important;border:1px solid var(--line)}
+.hint{color:var(--ck-mute) !important}
+
+/* ---- 表单 ---- */
+input,select,textarea{
+  background:#08152a !important;color:var(--ink) !important;
+  border:1px solid var(--line) !important;
+}
+input::placeholder,textarea::placeholder{color:var(--ck-mute) !important}
+input:focus,select:focus,textarea:focus{
+  border-color:var(--brand) !important;outline:none;
+  box-shadow:0 0 0 3px rgba(34,211,238,.14) !important;
+}
+select option{background:#0b1526;color:var(--ink)}
+button.b{background:linear-gradient(180deg,#1a3157,#122542) !important;
+  border:1px solid var(--line) !important;color:var(--ink) !important;
+  border-radius:7px !important;transition:.16s border-color,.16s transform}
+button.b:hover{background:linear-gradient(180deg,#22406f,#1a3157) !important;
+  border-color:var(--brand) !important;transform:translateY(-1px)}
+button.b.red{border-color:var(--red) !important;color:#ffe4e9 !important;
+  background:linear-gradient(180deg,#7f1d3a,#5a1529) !important}
+button.b.ok{border-color:var(--ok) !important;color:#d1fae5 !important;
+  background:linear-gradient(180deg,#065f46,#064e3b) !important}
+button.b.gray{background:#16253f !important;border-color:var(--line) !important;
+  color:var(--sub) !important}
+
+/* ---- 标签 / 摄像头卡片 / 提示条 ---- */
+.tag.ok{background:rgba(52,211,153,.14) !important;color:var(--ok) !important;
+  border-color:rgba(52,211,153,.42) !important}
+.tag.bad,.tag.red{background:rgba(244,63,94,.14) !important;color:var(--red) !important;
+  border-color:rgba(244,63,94,.42) !important}
+.tag.orange{background:rgba(251,191,36,.14) !important;color:var(--warn) !important;
+  border-color:rgba(251,191,36,.42) !important}
+.tag.na{background:rgba(139,163,199,.10) !important;color:var(--sub) !important;
+  border-color:rgba(139,163,199,.3) !important}
+.tag.live{background:rgba(34,211,238,.14) !important;color:var(--brand) !important;
+  border-color:rgba(34,211,238,.42) !important}
+.cam{border-color:var(--line) !important}
+.cam .head,.cam .foot{background:#0f1f38 !important}
+.cam .foot button{background:#16253f !important;border:1px solid var(--line) !important;
+  color:#dbe7f5 !important}
+.cam .foot button:hover{background:#22406f !important;border-color:var(--brand) !important}
+.toast{background:#122542 !important;border:1px solid var(--line) !important;
+  color:var(--ink) !important;box-shadow:0 18px 40px -24px #000}
+.status-bar{background:#08152a !important;border-top:1px solid var(--line) !important;
+  color:var(--sub) !important}
+</style>
+
 </head>
 <body>
 

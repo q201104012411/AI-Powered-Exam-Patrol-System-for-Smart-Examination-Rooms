@@ -275,6 +275,8 @@ class TerminalApp(object):
 
         top = ttk.Frame(self.root, padding=(10, 8))
         top.pack(fill="x")
+        # 驾驶舱进大屏（全屏）时会临时收起这条顶栏，退出时按原位置放回 —— 需要引用
+        self.top_bar = top
         ttk.Label(top, text="智能终端操作端", font=("Microsoft YaHei", 14, "bold")).pack(side="left")
         ttk.Label(top, text="  " + s.describe(), foreground="#1f56b8").pack(side="left")
         ttk.Button(top, text="🔄 切换账号", command=self._build_login).pack(side="right")
@@ -2228,6 +2230,8 @@ class TerminalApp(object):
 
         frame = ttk.LabelFrame(parent, text="🤖 AI 助手（本地 ollama）", padding=6)
         frame.pack(fill="x", padx=10, pady=(0, 6))
+        # 驾驶舱进大屏时一并收起（大屏只留态势），退出时再放回状态栏之前
+        self.ai_panel = frame
 
         allowed = console.can_ai_chat(self.session.role)
         if not allowed:

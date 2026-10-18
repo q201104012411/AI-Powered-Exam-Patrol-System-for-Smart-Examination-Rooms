@@ -99,6 +99,179 @@
     #lastUpdated { min-width:0; text-align:left; }
   }
 </style>
+<style id="cockpit-skin">
+/* ============================================================
+   驾驶舱皮肤（2026-10-18 追加；覆盖在上面的浅色样式之后）
+   目的：02 网页面板与 03「大数据驾驶舱」（Py GUI / 网页版）**同一套配色与质感**，
+         只换皮，不动任何 DOM 结构与业务逻辑。
+   与 03_智能终端操作/web/cockpit.html 的变量同名同值，便于三处一起改。
+   ============================================================ */
+:root{
+  --ck-bg:#060c18; --ck-bg2:#0b1526; --ck-panel:#0d1a2e; --ck-panel2:#122542;
+  --ck-line:#1b3457; --ck-fg:#e8f1ff; --ck-dim:#8ba3c7; --ck-mute:#5b739a;
+  --ck-cyan:#22d3ee; --ck-blue:#3b82f6; --ck-green:#34d399; --ck-amber:#fbbf24;
+  --ck-red:#f43f5e; --ck-violet:#a78bfa;
+}
+html{background:var(--ck-bg)}
+body{
+  background:
+    radial-gradient(1200px 460px at 20% -18%, rgba(34,211,238,.13), transparent 62%),
+    var(--ck-bg) !important;
+  background-attachment:fixed !important;
+  color:var(--ck-fg) !important;
+  font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;
+  min-height:100vh;
+}
+/* 背景网格：与驾驶舱一致的"数据感"，纯装饰、不挡点击 */
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background-image:
+    linear-gradient(rgba(27,52,87,.55) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(27,52,87,.55) 1px, transparent 1px);
+  background-size:46px 46px;opacity:.22;
+  -webkit-mask-image:radial-gradient(circle at 50% 30%, #000 30%, transparent 88%);
+  mask-image:radial-gradient(circle at 50% 30%, #000 30%, transparent 88%);
+}
+#app,.login-wrap{position:relative;z-index:1}
+/* ---- 登录页 ---- */
+.login-wrap{background:transparent !important}
+.login-box{
+  background:linear-gradient(180deg,var(--ck-panel2),var(--ck-bg2)) !important;
+  border:1px solid var(--ck-line); border-radius:12px !important;
+  box-shadow:0 30px 80px -40px #000, inset 0 1px 0 rgba(255,255,255,.05) !important;
+  color:var(--ck-fg); width:380px;
+}
+.login-box h2{
+  color:var(--ck-fg);
+  background:linear-gradient(92deg,var(--ck-fg),var(--ck-cyan) 70%,var(--ck-blue));
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;
+}
+.login-box .sub{color:var(--ck-dim) !important}
+.login-box label{color:var(--ck-dim) !important}
+.login-box button{background:linear-gradient(180deg,#1b3a68,#122542) !important;
+  border:1px solid var(--ck-cyan) !important;color:var(--ck-fg) !important;
+  box-shadow:0 0 22px -8px var(--ck-cyan)}
+.login-box button:hover{background:linear-gradient(180deg,#22508c,#1a3157) !important}
+.err{color:var(--ck-red) !important}
+
+/* ---- 顶栏 ---- */
+.top{
+  background:linear-gradient(180deg,rgba(18,37,66,.96),rgba(6,12,24,.72)) !important;
+  border-bottom:1px solid var(--ck-line) !important;
+  position:sticky;top:0;z-index:30;backdrop-filter:blur(6px);
+}
+.top h1{color:var(--ck-fg) !important;text-shadow:0 0 18px rgba(34,211,238,.28)}
+.tag{background:rgba(34,211,238,.12) !important;color:var(--ck-cyan) !important;
+  border:1px solid rgba(34,211,238,.38)}
+.tag.owner{background:rgba(251,191,36,.14) !important;color:var(--ck-amber) !important;
+  border-color:rgba(251,191,36,.42)}
+.tag.admin{background:rgba(52,211,153,.14) !important;color:var(--ck-green) !important;
+  border-color:rgba(52,211,153,.42)}
+#lastUpdated{color:var(--ck-mute) !important}
+.autoref{color:var(--ck-dim) !important}
+
+/* ---- 页签 ---- */
+.tabs{border-bottom:1px solid var(--ck-line);gap:4px}
+.tabs .tab{
+  background:#0f1f38 !important;color:var(--ck-dim) !important;
+  border:1px solid transparent;border-bottom:none;border-radius:8px 8px 0 0;
+}
+.tabs .tab:hover{color:var(--ck-fg) !important;background:#132a4a !important}
+.tabs .tab.on{
+  background:var(--ck-panel2) !important;color:var(--ck-cyan) !important;
+  font-weight:700;box-shadow:inset 0 -2px 0 var(--ck-cyan) !important;
+}
+
+/* ---- 面板 / 表格 ---- */
+.panel{
+  background:linear-gradient(180deg,rgba(18,37,66,.72),rgba(10,20,36,.94)) !important;
+  border:1px solid var(--ck-line);border-radius:10px !important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.035), 0 16px 40px -30px #000 !important;
+}
+.panel h3{color:var(--ck-fg) !important;font-size:15px;
+  border-left:3px solid var(--ck-cyan);padding-left:9px;box-shadow:-7px 0 14px -10px var(--ck-cyan)}
+table{color:var(--ck-fg) !important}
+th{background:#0f1f38 !important;color:var(--ck-cyan) !important;
+  border-bottom:1px solid var(--ck-line) !important;font-weight:700}
+td{border-bottom:1px solid rgba(27,52,87,.6) !important}
+tbody tr:hover{background:rgba(34,211,238,.06) !important}
+tr.bad td{background:rgba(244,63,94,.12) !important}
+tr.warn td{background:rgba(251,191,36,.10) !important}
+.scroll{border:1px solid var(--ck-line) !important;border-radius:8px !important}
+.scroll::-webkit-scrollbar{width:9px;height:9px}
+.scroll::-webkit-scrollbar-thumb{background:#1d3557;border-radius:6px}
+.scroll::-webkit-scrollbar-track{background:transparent}
+
+/* ---- 表单控件 ---- */
+input,select,textarea{
+  background:#08152a !important;border:1px solid var(--ck-line) !important;
+  color:var(--ck-fg) !important;border-radius:7px !important;
+}
+input::placeholder,textarea::placeholder{color:var(--ck-mute) !important}
+input:focus,select:focus,textarea:focus{
+  border-color:var(--ck-cyan) !important;outline:none;
+  box-shadow:0 0 0 3px rgba(34,211,238,.14) !important;
+}
+select option{background:#0b1526;color:var(--ck-fg)}
+button{
+  background:linear-gradient(180deg,#1a3157,#122542) !important;
+  border:1px solid var(--ck-line) !important;color:var(--ck-fg) !important;
+  border-radius:7px !important;transition:.16s border-color,.16s transform,.16s background;
+}
+button:hover{background:linear-gradient(180deg,#22406f,#1a3157) !important;
+  border-color:var(--ck-cyan) !important;transform:translateY(-1px)}
+button.ghost{background:transparent !important;color:var(--ck-dim) !important}
+button.ghost:hover{color:var(--ck-cyan) !important;border-color:var(--ck-cyan) !important}
+button.danger{background:linear-gradient(180deg,#7f1d3a,#5a1529) !important;
+  border-color:var(--ck-red) !important;color:#ffe4e9 !important}
+button.success{background:linear-gradient(180deg,#065f46,#064e3b) !important;
+  border-color:var(--ck-green) !important;color:#d1fae5 !important}
+button:disabled{opacity:.45}
+
+/* ---- KPI / 报告 ---- */
+.kpi{
+  background:linear-gradient(180deg,var(--ck-panel2),var(--ck-panel)) !important;
+  border:1px solid var(--ck-line) !important;border-left:3px solid var(--ck-cyan);
+  border-radius:10px !important;position:relative;overflow:hidden;
+}
+.kpi::after{content:"";position:absolute;inset:0;pointer-events:none;
+  background:radial-gradient(120px 54px at 100% 0%, var(--ck-cyan), transparent 72%);
+  opacity:.12}
+.kpi .k{color:var(--ck-dim) !important}
+.kpi .v{color:var(--ck-fg) !important;font-family:Consolas,monospace;
+  text-shadow:0 0 16px rgba(34,211,238,.4)}
+.kpi .t{color:var(--ck-mute) !important}
+.kpi.ok{border-left-color:var(--ck-green)} .kpi.ok .v{color:var(--ck-green) !important}
+.kpi.no{border-left-color:var(--ck-red)}   .kpi.no .v{color:var(--ck-red) !important}
+pre.rep{
+  background:#08152a !important;border:1px solid var(--ck-line) !important;
+  color:#cfe0f7 !important;border-radius:8px !important;
+}
+.hint{color:var(--ck-amber) !important}
+.mono{color:inherit}
+a{color:var(--ck-cyan) !important}
+
+/* ---- 弹窗 / 状态条 ---- */
+.modal-bg{background:rgba(3,8,18,.82) !important;backdrop-filter:blur(3px)}
+.modal{
+  background:linear-gradient(180deg,var(--ck-panel2),var(--ck-bg2)) !important;
+  border:1px solid var(--ck-line);color:var(--ck-fg) !important;
+  box-shadow:0 30px 80px -40px #000 !important;
+}
+.modal h3{color:var(--ck-fg) !important}
+.modal .row label{color:var(--ck-dim) !important}
+.status-bar{background:#08152a !important;border-top:1px solid var(--ck-line);
+  color:var(--ck-dim) !important}
+.dot{background:var(--ck-green) !important;box-shadow:0 0 10px var(--ck-green)}
+
+/* ---- 页面里的行内浅色（写死在标签上的）一并改成驾驶舱色 ---- */
+[style*="color:#64748b"],[style*="color:#6b7280"],[style*="color:#475569"],
+[style*="color:#94a3b8"],[style*="color:#9ca3af"]{color:var(--ck-dim) !important}
+[style*="color:#2d6cdf"]{color:var(--ck-cyan) !important}
+[style*="color:#0a7d28"]{color:var(--ck-green) !important}
+[style*="color:#c0392b"]{color:var(--ck-red) !important}
+</style>
+
 </head>
 <body>
 

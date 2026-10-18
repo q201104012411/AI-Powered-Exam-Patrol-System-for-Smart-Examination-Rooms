@@ -16,6 +16,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+import time
 
 import config
 import data_crypto
@@ -688,3 +689,95 @@ class Store(object):
             by_status[r["status"]] = by_status.get(r["status"], 0) + r["n"]
         return {"total": total, "by_level": by_level, "by_status": by_status,
                 "reviews": reviewed, "unsynced": unsynced}
+
+    def stats(self, hours=24, days=7, recent=30):
+        """驾驶舱聚合统计（全部在 SQL 里 GROUP BY，不把明细读进内存）。
+
+        为什么单开一个方法（而不是让界面 list_alerts 后自己数）：
+          · 改造前驾驶舱每次刷新都 `list_alerts(limit=2000)` + `audit_rows(100000)`，
+            库一大就既慢又**数不准**（超过 2000 条的部分直接不算，KPI 会偏小）；
+          · 这里用 COUNT/GROUP BY，返回的就是库里真实的数，与明细条数无关。
+
+        参数：
+          hours  趋势图按小时分桶的窗口（含当前小时，旧→新）
+          days   趋势图按天分桶的窗口（含今天，旧→新）
+          recent "最近告警"表要的明细条数
+
+        返回 dict：
+          total/by_level/by_status/reviews/unsynced/overdue/last_hour/audits
+          by_code  [(code, n), ...] 全部分类（按数量降序；类型数天然很少，不截断）
+          hourly   [(桶起始 epoch, n), ...]（旧→新）
+          daily    [(桶起始 epoch, n), ...]（旧→新）
+          recent   [models.Alert, ...]（已解密，按时间倒序）
+        """
+        now = time.time()
+        hours = max(1, int(hours))
+        days = max(1, int(days))
+        # 桶锚点：小时对齐到整点、天对齐到本地 0 点（用本地时间，标签才对得上）
+        hour_anchor = float(int(now // 3600) * 3600)
+        lt = time.localtime(now)
+        try:
+            day_anchor = float(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                                            0, 0, 0, 0, 0, -1)))
+        except (OverflowError, ValueError):
+            day_anchor = float(int(now // 86400) * 86400)
+        hour_since = hour_anchor - (hours - 1) * 3600
+        day_since = day_anchor - (days - 1) * 86400
+
+        with self._lock, self._conn() as c:
+            total = c.execute("SELECT COUNT(*) n FROM alerts").fetchone()["n"]
+            reviewed = c.execute("SELECT COUNT(*) n FROM reviews").fetchone()["n"]
+            unsynced = c.execute(
+                "SELECT COUNT(*) n FROM alerts WHERE synced=0").fetchone()["n"]
+            overdue = c.execute(
+                "SELECT COUNT(*) n FROM alerts WHERE status=? AND sla_deadline IS NOT NULL "
+                "AND sla_deadline < ?", (models.ST_PENDING, now)).fetchone()["n"]
+            last_hour = c.execute(
+                "SELECT COUNT(*) n FROM alerts WHERE created_epoch >= ?",
+                (now - 3600,)).fetchone()["n"]
+            audits = c.execute("SELECT COUNT(*) n FROM audit").fetchone()["n"]
+            lv_rows = c.execute("SELECT level, COUNT(*) n FROM alerts "
+                                "GROUP BY level").fetchall()
+            st_rows = c.execute("SELECT status, COUNT(*) n FROM alerts "
+                                "GROUP BY status").fetchall()
+            code_rows = c.execute("SELECT code, COUNT(*) n FROM alerts "
+                                  "GROUP BY code ORDER BY n DESC, code").fetchall()
+            # 分桶用"相对窗口起点"的偏移：分子恒为非负（WHERE 已过滤 >= since），
+            # CAST 截断就等于 floor。**不能**用 (anchor - created_epoch) 直接除 ——
+            # 那样"上一小时/昨天"的事件会被算进当前桶（整点对齐后必然差一个桶）。
+            h_rows = c.execute(
+                "SELECT CAST((created_epoch - ?) / 3600 AS INTEGER) i, COUNT(*) n "
+                "FROM alerts WHERE created_epoch >= ? GROUP BY i",
+                (hour_since, hour_since)).fetchall()
+            d_rows = c.execute(
+                "SELECT CAST((created_epoch - ?) / 86400 AS INTEGER) i, COUNT(*) n "
+                "FROM alerts WHERE created_epoch >= ? GROUP BY i",
+                (day_since, day_since)).fetchall()
+
+        hourly = [(int(hour_since + i * 3600), 0) for i in range(hours)]
+        for r in h_rows:
+            idx = int(r["i"] or 0)
+            if 0 <= idx < hours:
+                ts, n = hourly[idx]
+                hourly[idx] = (ts, n + int(r["n"] or 0))
+        daily = [(int(day_since + i * 86400), 0) for i in range(days)]
+        for r in d_rows:
+            idx = int(r["i"] or 0)
+            if 0 <= idx < days:
+                ts, n = daily[idx]
+                daily[idx] = (ts, n + int(r["n"] or 0))
+
+        return {
+            "total": int(total or 0),
+            "by_level": {r["level"]: int(r["n"] or 0) for r in lv_rows},
+            "by_status": {(r["status"] or ""): int(r["n"] or 0) for r in st_rows},
+            "reviews": int(reviewed or 0),
+            "unsynced": int(unsynced or 0),
+            "overdue": int(overdue or 0),
+            "last_hour": int(last_hour or 0),
+            "audits": int(audits or 0),
+            "by_code": [(r["code"], int(r["n"] or 0)) for r in code_rows],
+            "hourly": hourly,
+            "daily": daily,
+            "recent": self.list_alerts(limit=recent),
+        }
