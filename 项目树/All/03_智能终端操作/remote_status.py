@@ -47,11 +47,21 @@ DEFAULT_TTL = 30.0
 
 
 def _dir_of(parts):
+    """按**逐级拼接**找模块目录。
+
+    为什么不能只按单层拼：01 是"同名嵌套"目录（`01_人脸识别与身份核对/01_人脸识别与身份核对/`），
+    单层拼只会得到外层那个没有 integration_api.py 的目录，于是驾驶舱长期把 01 显示成
+    "不可用（未找到 integration_api.py）"—— 其实它的接口一直是好的。
+    """
+    cur = ALL_DIR
     for p in parts:
-        d = os.path.join(ALL_DIR, p)
-        if os.path.isdir(d) and os.path.isfile(os.path.join(d, "integration_api.py")):
-            return d
-    return ""
+        nxt = os.path.join(cur, p)
+        if not os.path.isdir(nxt):
+            nxt = os.path.join(ALL_DIR, p)      # 该段是相对 ALL_DIR 的完整路径
+        if not os.path.isdir(nxt):
+            return ""
+        cur = nxt
+    return cur if os.path.isfile(os.path.join(cur, "integration_api.py")) else ""
 
 
 def _brief(key, st):
@@ -59,7 +69,12 @@ def _brief(key, st):
     if not isinstance(st, dict) or not st.get("ok"):
         return ""
     if key == "01":
-        return "账号 %s 个" % (st.get("accounts") or st.get("users") or "—")
+        # 01 的 status 给的是 candidates（考生列表）与 index_ready，不是 accounts
+        cands = st.get("candidates")
+        n = len(cands) if isinstance(cands, list) else (cands if cands is not None else "—")
+        ready = st.get("index_ready")
+        return "考生 %s 人 / 特征索引 %s" % (
+            n, "已就绪" if ready else ("未就绪" if ready is not None else "—"))
     if key == "02":
         od = st.get("open_orders") or st.get("orders") or {}
         if isinstance(od, dict):

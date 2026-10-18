@@ -20,6 +20,7 @@ import inspect
 import json
 import os
 import re
+import sys
 import threading
 import time
 import tkinter as tk
@@ -294,6 +295,35 @@ class App(object):
         self.login_user.set("")
         self.login_pwd.set("")
 
+    def _open_cmd_chat(self):
+        """「📡 接收命令」：设备端收 03（智能终端）下发的命令，聊天式显示。
+
+        用的是 00_集成联动\\cmd_chat.py（与 01 共用同一套轮询 / 白名单执行 / 回执），
+        与 02 自己的"终端账户/审计链"无关，也不需要命令控制台总开关。
+        """
+        try:
+            here = os.path.dirname(os.path.abspath(__file__))
+            target = ""
+            cur = here
+            for _ in range(3):
+                cand = os.path.join(os.path.dirname(cur), "00_集成联动")
+                if os.path.isdir(cand):
+                    target = cand
+                    break
+                cur = os.path.dirname(cur)
+            if not target:
+                messagebox.showerror("找不到组件",
+                                     "未找到 00_集成联动\\cmd_chat.py（命令聊天窗口）")
+                return
+            if target not in sys.path:
+                sys.path.insert(0, target)
+            import cmd_chat
+            cmd_chat.open_chat_window(self.root, "02",
+                                      url=os.environ.get("EXAM_TERMINAL_URL", ""),
+                                      token=os.environ.get("EXAM_TERMINAL_TOKEN", ""))
+        except Exception as e:
+            messagebox.showerror("打开失败", "命令聊天窗口打开失败：%s" % e)
+
     def _logout(self):
         if not messagebox.askyesno("退出", "确定退出登录并关闭程序？"):
             return
@@ -340,6 +370,9 @@ class App(object):
 
         ttk.Button(top, text="退出", command=self._logout).pack(side="right")
         ttk.Button(top, text="🔄 切换账号", command=self._switch_account
+                   ).pack(side="right", padx=PAD_BTN)
+        # 设备端「📡 接收命令」：收 03 下发的命令（聊天式，白名单执行 + 自动回执）
+        ttk.Button(top, text="📡 接收命令", command=self._open_cmd_chat
                    ).pack(side="right", padx=PAD_BTN)
         ttk.Button(top, text="🔑 修改口令", command=self._change_own_pwd
                    ).pack(side="right", padx=PAD_BTN)

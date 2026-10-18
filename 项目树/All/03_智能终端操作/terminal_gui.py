@@ -1948,15 +1948,19 @@ class TerminalApp(object):
         form.pack(fill="x")
         row1 = ttk.Frame(form)
         row1.pack(fill="x", pady=3)
-        ttk.Label(row1, text="目标设备：").pack(side="left")
-        self.cmd_target = tk.StringVar(value="PC-A-01")
-        ttk.Entry(row1, textvariable=self.cmd_target, width=20).pack(side="left", padx=(0, 10))
-        ttk.Label(row1, text="已知设备（点选自动填 IPv4）：").pack(side="left")
-        self.cmd_pick = ttk.Combobox(row1, state="readonly", width=40, values=())
-        self.cmd_pick.pack(side="left", padx=(0, 6))
-        self.cmd_pick.bind("<<ComboboxSelected>>", self._pick_cmd_target)
-        ttk.Button(row1, text="🔄", width=3,
+        ttk.Label(row1, text="目标（设备标识 或 IPv4）：").pack(side="left")
+        self.cmd_target = tk.StringVar(value="")
+        # 这个输入框是**可以直接手打**的：设备标识（PC-A-01）或 IPv4（192.168.1.20）都行。
+        # （之前这里右边紧跟一个 readonly 下拉框，很多人以为目标要从下拉里选，手打像"填不进去"）
+        self.cmd_target_entry = ttk.Entry(row1, textvariable=self.cmd_target,
+                                          width=24)
+        self.cmd_target_entry.pack(side="left", padx=(0, 8))
+        ttk.Button(row1, text="📋 从已知设备选…",
+                   command=self._pick_cmd_target_dialog).pack(side="left", padx=(0, 6))
+        ttk.Button(row1, text="🔄 刷新设备", width=10,
                    command=self.refresh_cmd_targets).pack(side="left")
+        ttk.Label(row1, text="（可直接手打 IP，如 192.168.1.20）",
+                  foreground="#5b739a").pack(side="left", padx=(10, 0))
 
         row1b = ttk.Frame(form)
         row1b.pack(fill="x", pady=(2, 3))
@@ -2068,57 +2072,111 @@ class TerminalApp(object):
                       else "（设备台账里暂无该 IP，设备按 IP 轮询即可领取）"))
         else:
             msg = "已下发 %s，等待「%s」回执…" % (cmd_id, target)
-        self.cmd_msg.config(text=msg, foreground="#22d3ee")
+        # 先刷新（refresh_commands 会顺带刷新设备缓存，并把提示改成"已知设备 N 台"），
+        # 再把"已下发"的提示盖上去 —— 顺序反了的话用户看不到下发结果。
         self.refresh_commands()
-        self.refresh_cmd_targets()
+        self.cmd_msg.config(text=msg, foreground="#22d3ee")
+
+    @staticmethod
+    def _cmd_target_label(payload):
+        """台账里的"目标"显示：设备标识 与 IP 相同时只显示一次。"""
+        tgt = str(payload.get("target") or "").strip()
+        tip = str(payload.get("target_ip") or "").strip()
+        if not tip or tip == tgt:
+            return tgt or tip or "—"
+        if not tgt:
+            return tip
+        return "%s · %s" % (tgt, tip)
+
+    def _known_devices(self):
+        try:
+            return list(self.store.remote_devices() or [])
+        except Exception:
+            return []
 
     def refresh_cmd_targets(self):
-        """把"已知设备（含最近上报的 IPv4）"填进下拉框，点选即把 IPv4 填到目标框。"""
-        box = getattr(self, "cmd_pick", None)
-        if box is None:
-            return
-        vals = []
+        """刷新"已知设备"缓存（只更新缓存与提示，**不动**目标输入框里的内容）。"""
+        self._cmd_devices = self._known_devices()
         try:
-            devs = self.store.remote_devices()
-        except Exception:
-            devs = []
-        for d in devs[:50]:
-            ip = (d.get("last_ip") or "").strip()
-            did = (d.get("device_id") or "").strip() or "?"
-            name = (d.get("device_name") or "").strip() or "—"
-            if ip:
-                vals.append("%s · %s（%s）" % (ip, name, did))
-            else:
-                vals.append("（无 IP，需先在设备上运行执行器）· %s（%s）" % (name, did))
-        try:
-            box.configure(values=tuple(vals))
-            if vals and not box.get():
-                box.current(0)
+            n = len(self._cmd_devices)
+            with_ip = len([d for d in self._cmd_devices if (d.get("last_ip") or "").strip()])
+            self.cmd_msg.config(
+                text="已知设备 %d 台（其中 %d 台有 IPv4）；目标可直接手打 IP，"
+                     "也可点「📋 从已知设备选…」" % (n, with_ip),
+                foreground="#8ba3c7")
         except Exception:
             pass
 
-    def _pick_cmd_target(self, _event=None):
-        """下拉框选中一台设备 → 把它的 IPv4（没有就用设备标识）填到目标框。"""
-        box = getattr(self, "cmd_pick", None)
-        if box is None:
-            return
-        txt = (box.get() or "").strip()
-        if not txt:
-            return
-        ip = storage.normalize_ipv4(txt.split("·")[0].strip())
-        if ip:
-            self.cmd_target.set(ip)
-            self.cmd_msg.config(text="目标已填 IPv4：%s" % ip, foreground="#22d3ee")
-            return
-        # 没有 IP 的条目：把括号里的设备标识填进去
+    def _pick_cmd_target_dialog(self):
+        """弹窗选一台已知设备：双击即把它的 IPv4（没有就用设备标识）填进目标框。"""
+        devs = self._known_devices()
+        import theme as _T
+        win = tk.Toplevel(self.root)
+        win.title("选择目标设备（%d 台）" % len(devs))
+        win.geometry("720x430")
+        win.configure(bg=_T.BG)
+        win.transient(self.root)
         try:
-            did = txt.rsplit("（", 1)[1].rstrip("）")
-        except IndexError:
-            did = ""
-        if did:
-            self.cmd_target.set(did)
-            self.cmd_msg.config(text="该设备还没上报过 IP，已填设备标识：%s" % did,
-                                foreground="#fbbf24")
+            win.grab_set()
+        except Exception:
+            pass
+        ttk.Label(win, text="双击一行即填入目标；优先用该设备最近上报的 IPv4",
+                  foreground=_T.FG_DIM).pack(anchor="w", padx=14, pady=(12, 6))
+        box = ttk.Frame(win, padding=(14, 0))
+        box.pack(fill="both", expand=True)
+        lb = tk.Listbox(box, font=("Consolas", 10), activestyle="none",
+                        bg=_T.PANEL, fg=_T.FG, selectbackground=_T.BORDER,
+                        selectforeground="#ffffff", highlightthickness=1,
+                        highlightbackground=_T.BORDER)
+        sb = ttk.Scrollbar(box, orient="vertical", command=lb.yview)
+        lb.configure(yscrollcommand=sb.set)
+        lb.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self._device_rows = []
+        for d in devs:
+            ip = (d.get("last_ip") or "").strip() or "（无 IP）"
+            did = (d.get("device_id") or "").strip() or "?"
+            name = (d.get("device_name") or "").strip() or "—"
+            seen = (d.get("last_seen") or "")[:19]
+            lb.insert("end", "%-16s %-22s %-20s %s" % (ip, name, did, seen))
+            self._device_rows.append(ip if storage.normalize_ipv4(ip) else did)
+        if not devs:
+            lb.insert("end", "  暂无设备上报过（先在设备上运行命令执行器，或让它上报一次记录）")
+
+        def _fill(_evt=None):
+            sel = lb.curselection()
+            if not sel:
+                return
+            idx = int(sel[0])
+            if idx >= len(self._device_rows):
+                return
+            val = self._device_rows[idx]
+            self.cmd_target.set(val)
+            self.cmd_msg.config(
+                text=("目标已填 IPv4：%s（可直接改）" % val)
+                if storage.normalize_ipv4(val) else
+                ("该设备还没上报过 IP，已填设备标识：%s" % val),
+                foreground=_T.ACCENT)
+            win.destroy()
+
+        lb.bind("<Double-Button-1>", _fill)
+        bar = ttk.Frame(win, padding=12)
+        bar.pack(fill="x")
+        ttk.Button(bar, text="填入选中", command=_fill).pack(side="right")
+        ttk.Button(bar, text="关闭", command=win.destroy).pack(side="right", padx=8)
+        ttk.Label(bar, text="提示：也可以关掉这个窗口，直接在目标框里手打 IPv4",
+                  foreground=_T.FG_MUTE).pack(side="left")
+        if devs:
+            lb.selection_set(0)
+        lb.focus_set()
+
+    def _pick_cmd_target(self, _event=None):
+        """兼容旧入口：直接把第一台有 IP 的设备填进目标框。"""
+        for d in self._known_devices():
+            ip = storage.normalize_ipv4(d.get("last_ip"))
+            if ip:
+                self.cmd_target.set(ip)
+                return
 
     def refresh_commands(self):
         """刷新命令台账（含目标设备的回执）"""
@@ -2152,8 +2210,7 @@ class TerminalApp(object):
                 txt = "（尚无回执：目标设备需运行命令执行器）"
             tree.insert("", "end", iid=r.get("cmd_id", ""), tags=(tag,), values=(
                 (r.get("created_at") or "")[:19],
-                (pl.get("target", "") +
-                 ((" · " + pl["target_ip"]) if pl.get("target_ip") else "")),
+                self._cmd_target_label(pl),
                 pl.get("kind", ""), state, txt))
         # 设备列表（含 IPv4）跟着刷新，方便直接用 IP 下发下一条
         self.refresh_cmd_targets()

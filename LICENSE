@@ -1,6 +1,15 @@
-MIT License
+EDY_POWERQ Software License
 
 Copyright (c) 2026 EDY_POWERQ
+
+This license consists of two parts. Part 1 contains the terms of the MIT
+License. Part 2 contains an additional deployment condition. Part 2 is NOT
+part of the MIT License, and this document as a whole is NOT the MIT License
+and is NOT OSI-approved.
+
+===============================================================================
+PART 1 — MIT LICENSE TERMS
+===============================================================================
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +28,54 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+===============================================================================
+PART 2 — ADDITIONAL DEPLOYMENT CONDITION (NOT PART OF THE MIT LICENSE)
+===============================================================================
+
+The following condition applies to any use, deployment, or distribution of
+the Software, including modified versions of any module. It is an additional
+condition of this license and is not a term of the MIT License in Part 1.
+
+1. Owner account
+
+   Any deployment of the Software must provide an account named "owner" with
+   the highest privileges in the system (able to manage terminal accounts,
+   perform data maintenance, operate the command console, etc.). Where a
+   module implements its own account system, an account named "owner" with
+   highest privileges must also exist in that module.
+
+2. Initial password
+
+   The initial password of the "owner" account MUST NOT be a fixed, publicly
+   known value. It must be either:
+
+     (a) set by the deployer during installation, or
+     (b) generated randomly by the installation process and disclosed only
+         once at first startup.
+
+   The owner account must be required to change the password on first login.
+   Until the password is changed, access to the management console must be
+   blocked.
+
+3. Scope
+
+   This condition requires that the owner account exist. It does not prohibit
+   the deployer from creating other accounts, and does not prohibit the owner
+   from resetting the password after login.
+
+4. Non-compliance
+
+   A deployment that does not satisfy this Part 2 is not compliant with this
+   license.
+
+5. Data protection
+
+   For production environments handling real candidate data, the deployer
+   must independently satisfy applicable personal information protection and
+   data security regulations. Password leakage is outside the scope of any
+   warranty for the Software.
+
+===============================================================================
+END OF LICENSE
+===============================================================================

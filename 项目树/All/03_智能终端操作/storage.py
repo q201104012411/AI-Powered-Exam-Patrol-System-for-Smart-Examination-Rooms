@@ -433,9 +433,11 @@ class Store(object):
                  operator or "remote")
 
     def list_commands(self, limit=50):
+        # 同一秒内下的多条命令 created_at 相同，只按时间排会乱序 —— 再按 rowid 兜底
         with self._lock, self._conn() as c:
             rows = c.execute("SELECT * FROM commands WHERE kind='devcmd' "
-                             "ORDER BY created_at DESC LIMIT ?", (int(limit),)).fetchall()
+                             "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                             (int(limit),)).fetchall()
         out = []
         for r in rows:
             d = dict(r)

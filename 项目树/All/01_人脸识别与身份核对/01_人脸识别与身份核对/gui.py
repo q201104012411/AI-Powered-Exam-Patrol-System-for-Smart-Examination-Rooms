@@ -16,6 +16,7 @@
 """
 import json
 import os
+import sys
 import threading
 import time
 import tkinter as tk
@@ -248,6 +249,12 @@ class FaceVerifyGUI:
         self.ai_nav_btn = ttk.Button(live, text="🤖 AI 助手",
                                      command=self._open_ai_chat)
         self.ai_nav_btn.grid(row=0, column=8, padx=(2, 2))
+
+        # 「📡 接收命令」：设备端收 03 下发的命令（聊天式，白名单执行 + 自动回执）。
+        # 与命令控制台无关（那个是"本机执行任意命令"，这个是"上级派活"），所以不受总开关限制。
+        self.cmd_chat_btn = ttk.Button(live, text="📡 接收命令",
+                                       command=self._open_cmd_chat)
+        self.cmd_chat_btn.grid(row=0, column=9, padx=(2, 8))
 
         # 视频画面 + 内置命令控制台：**并排**放在同一行（视频在左，cmd 在右）。
         # 单独用一个容器才能让两者 side-by-side；控制台默认隐藏，点上面的按钮展开。
@@ -1914,6 +1921,37 @@ class FaceVerifyGUI:
         except Exception:
             pass
 
+    def _open_cmd_chat(self):
+        """「📡 接收命令」：设备端收 03（智能终端）下发的命令，聊天式显示。
+
+        与「命令控制台」是两件事：
+          · 命令控制台 = 本机执行任意命令（默认关闭，仅所有者层级）；
+          · 这里 = 上级派活（只跑白名单命令），打开不需要总开关。
+        窗口用的是 00_集成联动\\cmd_chat.py（01/02 共用同一套轮询与回执逻辑）。
+        """
+        try:
+            here = os.path.dirname(os.path.abspath(__file__))
+            target = ""
+            cur = here
+            for _ in range(3):                 # 01 是同名嵌套目录，往上最多找 3 层
+                cand = os.path.join(os.path.dirname(cur), "00_集成联动")
+                if os.path.isdir(cand):
+                    target = cand
+                    break
+                cur = os.path.dirname(cur)
+            if not target:
+                messagebox.showerror("找不到组件",
+                                     "未找到 00_集成联动\\cmd_chat.py（命令聊天窗口）")
+                return
+            if target not in sys.path:
+                sys.path.insert(0, target)
+            import cmd_chat
+            cmd_chat.open_chat_window(self.root, "01",
+                                      url=os.environ.get("EXAM_TERMINAL_URL", ""),
+                                      token=os.environ.get("EXAM_TERMINAL_TOKEN", ""))
+        except Exception as e:
+            messagebox.showerror("打开失败", "命令聊天窗口打开失败：%s" % e)
+
     def _open_ai_chat(self):
         """「🤖 AI 助手」入口：展开控制台 → 切到 AI 对话模式 → 聚焦输入框"""
         role = (self.user or {}).get("role")
@@ -2930,23 +2968,51 @@ class FaceVerifyGUI:
         """
         后台预加载人脸模型，避免第一次核验时的长时间无响应。
 
-        注意 after() 的传参方式：`after(0, self.status.config, "文本")` 会把文本当成
-        **位置参数**，tkinter 继而把它解释成选项名，于是抛
-        `TclError: unknown option "-文本"`，状态栏永远停在"初始化中…"。
-        必须传 kwargs 字典（与本文件其它几处 after 保持一致）。
+        两条历史坑（都在这儿一次性说明，避免再踩）：
+          1. `after(0, self.status.config, "文本")` 会把文本当**位置参数**，
+             tkinter 继而把它解释成选项名 → `TclError: unknown option "-文本"`，
+             状态栏永远停在"初始化中…"；必须传 kwargs 字典。
+          2. **后台线程不能直接调 root.after / 任何 Tk 方法**：Tk 不是线程安全的，
+             没进 mainloop 时会抛 `RuntimeError: main thread is not in main loop`
+             （本仓库的启动冒烟脚本正好就是"不进 mainloop"的跑法，能稳定复现）。
+             所以这里改成：线程只写结果，主线程用 after 轮询。
         """
+        try:
+            self.status.config(text="正在预加载人脸模型…")
+        except Exception:
+            pass
+        self._warmup_state = {"done": False, "msg": ""}
+
         def work():
             try:
                 import face_engine
-                self.root.after(0, self.status.config, {"text": "正在预加载人脸模型…"})
-                face_engine.get_app()                # 加载检测+识别模型（一次性，之后复用）
-                self.root.after(0, self.status.config, {"text": "人脸模型已就绪，可开始核验"})
+                face_engine.get_app()            # 加载检测+识别模型（一次性，之后复用）
+                self._warmup_state = {"done": True,
+                                      "msg": "人脸模型已就绪，可开始核验"}
                 self.action_log.log("模型预热", "完成")
             except Exception as e:
-                self.root.after(0, self.status.config,
-                                {"text": "模型预热失败：%s" % str(e)[:60]})
+                self._warmup_state = {
+                    "done": True, "msg": "模型预热失败：%s" % str(e)[:60]}
                 self.action_log.log("模型预热失败", str(e)[:120])
+
         threading.Thread(target=work, daemon=True).start()
+        self._poll_warmup()
+
+    def _poll_warmup(self, tries=0):
+        """主线程轮询预热结果（最多约 60 秒，之后不再打扰）。"""
+        st = getattr(self, "_warmup_state", None) or {}
+        if st.get("done"):
+            try:
+                self.status.config(text=st.get("msg") or "模型预热结束")
+            except Exception:
+                pass
+            return
+        if tries >= 200:
+            return
+        try:
+            self.root.after(300, lambda: self._poll_warmup(tries + 1))
+        except Exception:
+            pass
 
     # ---------------- 日志 ----------------
     def _show_audit(self):
