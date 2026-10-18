@@ -1939,7 +1939,9 @@ class TerminalApp(object):
                         "没有任意命令执行通道。\n"
                         "目标设备需运行命令执行器：\n"
                         "    python 00_集成联动\\command_runner.py --module 02 --loop 15\n"
-                        "（需先设 EXAM_TERMINAL_URL 与 EXAM_TERMINAL_TOKEN 两个环境变量）")
+                        "（需先设 EXAM_TERMINAL_URL 与 EXAM_TERMINAL_TOKEN 两个环境变量）\n"
+                        "目标填「设备标识」或「该设备的 IPv4」都可以：填 IP 会自动反查成设备，"
+                        "两种轮询方式都能领到。")
                   ).pack(anchor="w", pady=(4, 8))
 
         form = ttk.LabelFrame(f, text=" 下发指令 ", padding=8)
@@ -1948,14 +1950,25 @@ class TerminalApp(object):
         row1.pack(fill="x", pady=3)
         ttk.Label(row1, text="目标设备：").pack(side="left")
         self.cmd_target = tk.StringVar(value="PC-A-01")
-        ttk.Entry(row1, textvariable=self.cmd_target, width=22).pack(side="left", padx=(0, 12))
-        ttk.Label(row1, text="命令类型：").pack(side="left")
+        ttk.Entry(row1, textvariable=self.cmd_target, width=20).pack(side="left", padx=(0, 10))
+        ttk.Label(row1, text="已知设备（点选自动填 IPv4）：").pack(side="left")
+        self.cmd_pick = ttk.Combobox(row1, state="readonly", width=40, values=())
+        self.cmd_pick.pack(side="left", padx=(0, 6))
+        self.cmd_pick.bind("<<ComboboxSelected>>", self._pick_cmd_target)
+        ttk.Button(row1, text="🔄", width=3,
+                   command=self.refresh_cmd_targets).pack(side="left")
+
+        row1b = ttk.Frame(form)
+        row1b.pack(fill="x", pady=(2, 3))
+        ttk.Label(row1b, text="命令类型：").pack(side="left")
         self.cmd_kind = tk.StringVar(value="ping")
-        ttk.Combobox(row1, textvariable=self.cmd_kind, state="readonly", width=16,
+        ttk.Combobox(row1b, textvariable=self.cmd_kind, state="readonly", width=16,
                      values=tuple(self.store.COMMAND_TYPES.keys())).pack(side="left", padx=(0, 12))
-        ttk.Label(row1, text="参数(JSON，可留空)：").pack(side="left")
+        ttk.Label(row1b, text="参数(JSON，可留空)：").pack(side="left")
         self.cmd_params = tk.StringVar(value="{}")
-        ttk.Entry(row1, textvariable=self.cmd_params, width=26).pack(side="left")
+        ttk.Entry(row1b, textvariable=self.cmd_params, width=26).pack(side="left")
+        ttk.Label(row1b, text="　目标可填设备标识，也可直接填该设备的 IPv4（如 192.168.1.20）",
+                  foreground="#5b739a").pack(side="left", padx=(10, 0))
 
         row2 = ttk.Frame(form)
         row2.pack(fill="x", pady=(6, 0))
@@ -1973,9 +1986,9 @@ class TerminalApp(object):
         hist.pack(fill="both", expand=True)
         cols = ("time", "target", "kind", "state", "result")
         self.cmd_tree = ttk.Treeview(hist, columns=cols, show="headings", height=12)
-        for c, t, w in (("time", "下发时间", 140), ("target", "目标", 100),
-                        ("kind", "命令", 110), ("state", "状态", 70),
-                        ("result", "回执 / 结果", 620)):
+        for c, t, w in (("time", "下发时间", 140), ("target", "目标（设备 / IPv4）", 190),
+                        ("kind", "命令", 100), ("state", "状态", 70),
+                        ("result", "回执 / 结果", 560)):
             self.cmd_tree.heading(c, text=t)
             self.cmd_tree.column(c, width=w, anchor="w")
         self.cmd_tree.tag_configure("ok", foreground="#34d399")
@@ -1990,16 +2003,24 @@ class TerminalApp(object):
         self.refresh_commands()
 
     def _publish_command(self):
-        """下发一条命令（含权限判定、白名单校验、审计留痕）"""
+        """下发一条命令（含权限判定、白名单校验、审计留痕）。
+
+        目标支持两种填法：
+          · 设备标识（PC-A-01 / 计算机名）—— 老用法；
+          · **该设备的 IPv4**（192.168.1.20）—— 现场只知道地址时最省事。
+            填 IP 时先按设备台账反查设备标识，这样对端用标识轮询也能领到；
+            同时把 IP 一起写进命令，对端按 IP 轮询同样能领到（两边任一命中）。
+        """
         try:
             self.session.require("maintain")
         except access.AccessError as e:
             messagebox.showerror("权限不足", str(e))
             return
-        target = (self.cmd_target.get() or "").strip()
+        raw_target = (self.cmd_target.get() or "").strip()
         kind = (self.cmd_kind.get() or "").strip()
-        if not target:
-            messagebox.showwarning("缺少目标", "请填写目标设备标识（如 PC-A-01）")
+        if not raw_target:
+            messagebox.showwarning("缺少目标",
+                                   "请填写目标：设备标识（如 PC-A-01）或该设备的 IPv4")
             return
         if kind not in self.store.COMMAND_TYPES:
             messagebox.showwarning("命令不合法", "命令类型必须在白名单内")
@@ -2012,22 +2033,92 @@ class TerminalApp(object):
         except ValueError as e:
             messagebox.showwarning("参数不合法", "参数需为 JSON 对象：%s" % e)
             return
-        ok_rep, note = self._report_sensitive_action(
-            "下发命令", "目标=%s 类型=%s 参数=%s" % (target, kind, raw))
+
+        # 目标是 IPv4 就先反查设备标识（查不到就保留 IP，对端按 IP 领）
+        target, target_ip, resolved = raw_target, "", ""
+        ip = storage.normalize_ipv4(raw_target)
+        if ip:
+            target_ip = ip
+            try:
+                dev = self.store.device_by_ip(ip)
+            except Exception:
+                dev = None
+            if dev and dev.get("device_id"):
+                target = dev["device_id"]
+                resolved = "%s（%s）" % (dev["device_id"], dev.get("device_name") or "—")
+        note_detail = "目标=%s%s 类型=%s 参数=%s" % (
+            raw_target, (" → 设备 %s" % resolved) if resolved else "",
+            kind, raw)
+        ok_rep, note = self._report_sensitive_action("下发命令", note_detail)
         if not ok_rep:
             return
         try:
             cmd_id = self.store.push_target_command(
-                target, kind, params=params, operator=self.session.username, note=note)
+                target, kind, params=params, operator=self.session.username,
+                note=note, target_ip=target_ip)
         except Exception as e:
             messagebox.showerror("下发失败", str(e))
             return
         if not cmd_id:
             messagebox.showerror("下发失败", "命令未写入队列（白名单校验未通过）")
             return
-        self.cmd_msg.config(text="已下发 %s，等待「%s」回执…" % (cmd_id, target),
-                            foreground="#22d3ee")
+        if target_ip:
+            msg = ("已下发 %s → %s（按 IPv4 定位%s），等待回执…"
+                   % (cmd_id, target_ip, ("，设备 " + resolved) if resolved
+                      else "（设备台账里暂无该 IP，设备按 IP 轮询即可领取）"))
+        else:
+            msg = "已下发 %s，等待「%s」回执…" % (cmd_id, target)
+        self.cmd_msg.config(text=msg, foreground="#22d3ee")
         self.refresh_commands()
+        self.refresh_cmd_targets()
+
+    def refresh_cmd_targets(self):
+        """把"已知设备（含最近上报的 IPv4）"填进下拉框，点选即把 IPv4 填到目标框。"""
+        box = getattr(self, "cmd_pick", None)
+        if box is None:
+            return
+        vals = []
+        try:
+            devs = self.store.remote_devices()
+        except Exception:
+            devs = []
+        for d in devs[:50]:
+            ip = (d.get("last_ip") or "").strip()
+            did = (d.get("device_id") or "").strip() or "?"
+            name = (d.get("device_name") or "").strip() or "—"
+            if ip:
+                vals.append("%s · %s（%s）" % (ip, name, did))
+            else:
+                vals.append("（无 IP，需先在设备上运行执行器）· %s（%s）" % (name, did))
+        try:
+            box.configure(values=tuple(vals))
+            if vals and not box.get():
+                box.current(0)
+        except Exception:
+            pass
+
+    def _pick_cmd_target(self, _event=None):
+        """下拉框选中一台设备 → 把它的 IPv4（没有就用设备标识）填到目标框。"""
+        box = getattr(self, "cmd_pick", None)
+        if box is None:
+            return
+        txt = (box.get() or "").strip()
+        if not txt:
+            return
+        ip = storage.normalize_ipv4(txt.split("·")[0].strip())
+        if ip:
+            self.cmd_target.set(ip)
+            self.cmd_msg.config(text="目标已填 IPv4：%s" % ip, foreground="#22d3ee")
+            return
+        # 没有 IP 的条目：把括号里的设备标识填进去
+        try:
+            did = txt.rsplit("（", 1)[1].rstrip("）")
+        except IndexError:
+            did = ""
+        if did:
+            self.cmd_target.set(did)
+            self.cmd_msg.config(text="该设备还没上报过 IP，已填设备标识：%s" % did,
+                                foreground="#fbbf24")
 
     def refresh_commands(self):
         """刷新命令台账（含目标设备的回执）"""
@@ -2060,8 +2151,12 @@ class TerminalApp(object):
             else:
                 txt = "（尚无回执：目标设备需运行命令执行器）"
             tree.insert("", "end", iid=r.get("cmd_id", ""), tags=(tag,), values=(
-                (r.get("created_at") or "")[:19], pl.get("target", ""),
+                (r.get("created_at") or "")[:19],
+                (pl.get("target", "") +
+                 ((" · " + pl["target_ip"]) if pl.get("target_ip") else "")),
                 pl.get("kind", ""), state, txt))
+        # 设备列表（含 IPv4）跟着刷新，方便直接用 IP 下发下一条
+        self.refresh_cmd_targets()
 
     def _clear_finished_commands(self):
         """清理已完成的命令记录（仅台账清理，不动审计链）"""

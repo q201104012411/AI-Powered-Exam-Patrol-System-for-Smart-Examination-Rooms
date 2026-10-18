@@ -99,6 +99,15 @@ def is_loopback(host):
     return (host or "").strip().lower() in LOOPBACK
 
 
+def _norm_ip(text):
+    """把输入规范成 IPv4（不是 IP 就返回 ""）。storage 里是单一真源，这里只做转发。"""
+    try:
+        import storage
+        return storage.normalize_ipv4(text)
+    except Exception:                                 # noqa: BLE001
+        return ""
+
+
 def load_token(create=True):
     """
     令牌来源优先级：EXAM_TERMINAL_TOKEN 环境变量 > data\\lan_token.txt。
@@ -408,7 +417,8 @@ class LanService(object):
             r = self.store.save_remote_batch(
                 device_id=device_id,
                 device_name=str(body.get("device_name") or ""),
-                kind=kind, records=records, chain=body.get("chain") or {})
+                kind=kind, records=records, chain=body.get("chain") or {},
+                client_ip=client_ip)
             self.store.prune_remote()
         except Exception as e:                        # noqa: BLE001
             return 500, {"ok": False, "reason": "写入失败：%s" % str(e)[:200]}
@@ -417,15 +427,21 @@ class LanService(object):
         return 200, r
 
     # ---------------- 发布命令（03 当指挥端） ----------------
-    def commands_for(self, target):
-        """GET /api/command?target=xxx —— 目标设备拉取待执行命令（只读）"""
-        if not target:
-            return {"ok": False, "reason": "缺少 target（本机设备标识）"}
+    def commands_for(self, target, ips=None):
+        """GET /api/command?target=xxx&ip=a,b —— 目标设备拉取待执行命令（只读）
+
+        target 是设备标识；ip 是本机 IPv4（可多个，逗号分隔）。
+        两者**任一命中**就返回 —— 这样"只知道对端 IP 就下发的命令"也能被领走。
+        """
+        if not target and not (ips or []):
+            return {"ok": False, "reason": "缺少 target（本机设备标识）或 ip"}
         try:
-            items = self.store.commands_for(target, limit=20, pending_only=True)
+            items = self.store.commands_for(target, limit=20, pending_only=True,
+                                            ips=ips or [])
         except Exception as e:                        # noqa: BLE001
             return {"ok": False, "reason": "查询失败：%s" % str(e)[:160]}
-        return {"ok": True, "target": target, "count": len(items), "commands": items,
+        return {"ok": True, "target": target, "ips": list(ips or []),
+                "count": len(items), "commands": items,
                 "types": self.store.COMMAND_TYPES, "proto": PROTOCOL_VERSION}
 
     def list_commands(self, limit=50):
@@ -440,25 +456,42 @@ class LanService(object):
         """
         POST /api/command —— 下发一条命令。body:
             {target, kind, params, operator, note}
+        target 可以是**设备标识**（PC-A-01 / 计算机名）或**该设备的 IPv4**；
+        给 IP 时先按设备台账反查成设备标识再落库，同时把 IP 一并存进 target_ip，
+        保证"对端按标识轮询"和"对端按 IP 轮询"都能领到同一条命令。
         kind 必须在白名单里（COMMAND_TYPES），否则拒绝 —— 这条通道**永远不是**
         任意代码执行入口。
         """
         if not isinstance(body, dict):
             return 400, {"ok": False, "reason": "body 必须是 JSON 对象"}
-        target = str(body.get("target") or "").strip()
+        raw_target = str(body.get("target") or "").strip()
         kind = str(body.get("kind") or "").strip()
-        if not target:
-            return 400, {"ok": False, "reason": "缺少 target（目标设备标识）"}
+        if not raw_target:
+            return 400, {"ok": False, "reason": "缺少 target（目标设备标识或 IPv4）"}
         if kind not in self.store.COMMAND_TYPES:
             return 400, {"ok": False, "reason": "命令类型不在白名单：%s（可用：%s）"
                          % (kind, "、".join(sorted(self.store.COMMAND_TYPES)))}
+        # 目标归一化：是 IPv4 就先反查设备标识（查不到就保留 IP，对端按 IP 领）
+        ip = _norm_ip(raw_target)
+        target = raw_target
+        resolved = None
+        if ip:
+            try:
+                dev = self.store.device_by_ip(ip)
+            except Exception:                         # noqa: BLE001
+                dev = None
+            if dev and dev.get("device_id"):
+                target = dev["device_id"]
+                resolved = dev.get("device_name") or ""
         cmd_id = self.store.push_target_command(
             target, kind, params=body.get("params") or {},
             operator=str(body.get("operator") or client_ip),
-            note=str(body.get("note") or ""))
+            note=str(body.get("note") or ""), target_ip=ip)
         if not cmd_id:
             return 500, {"ok": False, "reason": "写入命令队列失败"}
-        return 200, {"ok": True, "cmd_id": cmd_id, "target": target, "kind": kind,
+        return 200, {"ok": True, "cmd_id": cmd_id, "target": target,
+                     "target_ip": ip, "resolved_from_ip": bool(ip and resolved),
+                     "device_name": resolved or "", "kind": kind,
                      "from": client_ip, "proto": PROTOCOL_VERSION}
 
     def handle_command_result(self, body, client_ip="-"):
@@ -653,8 +686,11 @@ def make_handler(service):
                 if not self._auth(path):
                     return
                 q = urllib.parse.parse_qs(parsed.query)
+                # ip 可以是逗号分隔的多条（一台机器常有多个网卡）
+                ips = [x.strip() for x in
+                       ",".join(q.get("ip") or [""]).split(",") if x.strip()]
                 self._send(200, service.commands_for(
-                    (q.get("target") or [""])[0]))
+                    (q.get("target") or [""])[0], ips=ips))
                 return
             # ---- 命令台账（含回执），供命令台/驾驶舱展示 ----
             if path == "/api/commands":
@@ -899,6 +935,44 @@ def _selfcheck_child():
         chk("远端设备已登记链头", devs and devs[0].get("chain_head") == "abc123",
             "设备=%s 链头=%s" % (devs[0].get("device_id") if devs else "-",
                                devs[0].get("chain_head") if devs else "-"))
+
+        # ---- 按 IPv4 下发命令（2026-10-18 新增） ----
+        # 注意：这几项放在最后 —— 它们会往设备台账里再登记一台设备，
+        # 上面的"远端设备已登记链头"断言依赖 devs[0] 是 SELF-PC。
+        # 真实部署里 IP 是 01/02 上报时自然带上的，这里直接给台账写一个测试 IP。
+        store.save_remote_batch("CAM-A01-1", "A-01 前门", "order", [],
+                                client_ip="192.168.1.20")
+        chk("设备台账记录来源 IPv4（供按 IP 下发用）",
+            (store.device_by_ip("192.168.1.20") or {}).get("device_id") == "CAM-A01-1",
+            "device_by_ip -> %s" % (store.device_by_ip("192.168.1.20") or {}).get("device_id"))
+
+        st, out = call("/api/command",
+                       {"target": "192.168.1.20", "kind": "ping",
+                        "operator": "owner"}, method="POST")
+        chk("按 IPv4 下发命令：自动反查成设备标识",
+            st == 200 and out.get("ok") and out.get("target") == "CAM-A01-1"
+            and out.get("target_ip") == "192.168.1.20",
+            "target=%s ip=%s" % (out.get("target"), out.get("target_ip")))
+        cmd_id = out.get("cmd_id") or ""
+
+        st, out = call("/api/command?target=CAM-A01-1")
+        chk("对端用设备标识轮询能领到「按 IP 下发」的命令",
+            st == 200 and any(c.get("cmd_id") == cmd_id
+                              for c in out.get("commands", [])),
+            "领到 %d 条" % len(out.get("commands", [])))
+
+        st, out = call("/api/command", {"target": "192.168.1.99", "kind": "status",
+                                        "operator": "owner"}, method="POST")
+        unknown_cmd = out.get("cmd_id") or ""
+        st, out = call("/api/command?target=NOT-THIS-DEVICE&ip=192.168.1.99")
+        chk("台帐里没有的 IP 也能被该 IP 的设备按 ip= 领走",
+            st == 200 and any(c.get("cmd_id") == unknown_cmd
+                              for c in out.get("commands", [])),
+            "target_ip=%s" % (((out.get("commands") or [{}])[0]).get("target_ip")))
+        st, out = call("/api/command?target=NOT-THIS-DEVICE")
+        chk("别的设备按标识轮询领不到这条（目标隔离）",
+            st == 200 and not any(c.get("cmd_id") == unknown_cmd
+                                  for c in out.get("commands", [])))
     finally:
         httpd.shutdown()
         httpd.server_close()

@@ -284,6 +284,62 @@ class StoreStatsTest(unittest.TestCase):
         self.assertEqual(st["daily"][-1][1], 0)
 
 
+class Ipv4TargetTest(unittest.TestCase):
+    """按 IPv4 下发命令（2026-10-18 新增）：归一化 / 反查设备 / 双向领取 / 目标隔离。"""
+
+    def setUp(self):
+        self.store = storage.Store(
+            db_path=os.path.join(_TMP, "ip_%s.db" % models.new_id("T")))
+
+    def test_normalize_ipv4(self):
+        n = storage.normalize_ipv4
+        self.assertEqual(n("192.168.1.20"), "192.168.1.20")
+        self.assertEqual(n(" 192.168.1.20:9113 "), "192.168.1.20")
+        self.assertEqual(n("10.0.0.1"), "10.0.0.1")
+        # 不是 IP 的一律返回空（调用方据此区分"设备标识 vs IP"）
+        self.assertEqual(n("PC-A-01"), "")
+        self.assertEqual(n("192.168.1.300"), "")
+        self.assertEqual(n("192.168.1"), "")
+        self.assertEqual(n("192.168.01.2"), "")      # 前导零：不认（避免歧义）
+        self.assertEqual(n(""), "")
+
+    def test_device_by_ip_from_batch(self):
+        self.assertIsNone(self.store.device_by_ip("192.168.1.20"))
+        self.store.save_remote_batch("CAM-A01-1", "A-01 前门", "order",
+                                     [{"ts": "2026-10-18 09:00:00",
+                                       "action": "巡检", "detail": "ok"}],
+                                     client_ip="192.168.1.20")
+        dev = self.store.device_by_ip("192.168.1.20")
+        self.assertIsNotNone(dev)
+        self.assertEqual(dev["device_id"], "CAM-A01-1")
+        self.assertEqual(dev["last_ip"], "192.168.1.20")
+        self.assertIsNone(self.store.device_by_ip("192.168.1.99"))
+
+    def test_command_pollable_by_id_and_by_ip(self):
+        cid = self.store.push_target_command("192.168.1.20", "ping",
+                                             target_ip="192.168.1.20")
+        self.assertTrue(cid)
+        # 对端按设备标识轮询（IP 反查后的 target 也写了进去）
+        cid2 = self.store.push_target_command("CAM-A01-1", "status")
+        by_id = self.store.commands_for("CAM-A01-1")
+        self.assertEqual([c["cmd_id"] for c in by_id], [cid2])
+        # 对端按 IP 轮询能领到"按 IP 下发"的那条
+        by_ip = self.store.commands_for("CAM-A01-1", ips=["192.168.1.20"])
+        self.assertEqual({c["cmd_id"] for c in by_ip}, {cid, cid2})
+        self.assertEqual(by_ip[0]["target_ip"], "192.168.1.20")
+        # 别的设备领不到
+        self.assertEqual(self.store.commands_for("CAM-B02-9", ips=["10.0.0.9"]), [])
+
+    def test_command_by_unknown_ip_still_pollable_by_ip(self):
+        cid = self.store.push_target_command("192.168.1.99", "status",
+                                             target_ip="192.168.1.99")
+        rows = self.store.commands_for("NOT-ME", ips=["192.168.1.99"])
+        self.assertEqual([c["cmd_id"] for c in rows], [cid])
+
+    def test_bad_kind_not_written(self):
+        self.assertEqual(self.store.push_target_command("192.168.1.20", "rm -rf /"), "")
+
+
 class ReviewRowsContractTest(unittest.TestCase):
     """回归：review_rows() 必须给界面"字典行"。
 

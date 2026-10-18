@@ -23,6 +23,35 @@ import data_crypto
 import models
 
 
+def normalize_ipv4(text):
+    """把 "192.168.1.20" / " 192.168.1.20:9113 " 规范成点分四段 IPv4。
+
+    返回 "" 表示不是合法 IPv4 —— 调用方据此区分"这是设备标识还是 IP"。
+    为什么要归一化：现场最常见的写法是"带端口 / 带空格 / 前导零"，
+    直接拿原串当 target 比会把命令发丢（对端永远拉不到）。
+    """
+    s = str(text or "").strip()
+    if not s:
+        return ""
+    if ":" in s:                                # 允许 host:port
+        host, _sep, port = s.partition(":")
+        if port and not port.isdigit():
+            return ""
+        s = host.strip()
+    parts = s.split(".")
+    if len(parts) != 4:
+        return ""
+    out = []
+    for p in parts:
+        if not p.isdigit() or (len(p) > 1 and p[0] == "0"):
+            return ""
+        n = int(p)
+        if not 0 <= n <= 255:
+            return ""
+        out.append(str(n))
+    return ".".join(out)
+
+
 class Store(object):
     def __init__(self, db_path=None):
         self.db_path = str(db_path or config.DB_PATH)
@@ -138,11 +167,13 @@ class Store(object):
             CREATE INDEX IF NOT EXISTS idx_remote_epoch ON remote_records(received_epoch);
 
             -- 远端设备台账：最后活跃时间、声明过的链头、累计条数
+            -- last_ip：最近一次上报的来源 IPv4 —— 用于"按 IP 下发命令"时把 IP 反查成设备标识
             CREATE TABLE IF NOT EXISTS remote_devices (
                 device_id TEXT PRIMARY KEY, device_name TEXT, kinds TEXT,
                 chain_algo TEXT, chain_head TEXT, chain_count INTEGER,
                 chain_verified TEXT, first_seen TEXT, last_seen TEXT,
-                records INTEGER DEFAULT 0, chain_changes INTEGER DEFAULT 0
+                records INTEGER DEFAULT 0, chain_changes INTEGER DEFAULT 0,
+                last_ip TEXT
             );
 
             -- ---- 数据维护留痕（清空操作）----
@@ -170,6 +201,8 @@ class Store(object):
             # 老库的 commands 表没有回执列 —— 发布命令功能需要，必须补
             "commands": [("status", "TEXT"),
                          ("result", "TEXT")],
+            # 老库的 remote_devices 没有来源 IP —— "按 IPv4 下发命令"要用它反查设备
+            "remote_devices": [("last_ip", "TEXT")],
         }
         with self._lock, self._conn() as c:
             for table, cols in want.items():
@@ -325,50 +358,67 @@ class Store(object):
         "selftest": "跑一次本模块自检并回报结果",
     }
 
-    def push_target_command(self, target, kind, params=None, operator="", note=""):
+    def push_target_command(self, target, kind, params=None, operator="", note="",
+                            target_ip=""):
         """下发一条命令给某个目标设备（01/02/…）。返回 cmd_id。
 
-        target 用设备标识（如 PC-A-01）或模块代号（01/02）；
+        target 用设备标识（如 PC-A-01）或模块代号（01/02），**也可以直接给 IPv4**；
+        target_ip 单独存一份，这样"只知道对端 IP"的场景也能被对端按 IP 领走。
         kind 必须在 COMMAND_TYPES 白名单里，否则拒绝（不写库）。
         """
         kind = (kind or "").strip()
         if kind not in self.COMMAND_TYPES:
             return ""
-        payload = {"target": (target or "").strip(), "kind": kind,
+        target = (target or "").strip()
+        ip = normalize_ipv4(target_ip or target)
+        payload = {"target": target, "kind": kind,
                    "params": params or {}, "note": note or ""}
+        if ip:
+            payload["target_ip"] = ip
         cmd_id = self.push_command("devcmd", payload, operator or "terminal")
-        self.log("下发命令", "目标=%s 类型=%s 参数=%s"
-                 % (target, kind, json.dumps(params or {}, ensure_ascii=False)),
+        self.log("下发命令", "目标=%s%s 类型=%s 参数=%s"
+                 % (target, ("（IP %s）" % ip) if ip else "", kind,
+                    json.dumps(params or {}, ensure_ascii=False)),
                  operator or "terminal")
         return cmd_id
 
-    def commands_for(self, target, limit=20, pending_only=True):
-        """某目标待执行的命令（按时间正序）。target 为空表示不过滤。"""
+    def commands_for(self, target, limit=20, pending_only=True, ips=None):
+        """某目标待执行的命令（按时间正序）。
+
+        target 是设备标识；ips 是"本机的一条或多条 IPv4"——**任一命中**就算给它的。
+        为什么要支持 IP：现场经常只掌握对端地址（DHCP 分下来的），按主机名对不上时
+        命令就会"发出去没人领"。
+        """
+        want = set()
+        t = str(target or "").strip()
+        if t:
+            want.add(t)
+        for cand in [t] + list(ips or []):
+            n = normalize_ipv4(cand)
+            if n:
+                want.add(n)
         sql = ("SELECT cmd_id, payload, created_at, operator FROM commands "
-               "WHERE kind='devcmd' AND applied=0")
-        args = []
-        if target:
-            # 注意：SQL 的 LIKE 通配符是 %，而 Python 的 % 是格式化符 ——
-            # 这里用字符串拼接而非 % 运算，避免 '%"target": "x"' 被当成格式串。
-            sql += " AND payload LIKE ?"
-            args.append('%' + '"target": "' + target + '"' + '%')
+               "WHERE kind='devcmd'" + (" AND applied=0" if pending_only else ""))
+        # 精确匹配在 Python 里做，SQL 只负责取一个上限（乘 10 留出过滤余量）
         sql += " ORDER BY created_at ASC LIMIT ?"
-        args.append(int(limit))
         with self._lock, self._conn() as c:
-            rows = c.execute(sql, args).fetchall()
+            rows = c.execute(sql, (int(limit) * 10 if want else int(limit),)).fetchall()
         out = []
         for r in rows:
             try:
                 pl = json.loads(r["payload"] or "{}")
             except Exception:
                 pl = {}
-            tgt = (pl.get("target") or "").strip()
-            if target and tgt and tgt != target:
-                continue                      # LIKE 只是粗筛，这里精确比对
+            tgt = str(pl.get("target") or "").strip()
+            tip = str(pl.get("target_ip") or "").strip()
+            if want and not ({tgt, tip} & want):
+                continue
             out.append({"cmd_id": r["cmd_id"], "kind": pl.get("kind", ""),
                         "params": pl.get("params") or {}, "note": pl.get("note", ""),
                         "created_at": r["created_at"], "operator": r["operator"],
-                        "target": tgt})
+                        "target": tgt, "target_ip": tip})
+            if len(out) >= int(limit):
+                break
         return out
 
     def finish_command(self, cmd_id, ok=True, result=None, operator=""):
@@ -451,11 +501,12 @@ class Store(object):
                 "operator": operator, "raw": raw, "dedupe": dedupe}
 
     def save_remote_batch(self, device_id, device_name, kind, records, chain=None,
-                          operator="远端接入"):
+                          operator="远端接入", client_ip=""):
         """
         接入一批远端记录。返回：
           {accepted, duplicated, total, chain_head, chain_changed, first_seen,
            device_records}
+          · client_ip：上报方来源 IPv4，写进设备台账 —— 之后就能"按 IP 下发命令"
 
         · 幂等：同一条记录（内容相同）重复上报只会算 duplicated，不会写第二行；
         · **不碰本机 audit 链**：远端记录进 remote_records，本机链只写一条回执；
@@ -503,12 +554,14 @@ class Store(object):
             c.execute(
                 "INSERT OR REPLACE INTO remote_devices "
                 "(device_id, device_name, kinds, chain_algo, chain_head, chain_count, "
-                " chain_verified, first_seen, last_seen, records, chain_changes) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                " chain_verified, first_seen, last_seen, records, chain_changes, last_ip) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (device_id, device_name or (row["device_name"] if row else ""), kinds,
                  str(chain.get("algo") or ""), new_head or old_head,
                  int(chain.get("count") or 0), str(chain.get("verified", "")),
-                 (row["first_seen"] if row else now), now, total, changes))
+                 (row["first_seen"] if row else now), now, total, changes,
+                 normalize_ipv4(client_ip) or ((row["last_ip"] or "")
+                                               if row and "last_ip" in row.keys() else "")))
 
         # 本机审计链上的回执：只有"谁在什么时候送来了多少条"，不含远端明细
         self.log("远端记录接入",
@@ -549,6 +602,20 @@ class Store(object):
             rows = c.execute("SELECT * FROM remote_devices "
                              "ORDER BY last_seen DESC").fetchall()
         return [dict(r) for r in rows]
+
+    def device_by_ip(self, ip):
+        """按"最近一次上报的来源 IP"反查设备台账；查不到返回 None。
+
+        用途：命令台填的是一台设备的 IPv4 时，先把 IP 换成设备标识再落库，
+        这样对端用自己熟悉的 `target=<设备标识>` 轮询也能领到命令。
+        """
+        ip = normalize_ipv4(ip)
+        if not ip:
+            return None
+        with self._lock, self._conn() as c:
+            row = c.execute("SELECT * FROM remote_devices WHERE last_ip=? "
+                            "ORDER BY last_seen DESC LIMIT 1", (ip,)).fetchone()
+        return dict(row) if row else None
 
     def remote_summary(self):
         with self._lock, self._conn() as c:

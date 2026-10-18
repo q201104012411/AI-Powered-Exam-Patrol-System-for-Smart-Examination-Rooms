@@ -221,7 +221,7 @@ lk.security_reinspect(alarm_id, "detain", operator="linkage")   # 06 复检结�
 03 智能终端（指挥端）                    01 / 02 设备（被指挥端）
   📡 命令台下一条命令                      00_集成联动\command_runner.py --loop 15
         │                                        │
-        │  POST /api/command                      │  GET /api/command?target=<本机标识>
+        │  POST /api/command                      │  GET /api/command?target=<本机标识>&ip=<本机IPv4,…>
         │  {target, kind, params}                 │  ← 拉到待执行命令
         └───────────────►  03 落库（commands 表）─┘
                                                  │  执行（**白名单**，见下）
@@ -229,6 +229,12 @@ lk.security_reinspect(alarm_id, "detain", operator="linkage")   # 06 复检结�
         ◄────────────────────────────────────────┘  {cmd_id, ok, result}
   03 落回执 + 写审计链（"下发命令" / "命令回执"），命令台显示结果
 ```
+
+> **目标可以填 IPv4（2026-10-18 追加）**：`target` 除了设备标识，也可以直接填
+> 那台设备的 IPv4（如 `192.168.1.20`）。03 会按 `remote_devices.last_ip` 反查成
+> 设备标识再落库，同时把 IP 存进 `target_ip`；设备端每次轮询会带上本机所有 IPv4，
+> 服务端按"**标识或任一 IP 命中**"派发 —— 于是"只知道 IP"和"只知道计算机名"
+> 两种现场情况都能通。`lan_service.py --selfcheck` 里为此新增 5 项断言。
 
 **命令白名单（两侧各存一份，必须一致 —— 这就是"没有任意命令执行通道"的保证）**
 
@@ -273,10 +279,12 @@ curl -H "X-Exam-Token: <令牌>" -H "Content-Type: application/json" ^
    未配置令牌时**跨设备来源直接拒**（fail-closed），只有回环地址免令牌。
 4. **全程留痕**：03 每次下发与收到回执都写进本机哈希链审计
    （`下发命令` / `命令回执`），命令台还能清理台账但**审计链不动**。
-5. **按目标隔离**：每个设备只拉得到 `target` 等于自己标识的命令（服务端精确比对）。
+5. **按目标隔离**：每个设备只拉得到 `target`（或 `target_ip`）等于自己的命令（服务端精确比对）。
 
 **如实说明**：拉取是**轮询**（默认 15 秒），不是服务端推送；设备标识靠
 `EXAM_DEVICE_ID` 或计算机名约定，现场部署时请确保全网唯一，否则会出现抢命令的情况。
+按 IPv4 下发时同样要求"这台机器的 IP 与台账里记的一致"——换 IP（DHCP 变动）后
+要以它最新一次上报的 IP 为准，否则请改填设备标识。
 
 ## 六、如实说明
 

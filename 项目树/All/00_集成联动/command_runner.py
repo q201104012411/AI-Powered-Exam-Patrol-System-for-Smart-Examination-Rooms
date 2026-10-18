@@ -229,9 +229,46 @@ def execute(code, cmd):
     return False, {"reason": "未实现：%s" % kind}
 
 
+# ---------------------------------------------------------------- 本机 IPv4
+def local_ipv4s():
+    """本机的全部 IPv4（去重、排除 127.*）。
+
+    为什么要把 IP 告诉终端：指挥端常常只知道"命令发给 192.168.1.20"，
+    并不知道这台机器的 EXAM_DEVICE_ID；把本机 IP 一起报上去，终端就能把
+    "按 IP 下发的命令"派给我们（两边任一命中即算给它的）。
+    """
+    ips = []
+    for probe in ("", "8.8.8.8"):        # 第二个只用来让系统选出默认出口网卡
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                if probe:
+                    s.connect((probe, 80))
+                else:
+                    s.connect(("10.255.255.255", 1))
+                ip = s.getsockname()[0]
+                if ip and ip not in ips:
+                    ips.append(ip)
+            finally:
+                s.close()
+        except OSError:
+            pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None,
+                                       socket.AF_INET, socket.SOCK_STREAM):
+            ip = info[4][0]
+            if ip and ip not in ips:
+                ips.append(ip)
+    except OSError:
+        pass
+    return [ip for ip in ips if not ip.startswith("127.")]
+
+
 # ---------------------------------------------------------------- 主流程
-def fetch(url, token, dev, timeout=15):
+def fetch(url, token, dev, timeout=15, ips=None):
     u = "%s/api/command?target=%s" % (url, urllib.parse.quote(dev))
+    if ips:
+        u += "&ip=" + urllib.parse.quote(",".join(ips))
     return _http(u, token=token, timeout=timeout)
 
 
@@ -243,19 +280,22 @@ def post_result(url, token, cmd_id, ok, result, dev):
                  token=token)
 
 
-def run_once(code, url, token, dev, verbose=True):
+def run_once(code, url, token, dev, verbose=True, ips=None):
     """拉一次待执行命令并逐条执行 + 回执。返回 (ok, 摘要)"""
     if not url:
         return False, "未配置 EXAM_TERMINAL_URL（智能终端地址）"
     if not token:
         return False, "未配置 EXAM_TERMINAL_TOKEN（接入令牌）"
-    ok, r = fetch(url, token, dev)
+    if ips is None:
+        ips = local_ipv4s()
+    ok, r = fetch(url, token, dev, ips=ips)
     if not ok:
         return False, "拉取命令失败：%s" % (r.get("reason") or r)
     cmds = r.get("commands") or []
     if not cmds:
         if verbose:
-            print("[命令] 无待执行命令（target=%s）" % dev)
+            print("[命令] 无待执行命令（target=%s ip=%s）"
+                  % (dev, ",".join(ips) or "-"))
         return True, "无待执行命令"
     done = []
     for c in cmds:
@@ -283,11 +323,14 @@ def main(argv=None):
     ap.add_argument("--url", default=_default_url(), help="智能终端地址（含端口）")
     ap.add_argument("--token", default=_default_token(), help="接入令牌")
     ap.add_argument("--device-id", default="", help="本机标识（默认计算机名）")
+    ap.add_argument("--ip", default="",
+                    help="本机 IPv4（默认自动探测；多网卡可用逗号分隔）")
     ap.add_argument("--once", action="store_true", help="只拉一次")
     ap.add_argument("--loop", type=int, default=0, help="常驻：每 N 秒拉一次")
     ns = ap.parse_args(argv)
 
     dev = device_id(ns.device_id)
+    ips = [x.strip() for x in (ns.ip or "").split(",") if x.strip()] or local_ipv4s()
     url = (ns.url or "").rstrip("/")
     if not url:
         print("未配置智能终端地址。请设环境变量 EXAM_TERMINAL_URL，或用 --url 指定，")
@@ -301,20 +344,22 @@ def main(argv=None):
     print("设备端命令执行器")
     print("  模块　　：%s（目录：%s）" % (ns.module, module_dir(ns.module) or "未找到"))
     print("  本机标识：%s" % dev)
+    print("  本机 IPv4：%s" % (", ".join(ips) or "未探测到（可用 --ip 指定）"))
     print("  终端　　：%s" % url)
     print("  支持命令：%s" % "、".join(SUPPORTED))
+    print("  提示：智能终端【发布命令】时，目标填上面任一 IPv4 或本机标识都能收到。")
     if ns.loop and ns.loop > 0:
         print("  常驻模式：每 %d 秒拉一次（Ctrl+C 退出）" % ns.loop)
         while True:
             try:
-                ok, msg = run_once(ns.module, url, ns.token, dev)
+                ok, msg = run_once(ns.module, url, ns.token, dev, ips=ips)
                 if not ok:
                     print("[命令] %s" % msg)
             except KeyboardInterrupt:
                 print("已退出")
                 return 0
             time.sleep(max(3, ns.loop))
-    ok, msg = run_once(ns.module, url, ns.token, dev)
+    ok, msg = run_once(ns.module, url, ns.token, dev, ips=ips)
     print("[命令] %s" % msg)
     return 0 if ok else 1
 
