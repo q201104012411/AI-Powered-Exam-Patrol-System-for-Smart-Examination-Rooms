@@ -129,7 +129,30 @@ class Reviewer(object):
         return events
 
     def review_rows(self, limit=200):
-        return self.store.list_reviews(limit=limit)
+        """复核记录（**字典行**，供界面直接按字段取用）。
+
+        为什么这里要转成字典（而不是直接透传 storage.list_reviews()）：
+          storage.list_reviews() 返回的是**解密后的 ReviewRecord 对象**，而界面
+          （terminal_gui.refresh_reviews）是按 `r["created_at"]` 这种字典方式取字段的。
+          以前这里直接透传对象，于是只要库里存在**任意一条**复核记录，
+          登录时的 refresh_all() 就会抛
+          `TypeError: 'ReviewRecord' object is not subscriptable`，
+          主界面构建直接中断 —— 而空库永远触发不到，所以长期没被发现。
+        """
+        rows = []
+        for rec in self.store.list_reviews(limit=limit):
+            rows.append({
+                "review_id": rec.review_id,
+                "alert_id": rec.alert_id,
+                "conclusion": rec.conclusion,
+                "reason": rec.reason,
+                "operator": rec.operator,
+                "witness": rec.witness,
+                "attachments": list(rec.attachments or []),
+                "created_at": rec.created_at,
+                "closed_loop": int(rec.closed_loop or 0),
+            })
+        return rows
 
     def edit_review(self, review_id, conclusion, reason, session, witness=None,
                     attachments=None, edit_reason=""):

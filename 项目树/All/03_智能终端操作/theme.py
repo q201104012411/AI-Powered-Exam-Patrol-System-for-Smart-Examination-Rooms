@@ -173,6 +173,19 @@ def _truncate(text, max_chars):
     return s[:max_chars - 1] + "…"
 
 
+def truncate_px(text, max_px, cjk=12, ascii_w=7):
+    """按**像素**截断并补省略号（中英混排按字符数截断会时短时长）。"""
+    s = str(text)
+    if text_width(s, cjk, ascii_w) <= max_px:
+        return s
+    out = ""
+    for ch in s:
+        if text_width(out + ch + "…", cjk, ascii_w) > max_px:
+            break
+        out += ch
+    return out + "…"
+
+
 def text_width(text, cjk=12, ascii_w=7):
     """粗略估算文本像素宽度（中文≈cjk、ASCII≈ascii_w）。
 
@@ -482,9 +495,8 @@ def bar_chart(canvas, data, color=None, colors=None, label_color=None,
     n = len(data)
     row_h = max(16, min(34, (h - 6) // max(1, n)))
     # 标签列按**实际像素宽度**给，别按字符数一刀切（中文会少一半）
-    label_w = min(int(w * 0.45), max(56, text_width(max((d[0] for d in data),
-                                                       key=text_width)) + 10))
-    max_chars = max(4, int((label_w - 10) // 12))
+    longest = max(data, key=lambda p: text_width(p[0]))[0]
+    label_w = min(int(w * 0.5), max(56, text_width(longest) + 14))
     value_w = 56
     plot_w = max(20, w - label_w - value_w - 6)
     bar_max = max(1.0, max(v for _, v in data))
@@ -498,7 +510,7 @@ def bar_chart(canvas, data, color=None, colors=None, label_color=None,
         bh = max(6, row_h - 8)
         c = (colors[i] if colors and i < len(colors) else (color or ACCENT2))
         canvas.create_text(label_w - 8, y + bh / 2.0, anchor="e",
-                           text=_truncate(lab, max_chars),
+                           text=truncate_px(lab, label_w - 14),
                            fill=label_color or FG_DIM, font=FONT_SMALL)
         bw = int(plot_w * (val / bar_max))
         if val > 0 and bw < 3:

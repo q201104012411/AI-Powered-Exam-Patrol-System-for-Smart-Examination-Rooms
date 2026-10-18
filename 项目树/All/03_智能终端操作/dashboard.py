@@ -122,25 +122,6 @@ def hour_buckets(alerts, hours=12):
     return time_buckets(alerts, hours, "hour")
 
 
-def top_items(pairs, n=6, other_label="其它"):
-    """取前 n 项（降序），剩余合并为"其它"；不足 n 项原样返回。"""
-    rows = []
-    for k, v in pairs or []:
-        try:
-            rows.append((str(k), int(v or 0)))
-        except (TypeError, ValueError):
-            continue
-    rows.sort(key=lambda p: (-p[1], p[0]))
-    n = max(1, int(n))
-    if len(rows) <= n:
-        return rows
-    head = rows[:n - 1]
-    rest = sum(v for _, v in rows[n - 1:])
-    if rest > 0:
-        head.append((other_label, rest))
-    return head
-
-
 def level_series(data):
     """告警分级占比图的数据：[(名称, 数量, 颜色), ...]（03 只有红/橙两级）"""
     by = (data or {}).get("by_level") or {}
@@ -149,8 +130,26 @@ def level_series(data):
 
 
 def type_series(data, n=6):
-    """告警类型 TOP N：[(中文类型, 数量), ...]"""
-    return top_items([(code_text(c), v) for c, v in ((data or {}).get("by_code") or [])], n)
+    """告警类型 TOP N：[(中文类型, 数量), ...]（降序，**不把剩余合并成"其它"**）。
+
+    为什么不合并：把尾部几十条并成一项"其它"后，它往往会比任何真实类型都长，
+    条形图上直接压过其它项（实测 30 条 vs 12 条），看着像"某一种类型爆了"。
+    TOP 榜就该只显示前 N 个真实类型，剩余的用卡片副标题另行说明。
+    """
+    rows = []
+    for code, val in ((data or {}).get("by_code") or []):
+        try:
+            rows.append((code_text(code), int(val or 0)))
+        except (TypeError, ValueError):
+            continue
+    rows.sort(key=lambda p: (-p[1], p[0]))
+    return rows[:max(1, int(n))]
+
+
+def type_rest(data, shown):
+    """没进 TOP 榜的那些类型还剩多少条（给卡片副标题用）。"""
+    total = sum(int(v or 0) for _c, v in ((data or {}).get("by_code") or []))
+    return max(0, total - sum(v for _n, v in shown or []))
 
 
 def fmt_ms(ms):
@@ -302,6 +301,7 @@ class CockpitTab(object):
         c3, _ = T.card(row, "告警类型 TOP", manager="grid", row=0, column=2,
                        sticky="nsew", accent=T.ACCENT3,
                        subtitle="按告警码统计")
+        self.lbl_type = c3.subtitle
         self.cv_type = tk.Canvas(c3, bg=T.PANEL, highlightthickness=0, height=120)
         self.cv_type.pack(fill="both", expand=True)
 
@@ -341,9 +341,9 @@ class CockpitTab(object):
                        sticky="nsew", padx=(0, 6), accent=T.ACCENT2)
         cols2 = ("dev", "records", "last")
         self.tree_devs = ttk.Treeview(c2, columns=cols2, show="headings", height=5)
-        for c, txt, w, stretch in (("dev", "设备", 100, True),
-                                   ("records", "条数", 40, False),
-                                   ("last", "最后活跃", 68, False)):
+        for c, txt, w, stretch in (("dev", "设备", 92, True),
+                                   ("records", "条数", 38, False),
+                                   ("last", "最后活跃", 74, False)):
             self.tree_devs.heading(c, text=txt)
             self.tree_devs.column(c, width=w, minwidth=w, anchor="w", stretch=stretch)
         self.tree_devs.tag_configure("row", font=T.FONT_SMALL)
@@ -636,7 +636,8 @@ class CockpitTab(object):
         for dev in devs[:20]:
             name = dev.get("device_name") or ""
             label = dev.get("device_id", "") or "?"
-            if name and name != label:
+            # 列宽只有 ~92px：设备名放不下就别硬拼，宁可只显示编码（否则两个都看不清）
+            if name and name != label and T.text_width("%s·%s" % (label, name)) <= 88:
                 label = "%s·%s" % (label, name)
             tree.insert("", "end", values=(
                 label,
@@ -709,6 +710,11 @@ class CockpitTab(object):
             T.bar_chart(self.cv_type, types, unit=" 条",
                         colors=[T.SERIES[i % len(T.SERIES)] for i in range(len(types))],
                         empty_text="暂无告警记录")
+            # 没进 TOP 的类型不画成"其它"条（会压过真实类型），改用副标题说明
+            rest = type_rest(d, types)
+            if self.lbl_type is not None:
+                self.lbl_type.config(text=("另有 %d 条" % rest) if rest
+                                     else "按告警码统计")
         except tk.TclError:
             return
         except Exception:

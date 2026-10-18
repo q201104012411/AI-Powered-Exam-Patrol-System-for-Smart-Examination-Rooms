@@ -133,15 +133,22 @@ class DashboardHelperTest(unittest.TestCase):
     def test_hour_buckets_is_compat_alias(self):
         self.assertEqual(dash.hour_buckets([], 12), dash.time_buckets([], 12, "hour"))
 
-    def test_top_items_merges_tail(self):
-        rows = dash.top_items([("a", 5), ("b", 3), ("c", 2), ("d", 1)], 3)
-        self.assertEqual(rows[0], ("a", 5))
-        self.assertEqual(rows[-1][0], "其它")
-        self.assertEqual(rows[-1][1], 3)              # c+d
+    def test_type_top_does_not_merge_tail_into_other(self):
+        """TOP 榜不合并"其它"：否则尾部几十条会做成一根压过所有真实类型的条。"""
+        data = {"by_code": [("LOOK_DOWN", 12), ("TURN_HEAD", 9), ("GAZE_SHIFT", 8),
+                            ("VIDEO_BLUR", 7), ("FACE_MISMATCH", 6), ("STAND_UP", 5),
+                            ("SLEEPY", 4), ("OFFLINE", 3)]}
+        rows = dash.type_series(data, 6)
+        self.assertEqual(len(rows), 6)
+        self.assertEqual(rows[0][1], 12)
+        self.assertNotIn("其它", [r[0] for r in rows])
+        # 剩余 2 种 7 条，通过副标题另行说明
+        self.assertEqual(dash.type_rest(data, rows), 7)
 
-    def test_top_items_short_and_empty(self):
-        self.assertEqual(dash.top_items([("a", 1)], 6), [("a", 1)])
-        self.assertEqual(dash.top_items([], 6), [])
+    def test_type_rest_zero_when_everything_shown(self):
+        data = {"by_code": [("LOOK_DOWN", 2)]}
+        rows = dash.type_series(data, 6)
+        self.assertEqual(dash.type_rest(data, rows), 0)
 
     def test_level_series_always_two_with_colors(self):
         rows = dash.level_series({"by_level": {config.LEVEL_RED: 3}})
@@ -275,6 +282,41 @@ class StoreStatsTest(unittest.TestCase):
         st = self.store.stats(days=3)
         self.assertEqual(st["daily"][-2][1], 1)
         self.assertEqual(st["daily"][-1][1], 0)
+
+
+class ReviewRowsContractTest(unittest.TestCase):
+    """回归：review_rows() 必须给界面"字典行"。
+
+    原缺陷：storage.list_reviews() 返回 ReviewRecord 对象，而 terminal_gui.refresh_reviews
+    按 `r["created_at"]` 取字段 —— 只要库里有**一条**复核记录，登录时的 refresh_all()
+    就抛 TypeError，主界面构建中断。空库永远触发不到，所以长期没暴露。
+    """
+
+    def setUp(self):
+        self.store = storage.Store(
+            db_path=os.path.join(_TMP, "rv_%s.db" % models.new_id("T")))
+
+    def test_review_rows_are_dicts(self):
+        import review as review_mod
+        a = models.Alert(code="LOOK_DOWN", room_id="A-01")
+        self.store.save_alert(a)
+        self.store.save_review(models.ReviewRecord(
+            alert_id=a.alert_id, conclusion=config.REVIEW_FALSE_POSITIVE,
+            reason="误报：反光", operator="patrol1", witness="owner"))
+        rows = review_mod.Reviewer(self.store).review_rows(limit=10)
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertIsInstance(row, dict)
+        # 界面实际用到的每个字段都必须在
+        for key in ("created_at", "review_id", "operator", "conclusion",
+                    "reason", "closed_loop", "alert_id", "witness"):
+            self.assertIn(key, row)
+        self.assertEqual(row["reason"], "误报：反光")       # 解密后仍是明文
+        self.assertEqual(row["closed_loop"], 1)             # 误报进算法迭代闭环
+
+    def test_review_rows_empty_ok(self):
+        import review as review_mod
+        self.assertEqual(review_mod.Reviewer(self.store).review_rows(), [])
 
 
 if __name__ == "__main__":
