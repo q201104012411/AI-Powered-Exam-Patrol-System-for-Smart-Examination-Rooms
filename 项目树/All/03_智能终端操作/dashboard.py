@@ -631,11 +631,17 @@ class CockpitTab(object):
         rem = d.get("remote") or {}
         who = getattr(self.session, "display_name", None) or "—"
         role = config.ROLE_TEXT.get(getattr(self.session, "role", ""), "—")
+        mode = "—"
+        try:
+            import runmode
+            mode = runmode.label(runmode.get(self.store))
+        except Exception:
+            pass
         try:
             self.lbl_foot.config(
-                text="数据库 %s　｜　%s（%s）　｜　远端最近接收 %s　｜　"
+                text="数据库 %s　｜　%s（%s）　｜　运行模式 %s　｜　远端最近接收 %s　｜　"
                      "刷新 %s（每 %d 秒自动）　｜　%s"
-                     % (short_path(config.DB_PATH), who, role,
+                     % (short_path(config.DB_PATH), who, role, mode,
                         (rem.get("last_received") or "—")[:19],
                         fmt_ms(d.get("cost_ms")), int(DATA_INTERVAL),
                         time.strftime("%H:%M:%S")))

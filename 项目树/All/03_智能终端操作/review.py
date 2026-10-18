@@ -59,7 +59,15 @@ class Reviewer(object):
         if a.review_conclusion:
             return False, "该告警已复核（结论：%s）" % config.REVIEW_CONCLUSIONS[a.review_conclusion]
         if a.needs_force_confirm():
-            return False, "红色预警必须先确认，再填写复核结论"
+            # 考试模式：红色预警必须先确认再复核（原规则）
+            # 非考试模式（教学）：允许直接复核，结论与理由照样留痕
+            try:
+                import runmode
+                exam = runmode.is_exam(self.store)
+            except Exception:
+                exam = True                     # 读不到就当考试模式（宁严不松）
+            if exam:
+                return False, "红色预警必须先确认，再填写复核结论"
 
         # 附件留档
         saved = []

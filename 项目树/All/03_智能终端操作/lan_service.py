@@ -330,6 +330,16 @@ class LanService(object):
         codes = [(c, n) for c, n in (st.get("by_code") or [])]
         code_map = dict(codes)
 
+        # 当前运行模式（考试 / 非考试·教学）：大屏上要看得见，避免误判
+        run_mode, run_mode_text, run_mode_exam = "", "", True
+        try:
+            import runmode
+            run_mode = runmode.get(store)
+            run_mode_text = runmode.label(run_mode)
+            run_mode_exam = run_mode == config.RUN_MODE_EXAM
+        except Exception:                             # noqa: BLE001
+            pass
+
         recent = []
         for a in (st.get("recent") or [])[:60]:
             try:
@@ -384,6 +394,9 @@ class LanService(object):
             "modules": self._modules(force=force_modules),
             "status_text": status_text,
             "role_text": dict(config.ROLE_TEXT),
+            "run_mode": run_mode,
+            "run_mode_text": run_mode_text,
+            "run_mode_exam": bool(run_mode_exam),
             "data_dir": str(config.DATA_ROOT),
             "cost_ms": round((time.time() - t0) * 1000.0, 1),
         }

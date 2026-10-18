@@ -256,6 +256,65 @@ class TerminalApp(object):
         self.session = s
         self._build_main()
 
+    # ================= 运行模式（考试 / 非考试·教学） =================
+    def _refresh_mode_ui(self):
+        """顶栏徽标 + 按钮文案跟着当前模式走（切页/切账号/切换后都调它）。"""
+        try:
+            import runmode
+            mode = runmode.get(self.store)
+            exam = mode == config.RUN_MODE_EXAM
+            text = "🎯 %s" % runmode.label(mode)
+            color = "#f43f5e" if exam else "#34d399"
+            if getattr(self, "mode_badge", None) is not None:
+                self.mode_badge.config(text=text, foreground=color)
+            if getattr(self, "btn_mode", None) is not None:
+                self.btn_mode.config(
+                    text="🎓 切到非考试（教学）" if exam else "🎯 切回考试模式")
+            if getattr(self, "status", None) is not None and (
+                    getattr(self, "_mode_status_shown", "") != mode):
+                self._mode_status_shown = mode
+                self.status.config(text=runmode.summary(self.store))
+        except Exception:
+            pass
+
+    def _toggle_run_mode(self):
+        """一键在"考试模式"与"非考试模式（教学）"之间切换（切换动作写审计链）。"""
+        try:
+            self.session.require(config.RUN_MODE_ACTION)
+        except access.AccessError as e:
+            messagebox.showerror("权限不足", str(e))
+            return
+        import runmode
+        cur = runmode.get(self.store)
+        tgt = (config.RUN_MODE_TEACH if cur == config.RUN_MODE_EXAM
+               else config.RUN_MODE_EXAM)
+        effects = "\n".join("  · " + x for x in runmode.effects(tgt))
+        ok = messagebox.askyesno(
+            "切换运行模式",
+            "当前：%s\n切换为：%s\n\n切换后：\n%s\n\n"
+            "（审计链与复核留痕两种模式都照常，切换动作本身也会写审计）"
+            % (runmode.label(cur), runmode.label(tgt), effects))
+        if not ok:
+            return
+        note = self._ask_text("切换原因（可留空）",
+                              "简要写一句为什么切换（留痕用，可留空）：") or ""
+        ok2, msg = runmode.set(self.store, tgt, operator=self.session.username,
+                               note=note.strip()[:80])
+        if not ok2:
+            messagebox.showerror("切换失败", msg)
+            return
+        self._refresh_mode_ui()
+        try:
+            self.status.config(text="运行模式：%s" % msg)
+        except Exception:
+            pass
+        self.refresh_all()
+        try:
+            if getattr(self, "cockpit", None) is not None:
+                self.cockpit.refresh(force=True)
+        except Exception:
+            pass
+
     # ================= 主界面 =================
     def _build_main(self):
         for w in self.root.winfo_children():
@@ -279,6 +338,18 @@ class TerminalApp(object):
         self.top_bar = top
         ttk.Label(top, text="智能终端操作端", font=("Microsoft YaHei", 14, "bold")).pack(side="left")
         ttk.Label(top, text="  " + s.describe(), foreground="#1f56b8").pack(side="left")
+        # 运行模式（考试 / 非考试·教学）：一键切换，切换动作进审计链。
+        # 有 maintain 的角色（所有者/管理员）才给按钮；其它角色只显示当前模式。
+        self.mode_badge = ttk.Label(top, text="", foreground="#22d3ee",
+                                    font=("Microsoft YaHei", 10, "bold"))
+        self.mode_badge.pack(side="left", padx=(14, 0))
+        if s.can(config.RUN_MODE_ACTION):
+            self.btn_mode = ttk.Button(top, text="切换模式",
+                                       command=self._toggle_run_mode)
+            self.btn_mode.pack(side="right", padx=8)
+        else:
+            self.btn_mode = None
+        self._refresh_mode_ui()
         ttk.Button(top, text="🔄 切换账号", command=self._build_login).pack(side="right")
         ttk.Button(top, text="退出", command=self.root.destroy).pack(side="right", padx=6)
 
@@ -3095,9 +3166,22 @@ class TerminalApp(object):
         hint = "共 %d 条" % len(alerts)
         if red_pending:
             hint += "　⚠ 红色待确认 %d 条" % red_pending
+        try:
+            import runmode
+            if runmode.is_teach(self.store):
+                hint += "　｜　🎓 非考试模式（教学）：不弹窗、不强制确认"
+        except Exception:
+            pass
         self.alerts_hint.config(text=hint)
+        # 红色弹窗只在**考试模式**下弹：教学时课堂里弹窗太吵，列表标红 + 状态栏提示足够
         if red_pending:
-            self._popup_red()
+            try:
+                import runmode
+                exam = runmode.is_exam(self.store)
+            except Exception:
+                exam = True
+            if exam:
+                self._popup_red()
 
     def _popup_red(self):
         """红色预警弹窗（只弹一次，避免刷屏）"""

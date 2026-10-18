@@ -36,6 +36,14 @@ class AlertHub(object):
             dup = self._find_dup(alert)
             if dup is not None:
                 return dup, False
+        # 非考试（教学）模式：给告警打标记 —— 事后能区分"教学样本"与"考试数据"
+        try:
+            import runmode
+            if runmode.is_teach(self.store):
+                alert.extra = dict(alert.extra or {})
+                alert.extra["run_mode"] = config.RUN_MODE_TEACH
+        except Exception:
+            pass
         self.store.save_alert(alert)
         if self.offline is not None:
             self.offline.enqueue(alert)
