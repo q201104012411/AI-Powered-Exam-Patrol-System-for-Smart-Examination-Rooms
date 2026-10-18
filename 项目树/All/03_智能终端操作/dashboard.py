@@ -232,28 +232,14 @@ class CockpitTab(object):
         self.lbl_foot = ttk.Label(body, text="", style="TLabel", foreground=T.FG_DIM)
         self.lbl_foot.grid(row=4, column=0, sticky="w", pady=(4, 0))
 
-    # ---- 顶部标题条 ----
+    # ---- 顶部标题条（整条画在 Canvas 上：渐变底/发光标题/胶囊按钮/警戒线）----
     def _build_header(self, body):
-        head = ttk.Frame(body, style="TFrame")
-        head.grid(row=0, column=0, sticky="ew", pady=(0, 4))
-        # 顶部"警戒线"：无红色预警时是暗描边，有红色预警时变红并呼吸
-        # （先在底部占位，再排标题行，避免 pack 顺序把线挤到中间）
-        self.stripe = tk.Frame(head, height=3, bg=T.BORDER, highlightthickness=0)
-        self.stripe.pack(side="bottom", fill="x", pady=(4, 0))
-        row = ttk.Frame(head, style="TFrame")
-        row.pack(fill="x")
-
-        ttk.Label(row, text="智能终端 · 运行态势驾驶舱",
-                  style="Title.TLabel").pack(side="left")
-
-        self.btn_full = ttk.Button(row, text="⛶ 全屏", command=self.toggle_fullscreen)
-        self.btn_full.pack(side="right")
-        ttk.Button(row, text="🔄 刷新", command=lambda: self.refresh(force=True)
-                   ).pack(side="right", padx=(0, 6))
-        self.lbl_clock = ttk.Label(row, text="--:--:--", style="H1.TLabel")
-        self.lbl_clock.pack(side="right", padx=(0, 12))
-        self.lbl_chain = ttk.Label(row, text="审计链：校验中…", style="H1.TLabel")
-        self.lbl_chain.pack(side="right", padx=(0, 18))
+        self.banner = T.Banner(
+            body, "智能终端 · 运行态势驾驶舱",
+            "告警分级 · 复核留痕 · 断网补传 · 权限最小化",
+            buttons=(("refresh", "🔄 刷新", lambda: self.refresh(force=True)),
+                     ("full", "⛶ 全屏", self.toggle_fullscreen)))
+        self.banner.grid(row=0, column=0, sticky="ew", pady=(0, 8))
 
     # ---- KPI 磁贴（单行 10 个）----
     def _build_kpis(self, body):
@@ -272,8 +258,8 @@ class CockpitTab(object):
         last = len(specs) - 1
         for i, (key, label, unit, color) in enumerate(specs):
             tile = T.kpi_tile(row, label, "0", unit, color)
-            tile["outer"].pack(side="left", fill="both", expand=True,
-                               padx=(0, 0 if i == last else 6))
+            tile["cv"].pack(side="left", fill="both", expand=True,
+                            padx=(0, 0 if i == last else 6))
             self.tiles[key] = tile
 
     # ---- 图表区（3 张）----
@@ -369,14 +355,19 @@ class CockpitTab(object):
     def _tick(self):
         if self._stopped:
             return
-        try:
-            self.lbl_clock.config(text=time.strftime("%Y-%m-%d　%H:%M:%S"))
-        except Exception:
-            return
+        # 先排下一次，再干活：任何一步出异常都不会把定时器弄死
+        # （这里踩过坑：时钟格式化写错一个 %，except 里 return 之后整个驾驶舱就不再刷新了）
         try:
             self._after = self.parent.after(1000, self._tick)
         except Exception:
             return
+        try:
+            now = time.localtime()
+            self.banner.set_clock(
+                time.strftime("%H:%M:%S", now),
+                time.strftime("%Y-%m-%d", now) + "　周" + "日一二三四五六"[now.tm_wday])
+        except Exception:
+            pass
         # 后台聚合结果回填（子线程只写属性，Tk 控件只在主线程动）
         pending = self._mod_pending
         if pending is not None:
@@ -386,9 +377,6 @@ class CockpitTab(object):
             except Exception:
                 pass
         self._n += 1
-        # 有红色预警时让警戒线每秒呼吸一次（只是换个颜色，代价可忽略）
-        if getattr(self, "_red_now", 0) > 0:
-            self._paint_stripe(dim=(self._n % 2 == 0))
         if not self._is_visible():
             return                      # 页签不可见时不刷，切回来立刻补刷
         now = time.time()
@@ -544,18 +532,19 @@ class CockpitTab(object):
         audits = int(d.get("audits") or chain_n or 0)
 
         set_tile = T.set_tile
+        share = (lambda n: (float(n) / total) if total else 0.0)
         set_tile(self.tiles["total"], total, T.ACCENT,
                  sub="近 1 小时 +%d" % int(d.get("last_hour") or 0))
         set_tile(self.tiles["red"], red, T.ALARM if red else T.FG_MUTE,
-                 sub="占比 %s" % T.fmt_pct(red, total))
+                 sub="占比 %s" % T.fmt_pct(red, total), ratio=share(red))
         set_tile(self.tiles["orange"], orange, T.WARN if orange else T.FG_MUTE,
-                 sub="占比 %s" % T.fmt_pct(orange, total))
+                 sub="占比 %s" % T.fmt_pct(orange, total), ratio=share(orange))
         set_tile(self.tiles["pending"], pending,
                  T.ACCENT3 if pending else T.FG_MUTE,
                  sub=("超时 %d 条" % overdue) if overdue else "无超时",
-                 sub_color=T.ALARM if overdue else T.FG_MUTE)
+                 sub_color=T.ALARM if overdue else T.FG_MUTE, ratio=share(pending))
         set_tile(self.tiles["review"], reviews, T.OK,
-                 sub="覆盖率 %s" % T.fmt_pct(reviews, total))
+                 sub="覆盖率 %s" % T.fmt_pct(reviews, total), ratio=share(reviews))
         set_tile(self.tiles["unsync"], unsync,
                  T.ACCENT2 if unsync else T.FG_MUTE,
                  sub="断网补传队列")
@@ -572,29 +561,23 @@ class CockpitTab(object):
                  sub="链完整" if ok_chain else "链异常",
                  sub_color=T.OK if ok_chain else T.ALARM)
 
-        # 顶部"警戒线"：有红色预警时变红并呼吸（大屏上一眼看到"现在有事"）
+        # 顶部"警戒线"：有红色预警时整条变红（大屏上一眼看到"现在有事"）
         self._red_now = red
         self._paint_stripe()
-
         try:
-            self.lbl_chain.config(
-                text="审计链：%s（%s 条）" % ("完整" if ok_chain else "异常",
-                                            T.fmt_int(audits)),
-                foreground=T.OK if ok_chain else T.ALARM)
+            self.banner.set_chain("审计链 %s · %s 条"
+                                  % ("完整" if ok_chain else "异常", T.fmt_int(audits)),
+                                  ok=ok_chain)
         except Exception:
             pass
 
     def _paint_stripe(self, dim=False):
-        """顶部警戒线的颜色：无红色预警=暗描边；有红色预警=红（dim=True 时压暗做呼吸）"""
-        stripe = getattr(self, "stripe", None)
-        if stripe is None:
+        """顶栏警戒线：有红色预警=红，否则=暗描边。"""
+        banner = getattr(self, "banner", None)
+        if banner is None:
             return
         try:
-            if getattr(self, "_red_now", 0) > 0:
-                stripe.config(bg=T.blend(T.ALARM, T.BG, 0.55) if dim else T.ALARM,
-                              height=4 if self._fullscreen else 3)
-            else:
-                stripe.config(bg=T.BORDER, height=3)
+            banner.set_alert(getattr(self, "_red_now", 0) > 0)
         except Exception:
             pass
 
@@ -810,10 +793,10 @@ class CockpitTab(object):
         try:
             if self._fullscreen:
                 root.bind("<Escape>", self._on_esc)
-                self.btn_full.config(text="⤢ 退出全屏")
+                self.banner.set_button_text("full", "⤢ 退出全屏")
             else:
                 root.unbind("<Escape>")
-                self.btn_full.config(text="⛶ 全屏")
+                self.banner.set_button_text("full", "⛶ 全屏")
         except Exception:
             pass
         self._apply_density()
@@ -828,12 +811,12 @@ class CockpitTab(object):
 
     def _apply_density(self):
         """大屏下把 KPI 数字放大一档（离得远也读得清）。"""
-        font = ("Consolas", 26 if self._fullscreen else 20, "bold")
         for tile in self.tiles.values():
             try:
-                tile["value"].config(font=font)
+                T.set_tile_big(tile, self._fullscreen)
             except Exception:
                 pass
+        self.banner.redraw()
         self._paint_stripe()
 
     def _set_app_chrome(self, visible):

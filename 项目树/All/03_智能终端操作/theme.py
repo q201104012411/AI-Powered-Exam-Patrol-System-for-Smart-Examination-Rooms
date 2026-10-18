@@ -374,6 +374,182 @@ class VScroll(ttk.Frame):
             pass
 
 
+class Banner(tk.Canvas):
+    """驾驶舱顶栏（整条画在 Canvas 上）。
+
+    ttk 的 Label/Button 做不出渐变底、发光标题、胶囊按钮和"警戒线"，所以顶栏
+    自己画：渐变底 + 左侧标识 + 发光标题 + 审计链胶囊 + 大号时钟 + 右侧胶囊按钮。
+
+    用法：
+        b = Banner(parent, "智能终端 · 运行态势驾驶舱", "副标题",
+                   buttons=[("refresh", "🔄 刷新", cb), ("full", "⛶ 全屏", cb)])
+        b.pack(fill="x")
+        b.set_clock("21:30:05", "2026-10-18 周日")
+        b.set_chain("审计链 完整 · 1,666 条", ok=True)
+        b.set_alert(True)          # 有红色预警 -> 顶部压红线并呼吸
+    """
+
+    BTN_H = 26
+
+    def __init__(self, parent, title, subtitle="", buttons=(), height=78):
+        tk.Canvas.__init__(self, parent, bg=BG, height=height, bd=0,
+                           highlightthickness=0)
+        self._title = str(title)
+        self._subtitle = str(subtitle)
+        self._buttons = [(k, t, cb) for k, t, cb in (buttons or [])]
+        self._clock = "--:--:--"
+        self._date = ""
+        self._chain = "审计链：校验中…"
+        self._chain_ok = True
+        self._alert = False
+        self._hover = -1
+        self._rects = []          # [(x1, y1, x2, y2, key)]
+        self.bind("<Configure>", lambda _e: self.redraw())
+        self.bind("<Motion>", self._on_motion)
+        self.bind("<Leave>", lambda _e: self._set_hover(-1))
+        self.bind("<Button-1>", self._on_click)
+
+    # ---- 对外接口 ----
+    def set_clock(self, clock, date=""):
+        self._clock = str(clock)
+        self._date = str(date)
+        self._draw_right()
+
+    def set_chain(self, text, ok=True):
+        self._chain = str(text)
+        self._chain_ok = bool(ok)
+        self._draw_right()
+
+    def set_alert(self, on):
+        self._alert = bool(on)
+        self._draw_bottom()
+
+    def set_button_text(self, key, text):
+        self._buttons = [(k, text if k == key else t, cb)
+                         for k, t, cb in self._buttons]
+        self.redraw()
+
+    # ---- 绘制 ----
+    def redraw(self):
+        self.delete("all")
+        w = int(self.winfo_width() or 0)
+        h = int(self.winfo_height() or 0)
+        if w < 40 or h < 20:
+            return
+        # 渐变底
+        vgradient(self, 0, 0, w, h - 2, BG2, BG, steps=16)
+        # 左侧标识（发光方块）
+        cy = h // 2 - 4
+        round_rect(self, 14, cy - 14, 42, cy + 14, 8, outline=blend(ACCENT, BG, .35),
+                   width=1)
+        round_rect(self, 20, cy - 8, 36, cy + 8, 4, fill=ACCENT)
+        self.create_rectangle(24, cy - 4, 32, cy + 4, fill=BG, outline="")
+        # 标题（先叠一层同色淡影做发光，再画主文字）
+        self.create_text(54, cy - 8, anchor="w", text=self._title,
+                         fill=blend(ACCENT, BG, .55), font=("Microsoft YaHei", 21, "bold"))
+        self.create_text(53, cy - 9, anchor="w", text=self._title,
+                         fill=FG, font=("Microsoft YaHei", 21, "bold"))
+        if self._subtitle:
+            self.create_text(55, cy + 13, anchor="w", text=self._subtitle,
+                             fill=FG_DIM, font=("Microsoft YaHei", 9))
+        self._draw_right()
+        self._draw_bottom()
+
+    def _draw_right(self):
+        """右侧从右往左排：按钮 → 时钟 → 审计链胶囊（谁在右谁先占位）。"""
+        self.delete("right")
+        self.delete("chain")
+        w = int(self.winfo_width() or 0)
+        h = int(self.winfo_height() or 0)
+        if w < 40 or h < 20:
+            return
+        cy = h // 2 - 4
+        x_right = w - 16
+        self._rects = []
+        # 1) 按钮
+        for key, text, _cb in reversed(self._buttons):
+            tw = text_width(text, cjk=13, ascii_w=8) + 24
+            x1, x2 = x_right - tw, x_right
+            y1, y2 = cy - self.BTN_H // 2, cy + self.BTN_H // 2
+            hot = (self._hover == key)
+            round_rect(self, x1, y1, x2, y2, 6,
+                       fill=PANEL2 if not hot else BORDER,
+                       outline=ACCENT if hot else BORDER, width=1, tags="right")
+            self.create_text((x1 + x2) // 2, (y1 + y2) // 2, text=text,
+                             fill=FG if not hot else ACCENT,
+                             font=("Microsoft YaHei", 9), tags="right")
+            self._rects.append((x1, y1, x2, y2, key))
+            x_right = x1 - 8
+        # 2) 时钟（在按钮左边）
+        clock_right = x_right - 6
+        self.create_text(clock_right, cy - 9, anchor="e", text=self._clock,
+                         fill=FG, font=("Consolas", 20, "bold"), tags="right")
+        if self._date:
+            self.create_text(clock_right, cy + 13, anchor="e", text=self._date,
+                             fill=FG_MUTE, font=("Microsoft YaHei", 9),
+                             tags="right")
+        clock_w = max(120, text_width(self._clock, cjk=13, ascii_w=13) + 18)
+        date_w = text_width(self._date, cjk=12, ascii_w=8) if self._date else 0
+        clock_w = max(clock_w, date_w + 18)
+        # 3) 审计链胶囊（在时钟左边）
+        text = self._chain
+        tw = text_width(text, cjk=12, ascii_w=7) + 30
+        x2 = clock_right - clock_w - 14
+        x1 = x2 - tw
+        col = OK if self._chain_ok else ALARM
+        round_rect(self, x1, cy - 12, x2, cy + 12, 12,
+                   fill=blend(col, BG, .86), outline=blend(col, BG, .45), width=1,
+                   tags="chain")
+        self.create_oval(x1 + 9, cy - 3, x1 + 15, cy + 3, fill=col, outline="",
+                         tags="chain")
+        self.create_text(x1 + 21, cy, anchor="w", text=text, fill=FG_DIM,
+                         font=("Microsoft YaHei", 9), tags="chain")
+
+    def _draw_bottom(self):
+        self.delete("bottom")
+        w = int(self.winfo_width() or 0)
+        h = int(self.winfo_height() or 0)
+        if w < 40 or h < 10:
+            return
+        col = ALARM if self._alert else BORDER
+        self.create_rectangle(0, h - 2, w, h, fill=col, outline="")
+        if self._alert:
+            self.create_rectangle(0, h - 4, w, h - 2, fill=blend(ALARM, BG, .55),
+                                  outline="")
+        # 中段一段亮线，做出"扫描"的感觉
+        self.create_rectangle(w // 2 - 90, h - 2, w // 2 + 90, h,
+                              fill=ACCENT if not self._alert else ALARM, outline="")
+
+    # ---- 交互 ----
+    def _on_motion(self, e):
+        key = None
+        for (x1, y1, x2, y2, k) in self._rects:
+            if x1 <= e.x <= x2 and y1 <= e.y <= y2:
+                key = k
+                break
+        if key != self._hover:
+            self._set_hover(key)
+
+    def _set_hover(self, key):
+        self._hover = key if key is not None else -1
+        self.redraw()
+
+    def _on_click(self, e):
+        for (x1, y1, x2, y2, k) in self._rects:
+            if x1 <= e.x <= x2 and y1 <= e.y <= y2:
+                for key, _t, cb in self._buttons:
+                    if key == k and cb:
+                        try:
+                            cb()
+                        except Exception:
+                            pass
+                return
+
+    @property
+    def chain_text(self):
+        return self._chain
+
+
 def card(parent, title="", pady=(0, PAD), manager="pack", accent=None,
          subtitle="", tools=None, **grid_kw):
     """卡片容器：返回 (外框, 内容框)。标题可选，accent 给标题左侧色条。
@@ -384,83 +560,167 @@ def card(parent, title="", pady=(0, PAD), manager="pack", accent=None,
 
     subtitle 显示在标题栏右侧；tools=[(按钮文字, 回调), ...] 也放标题栏右侧
     （比底部工具条省一整行高度）。标题栏本身挂在返回值的 `.head` 属性上。
+
+    外观：外框用 tk.Frame + 1px 高亮描边（ttk 的 clam 主题不吃 bordercolor，
+    想要一条**看得见**的边就只能这样），标题上再压一条 2px 同色细线。
     """
-    outer = ttk.Frame(parent, style="Card.TFrame",
-                      padding=(PAD_L, PAD, PAD_L, PAD))
+    outer = tk.Frame(parent, bg=PANEL, highlightthickness=1,
+                     highlightbackground=BORDER, highlightcolor=BORDER)
+    inner = tk.Frame(outer, bg=PANEL, padx=PAD_L - 1, pady=PAD - 1)
+    inner.pack(fill="both", expand=True)
     if manager == "grid":
         outer.grid(**grid_kw)
     else:
         pady = grid_kw.pop("pady", pady)
         outer.pack(fill="x", pady=pady, **grid_kw)
     if title:
-        head = ttk.Frame(outer, style="Card.TFrame")
+        head = tk.Frame(inner, bg=PANEL)
         head.pack(fill="x", pady=(0, 6))
-        outer.head = head
+        inner.head = head
         if accent:
-            bar = tk.Frame(head, width=3, height=14, bg=accent)
-            bar.pack(side="left", padx=(0, 6))
+            bar = tk.Frame(head, width=3, height=13, bg=accent)
+            bar.pack(side="left", padx=(0, 7))
             bar.pack_propagate(False)
-        ttk.Label(head, text=title, style="H2.TLabel").pack(side="left")
+        tk.Label(head, text=title, bg=PANEL, fg=ACCENT, font=FONT_H2,
+                 anchor="w").pack(side="left")
         for text, cmd in (tools or []):
             ttk.Button(head, text=text, command=cmd, style="Mini.TButton"
                        ).pack(side="right", padx=(6, 0))
-        outer.subtitle = None
+        inner.subtitle = None
         if subtitle:
-            lbl = ttk.Label(head, text=subtitle, style="CardDim.TLabel")
+            lbl = tk.Label(head, text=subtitle, bg=PANEL, fg=FG_DIM,
+                           font=FONT_TINY, anchor="e")
             lbl.pack(side="right", padx=(6, 0))
-            outer.subtitle = lbl
-    return outer, outer
+            inner.subtitle = lbl
+    return inner, inner
 
 
-def kpi_tile(parent, label, value="0", unit="", color=None, sub=""):
-    """紧凑 KPI 磁贴（一行能排 10 个）：左侧色条 + 标签 + 大数字 + 单位 + 副标题。
+def round_rect(canvas, x1, y1, x2, y2, r=6, **kw):
+    """圆角矩形（Canvas 没有原生圆角，用平滑多边形近似）。返回 item id。"""
+    r = max(0, min(int(r), (x2 - x1) // 2, (y2 - y1) // 2))
+    pts = (x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+           x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+           x1, y2, x1, y2 - r, x1, y1 + r, x1, y1)
+    if "outline" not in kw and "fill" in kw:
+        kw["outline"] = kw["fill"]
+    return canvas.create_polygon(pts, smooth=True, splinesteps=12, **kw)
 
-    返回 dict，交给 set_tile() 更新；不返回 Tk 控件是为了让调用方只认语义字段。
+
+def vgradient(canvas, x1, y1, x2, y2, top, bottom, steps=12, **kw):
+    """竖直渐变（Tk 没有渐变，用若干条横线叠出来）。返回最后一条线的 id。"""
+    steps = max(2, int(steps))
+    h = max(1, (y2 - y1)) / float(steps)
+    item = None
+    for i in range(steps):
+        y = y1 + i * h
+        item = canvas.create_rectangle(x1, y, x2, y + h + 1,
+                                       fill=blend(top, bottom, i / (steps - 1.0)),
+                                       outline="", **kw)
+    return item
+
+
+def kpi_tile(parent, label, value="0", unit="", color=None, sub="", ratio=None):
+    """紧凑 KPI 磁贴（一行能排 10 个）：圆角卡片 + 左侧色条 + 大数字 + 迷你进度条。
+
+    为什么用 Canvas 画（而不是一堆 Label 拼）：Tk 里想要圆角、描边、底部进度条
+    这些"驾驶舱"要素只能自己画；顺带把发光效果（数字下方叠一层同色淡影）也做了。
+
+    返回 dict（语义字段），交给 set_tile() 更新；不返回 Tk 控件是为了让调用方
+    只认字段，测试也能直接断言 tile["text_value"]。
     """
     color = color or ACCENT
-    outer = tk.Frame(parent, bg=PANEL, highlightthickness=1,
-                     highlightbackground=BORDER)
-    accent = tk.Frame(outer, bg=color, width=3)
-    accent.pack(side="left", fill="y")
-    inner = tk.Frame(outer, bg=PANEL, padx=9, pady=5)
-    inner.pack(side="left", fill="both", expand=True)
-    cap = tk.Label(inner, text=label, bg=PANEL, fg=FG_DIM, font=FONT_SMALL,
-                   anchor="w")
-    cap.pack(anchor="w")
-    row = tk.Frame(inner, bg=PANEL)
-    row.pack(anchor="w")
-    num = tk.Label(row, text=str(value), bg=PANEL, fg=color, font=FONT_KPI_S,
-                   anchor="w")
-    num.pack(side="left")
-    unit_lbl = tk.Label(row, text=(" " + unit) if unit else "", bg=PANEL,
-                        fg=FG_MUTE, font=FONT_TINY, anchor="w")
-    unit_lbl.pack(side="left", pady=(7, 0))
-    sub_lbl = tk.Label(inner, text=sub or " ", bg=PANEL, fg=FG_MUTE,
-                       font=FONT_TINY, anchor="w")
-    sub_lbl.pack(anchor="w")
-    return {"outer": outer, "accent": accent, "cap": cap, "value": num,
-            "unit": unit_lbl, "sub": sub_lbl, "color": color}
+    # width=1 很重要：Canvas 默认请求 378px 宽，10 个磁贴会把 KPI 行撑爆
+    # （实测只显示得下 3 个），必须让它"请求很小、由 pack 撑开"。
+    cv = tk.Canvas(parent, bg=BG, highlightthickness=0, height=80, width=1, bd=0)
+    tile = {"cv": cv, "label": str(label), "unit": str(unit), "color": color,
+            "sub": sub or " ", "sub_color": None, "ratio": ratio,
+            "text_value": fmt_int(value), "num_value": value,
+            "big": False, "w": 0, "h": 0}
+    cv._tile = tile
+
+    def _on_conf(e):
+        tile["w"], tile["h"] = int(e.width), int(e.height)
+        _paint_tile(tile)
+    cv.bind("<Configure>", _on_conf)
+    cv.bind("<Enter>", lambda _e: _paint_tile(tile, hover=True))
+    cv.bind("<Leave>", lambda _e: _paint_tile(tile))
+    return tile
 
 
-def set_tile(tile, value=None, color=None, sub=None, unit=None, sub_color=None):
-    """更新 KPI 磁贴（只改文本/颜色，不重建控件，避免闪烁）。"""
+def _paint_tile(tile, hover=False):
+    cv = tile["cv"]
+    w, h = tile.get("w") or 0, tile.get("h") or 0
+    if w < 30 or h < 24:
+        return
+    cv.delete("all")
+    c = tile["color"]
+    # 卡片底：上亮下暗的渐变 + 1px 描边 + 左侧 3px 色条
+    vgradient(cv, 1, 1, w - 1, h - 1, PANEL2 if not hover else blend(PANEL2, c, .08),
+              PANEL, steps=10)
+    round_rect(cv, 1, 1, w - 1, h - 1, 7, fill="", outline=BORDER if not hover else c,
+               width=1)
+    round_rect(cv, 1, 6, 4, h - 6, 2, fill=c)
+    # 文字
+    pad = 11
+    cv.create_text(pad, 11, anchor="w", text=tile["label"], fill=FG_DIM,
+                   font=("Microsoft YaHei", 9))
+    size = 27 if tile.get("big") else 23
+    num = tile["text_value"]
+    cv.create_text(pad + 1, 34, anchor="w", text=num, fill=blend(c, BG, .72),
+                   font=("Consolas", size, "bold"))          # 发光投影（同色淡影）
+    cv.create_text(pad, 33, anchor="w", text=num, fill=c,
+                   font=("Consolas", size, "bold"))
+    unit = tile["unit"]
+    if unit:
+        nw = text_width(num, cjk=int(size * .62), ascii_w=int(size * .58))
+        cv.create_text(pad + nw + 6, 40, anchor="w", text=unit, fill=FG_MUTE,
+                       font=("Microsoft YaHei", 8))
+    cv.create_text(pad, h - 12, anchor="w", text=tile["sub"],
+                   fill=tile.get("sub_color") or FG_MUTE,
+                   font=("Microsoft YaHei", 8))
+    # 迷你进度条（有 ratio 才画）：贴着卡片底部
+    ratio = tile.get("ratio")
+    if ratio is not None:
+        try:
+            ratio = max(0.0, min(1.0, float(ratio)))
+        except (TypeError, ValueError):
+            ratio = 0.0
+        cv.create_rectangle(1, h - 4, w - 1, h - 1, fill="#0a1730", outline="")
+        if ratio > 0:
+            cv.create_rectangle(1, h - 4, max(2, int((w - 1) * ratio)), h - 1,
+                                fill=c, outline="")
+
+
+def set_tile(tile, value=None, color=None, sub=None, unit=None, sub_color=None,
+             ratio=None):
+    """更新 KPI 磁贴（只重画这一块画布，不重建控件，避免闪烁）。"""
     if not tile:
         return
     try:
         if value is not None:
-            tile["value"].config(text=fmt_int(value))
+            tile["num_value"] = value
+            tile["text_value"] = fmt_int(value)
         if color:
-            tile["value"].config(fg=color)
-            tile["accent"].config(bg=color)
             tile["color"] = color
         if sub is not None:
-            tile["sub"].config(text=sub or " ")
+            tile["sub"] = sub or " "
         if sub_color:
-            tile["sub"].config(fg=sub_color)
+            tile["sub_color"] = sub_color
         if unit is not None:
-            tile["unit"].config(text=(" " + unit) if unit else "")
+            tile["unit"] = unit
+        if ratio is not None:
+            tile["ratio"] = ratio
+        _paint_tile(tile)
     except Exception:
         pass
+
+
+def set_tile_big(tile, big=True):
+    """大屏下把数字放大一档。"""
+    if not tile:
+        return
+    tile["big"] = bool(big)
+    _paint_tile(tile)
 
 
 def hline(parent, color=None):
@@ -512,15 +772,23 @@ def bar_chart(canvas, data, color=None, colors=None, label_color=None,
         canvas.create_text(label_w - 8, y + bh / 2.0, anchor="e",
                            text=truncate_px(lab, label_w - 14),
                            fill=label_color or FG_DIM, font=FONT_SMALL)
+        # 轨道底 + 圆角条 + 顶部高光：比纯方块更像"仪表"
+        round_rect(canvas, label_w, y, label_w + plot_w, y + bh, r=bh // 2,
+                   fill="#0a1730", outline="")
         bw = int(plot_w * (val / bar_max))
-        if val > 0 and bw < 3:
-            bw = 3
-        canvas.create_rectangle(label_w, y, label_w + bw, y + bh,
-                                fill=c, outline="")
-        # 末端高亮块：让"进度感"更明确（同时不影响数值读取）
-        if bw > 4:
-            canvas.create_rectangle(label_w + bw - 3, y, label_w + bw, y + bh,
-                                    fill=blend(c, "#ffffff", 0.35), outline="")
+        if val > 0 and bw < bh:
+            bw = bh
+        if bw > 0:
+            x2 = label_w + bw
+            round_rect(canvas, label_w, y, x2, y + bh, r=bh // 2, fill=c,
+                       outline="")
+            if bw > bh * 1.2:
+                canvas.create_line(label_w + bh * .6, y + 1.6, x2 - bh * .6,
+                                   y + 1.6, fill=blend(c, "#ffffff", .45))
+            # 末端高亮块：让"进度感"更明确（同时不影响数值读取）
+            if bw > 6:
+                canvas.create_rectangle(x2 - 3, y + 1, x2, y + bh - 1,
+                                        fill=blend(c, "#ffffff", 0.45), outline="")
         canvas.create_text(w - 4, y + bh / 2.0, anchor="e",
                            text=fmt_int(val) + unit, fill=FG, font=FONT_SMALL)
         if val > top_val:
@@ -557,6 +825,16 @@ def donut_chart(canvas, data, center_title="总数", center_unit="",
 
     # 底环（灰）——即使无数据也能看出"这里是个占比图"
     canvas.create_oval(*box, outline=GRID, width=thick)
+    # 外圈刻度环：48 根短刻度，做出"仪表/雷达"的感觉（纯装饰，不参与读数）
+    ticks = 48
+    tick_col = blend(ACCENT, BG, .74)
+    for i in range(ticks):
+        a = math.radians(-90 + 360.0 * i / ticks)
+        r1 = r + thick / 2.0 + 4
+        r2 = r1 + (6 if i % 4 == 0 else 3)
+        canvas.create_line(cx + r1 * math.cos(a), cy + r1 * math.sin(a),
+                           cx + r2 * math.cos(a), cy + r2 * math.sin(a),
+                           fill=tick_col, width=1)
     if total > 0:
         start = 90.0
         for _lab, val, col in items:

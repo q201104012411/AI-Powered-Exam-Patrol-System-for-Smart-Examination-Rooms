@@ -107,13 +107,19 @@ check("装得下时不显示滚动条", not ck.scroll.vsb.winfo_ismapped())
 # ---- 2) KPI 与库内一致 ----
 want = {"total": stats["total"], "red": stats["by_level"].get(config.LEVEL_RED, 0),
         "orange": stats["by_level"].get(config.LEVEL_ORANGE, 0)}
-got = {k: ck.tiles[k]["value"].cget("text") for k in want}
+got = {k: ck.tiles[k]["text_value"] for k in want}
 check("KPI 总数/红/橙与库内一致",
       all(str(want[k]) == got[k] for k in want),
       "库内=%s 界面=%s" % (want, got))
 check("KPI 磁贴 10 个", len(ck.tiles) == 10, "实际 %d" % len(ck.tiles))
 check("KPI 副标题有内容（占比/超时等）",
-      bool(ck.tiles["red"]["sub"].cget("text").strip()))
+      bool((ck.tiles["red"].get("sub") or "").strip()))
+check("KPI 磁贴画在 Canvas 上（圆角/进度条）",
+      all(t["cv"].winfo_ismapped() and len(t["cv"].find_all()) > 4
+          for t in ck.tiles.values()),
+      "最少图元 %d" % min(len(t["cv"].find_all()) for t in ck.tiles.values()))
+check("顶栏是自绘 Banner（时钟/审计链/按钮）",
+      ck.banner.winfo_ismapped() and ck.banner.chain_text.startswith("审计链"))
 
 # ---- 3) 图表有图元 ----
 for name in ("cv_level", "cv_trend", "cv_type"):
@@ -174,9 +180,9 @@ check("窗口变小后出现滚动条（内容仍可达）",
 
 # ---- 8) 审计链 ----
 ok_chain, _why, n = store.verify_chain()
-check("审计链状态标签与校验结果一致",
-      ("完整" in ck.lbl_chain.cget("text")) == ok_chain,
-      ck.lbl_chain.cget("text"))
+check("审计链状态与校验结果一致",
+      ("完整" in ck.banner.chain_text) == ok_chain,
+      ck.banner.chain_text)
 
 # ---- 9) 全屏 + Esc ----
 ck.toggle_fullscreen()

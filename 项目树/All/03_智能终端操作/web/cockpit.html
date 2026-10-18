@@ -146,6 +146,11 @@ main{
 .kpi .unit{font-size:11px;color:var(--mute)}
 .kpi .sub{font-size:11px;color:var(--mute);white-space:nowrap;overflow:hidden;
   text-overflow:ellipsis;min-height:14px}
+/* 底部迷你进度条（与 Py GUI 的磁贴一致）：只给"占总量的份额"类指标用 */
+.kpi .meter{position:absolute;left:0;right:0;bottom:0;height:3px;background:#0a1730}
+.kpi .meter i{display:block;height:100%;width:0;
+  background:var(--c);box-shadow:0 0 12px -2px var(--c);
+  transition:width .6s cubic-bezier(.22,1,.36,1)}
 .kpi.hot{animation:hotPulse 2.4s ease-in-out infinite}
 @keyframes hotPulse{
   0%,100%{box-shadow:0 0 0 0 rgba(244,63,94,0)}
@@ -424,10 +429,10 @@ function apiBase() {
    ============================================================ */
 const KPI_SPEC = [
   { key: "total", cap: "告警总数", unit: "条", color: "var(--cyan)", sub: (d) => "近 1 小时 +" + fmt(d.last_hour) },
-  { key: "red", cap: "红色预警", unit: "条", color: "var(--red)", hot: true, sub: (d) => "占比 " + pct(d.red, d.total) },
-  { key: "orange", cap: "橙色预警", unit: "条", color: "var(--amber)", sub: (d) => "占比 " + pct(d.orange, d.total) },
-  { key: "pending", cap: "待处置", unit: "条", color: "var(--violet)", sub: (d) => d.overdue ? "超时 " + fmt(d.overdue) + " 条" : "无超时", subHot: (d) => d.overdue > 0 },
-  { key: "reviews", cap: "已复核", unit: "条", color: "var(--green)", sub: (d) => "覆盖率 " + pct(d.reviews, d.total) },
+  { key: "red", cap: "红色预警", unit: "条", color: "var(--red)", hot: true, meter: true, sub: (d) => "占比 " + pct(d.red, d.total) },
+  { key: "orange", cap: "橙色预警", unit: "条", color: "var(--amber)", meter: true, sub: (d) => "占比 " + pct(d.orange, d.total) },
+  { key: "pending", cap: "待处置", unit: "条", color: "var(--violet)", meter: true, sub: (d) => d.overdue ? "超时 " + fmt(d.overdue) + " 条" : "无超时", subHot: (d) => d.overdue > 0 },
+  { key: "reviews", cap: "已复核", unit: "条", color: "var(--green)", meter: true, sub: (d) => "覆盖率 " + pct(d.reviews, d.total) },
   { key: "unsynced", cap: "待补传", unit: "条", color: "var(--blue)", sub: () => "断网补传队列" },
   { key: "remote", cap: "远端记录", unit: "条", color: "var(--blue)", sub: () => "经局域网接收" },
   { key: "devices", cap: "接入设备", unit: "台", color: "var(--cyan)", sub: (d) => d.devices ? ("最近 " + (d.remote_last || "").slice(11, 16)) : "无接入设备" },
@@ -446,7 +451,8 @@ function buildKpis() {
       '<div class="cap">' + s.cap + "</div>" +
       '<div class="val"><span class="num" data-k="' + s.key + '" data-v="0">0</span>' +
       '<span class="unit">' + s.unit + "</span></div>" +
-      '<div class="sub" data-sub="' + s.key + '"> </div>';
+      '<div class="sub" data-sub="' + s.key + '"> </div>' +
+      (s.meter ? '<div class="meter"><i data-k="' + s.key + '"></i></div>' : "");
     box.appendChild(el);
   });
 }
@@ -474,6 +480,7 @@ function animateNum(el, to) {
 }
 
 function updateKpis(d) {
+  const total = Number(d.total || 0);
   KPI_SPEC.forEach((s) => {
     const num = document.querySelector('.num[data-k="' + s.key + '"]');
     if (num) {
@@ -485,6 +492,12 @@ function updateKpis(d) {
       sub.textContent = s.sub(d) || " ";
       const hot = s.subHot ? s.subHot(d) : false;
       sub.style.color = hot ? "var(--red)" : "";
+    }
+    // 份额类指标给一条迷你进度条（与 Py GUI 的磁贴一致）
+    const meter = document.querySelector('.meter i[data-k="' + s.key + '"]');
+    if (meter) {
+      const pctv = total > 0 ? Math.min(100, (Number(d[s.key] || 0) * 100) / total) : 0;
+      meter.style.width = pctv + "%";
     }
   });
   const badge = $("chainBadge");
@@ -531,6 +544,19 @@ function drawDonut(items) {
   ctx.strokeStyle = withAlpha("#ffffff", .06);
   ctx.beginPath(); ctx.arc(cx, cy, r - thick / 2, 0, Math.PI * 2); ctx.stroke();
 
+  /* 外圈刻度环：48 根短刻度，做出"仪表/雷达"观感（纯装饰，不参与读数） */
+  for (let i = 0; i < 48; i++) {
+    const a = -Math.PI / 2 + (Math.PI * 2 * i) / 48;
+    const r1 = r + thick / 2 + 4;
+    const r2 = r1 + (i % 4 === 0 ? 6 : 3);
+    ctx.beginPath();
+    ctx.moveTo(cx + r1 * Math.cos(a), cy + r1 * Math.sin(a));
+    ctx.lineTo(cx + r2 * Math.cos(a), cy + r2 * Math.sin(a));
+    ctx.strokeStyle = withAlpha("#22d3ee", .30);
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
   if (total > 0) {
     let a0 = -Math.PI / 2;
     const gap = 0.022;
@@ -540,6 +566,7 @@ function drawDonut(items) {
       const a1 = a0 + Math.PI * 2 * frac * donutAnim;
       ctx.save();
       ctx.strokeStyle = it.color;
+      ctx.lineWidth = thick;              /* 刻度环把 lineWidth 改成 1 了，这里必须显式还原 */
       ctx.shadowColor = it.color; ctx.shadowBlur = 16;
       ctx.beginPath();
       ctx.arc(cx, cy, r - thick / 2, a0 + gap, a1 - gap);
