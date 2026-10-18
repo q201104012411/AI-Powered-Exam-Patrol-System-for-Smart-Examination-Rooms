@@ -273,11 +273,30 @@ def apply_ttk(root):
     st.configure("TEntry", fieldbackground=PANEL2, foreground=FG,
                  insertcolor=ACCENT, bordercolor=BORDER)
     st.configure("TCombobox", fieldbackground=PANEL2, background=PANEL2,
-                 foreground=FG, arrowcolor=ACCENT)
-    st.configure("Vertical.TScrollbar", background=PANEL2, troughcolor=BG2,
-                 bordercolor=BG2, arrowcolor=FG_DIM)
-    st.configure("Horizontal.TScrollbar", background=PANEL2, troughcolor=BG2,
-                 bordercolor=BG2, arrowcolor=FG_DIM)
+                 foreground=FG, arrowcolor=ACCENT, bordercolor=BORDER,
+                 selectbackground=PANEL2, selectforeground=FG)
+    # readonly 的下拉框（如"已知设备"）默认还是白底 —— 必须单独 map 成深色，
+    # 否则深色页面上会突然出现一块白框。
+    st.map("TCombobox",
+           fieldbackground=[("readonly", PANEL2), ("disabled", BG2)],
+           foreground=[("readonly", FG), ("disabled", FG_MUTE)],
+           background=[("active", BORDER)],
+           selectbackground=[("readonly", PANEL2)],
+           selectforeground=[("readonly", FG)])
+    # 下拉列表本身（Tk 的 listbox）也设一下，不然弹出时是白底黑字
+    try:
+        root.option_add("*TCombobox*Listbox.background", PANEL2)
+        root.option_add("*TCombobox*Listbox.foreground", FG)
+        root.option_add("*TCombobox*Listbox.selectBackground", ACCENT2)
+        root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+    except Exception:
+        pass
+    for orient in ("Vertical", "Horizontal"):
+        st.configure("%s.TScrollbar" % orient, background=PANEL2, troughcolor=BG2,
+                     bordercolor=BG2, arrowcolor=FG_DIM, lightcolor=PANEL2,
+                     darkcolor=PANEL2)
+        st.map("%s.TScrollbar" % orient,
+               background=[("active", BORDER), ("pressed", BORDER)])
     st.configure("TProgressbar", background=ACCENT, troughcolor=PANEL2,
                  bordercolor=PANEL2, lightcolor=ACCENT, darkcolor=ACCENT)
     try:
