@@ -104,7 +104,7 @@
 ├── account_bridge.py        跨机账号管理（01/02 的账户 op）
 ├── _冒烟_驾驶舱.py           驾驶舱 GUI 冒烟（26 项）
 ├── main.py                  端到端自检（78 项）
-├── tests\                   单元测试（含 test_dashboard 28 项、test_lan_service 18 项；
+├── tests\                   单元测试（含 test_dashboard 31 项、test_lan_service 18 项；
 │                            另含 test_person_detect 68 项 + test_vlm_detect 38 项）
 └── 文档\程序结构.txt
 ```
