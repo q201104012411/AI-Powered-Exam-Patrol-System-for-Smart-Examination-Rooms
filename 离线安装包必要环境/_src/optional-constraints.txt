@@ -1,0 +1,7 @@
+# 可选链（YOLO 模型导出）约束：必须与核心链保持一致的包
+# 关键：ultralytics 会拉 opencv-python 5.x，而 5.x 已删除 HOGDescriptor，
+#       会让 02/03/11 的 AI 框选识别失效 —— 这里强制钉回 4.x。
+opencv-python==4.14.0.94
+numpy==2.5.4
+Pillow==12.3.0
+# torch/torchvision 走 CPU 版即可（导出模型不需要 GPU）

@@ -114,3 +114,12 @@ lan_queue.ndjson
 # 例：05_考生数据保护/data_backup_20261015_175027/
 data_backup_*/
 **/data_backup_*/
+
+# --- 16. 离线 pip 安装包的 wheel 仓库（体积约 410MB，不入库）---
+# 只保留 install_offline.py / 一键离线安装.bat / requirements-*.txt /
+# 清单_SHA256.txt / README_离线安装说明.md；轮子用 _src\ 的步骤在有网机器上重抓。
+离线安装包必要环境/wheelhouse/
+离线安装包必要环境/wheelhouse_可选_模型导出/
+离线安装包必要环境/bootstrap/
+离线安装包必要环境/__pycache__/
+离线安装包必要环境/_src/__pycache__/
