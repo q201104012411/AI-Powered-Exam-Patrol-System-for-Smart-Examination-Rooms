@@ -111,10 +111,25 @@ h1{
 button{
   font:inherit;font-size:13px;color:var(--fg);background:var(--panel2);
   border:1px solid var(--line);border-radius:8px;padding:7px 13px;cursor:pointer;
-  transition:.18s border-color,.18s background,.18s transform;
+  /* 点击手感：命中区不小于 32px 高，按下有位移，键盘聚焦有可见轮廓 */
+  min-height:32px;line-height:1.1;user-select:none;
+  transition:.18s border-color,.18s background,.18s transform,.18s box-shadow;
 }
 button:hover{background:#1a3157;border-color:var(--cyan);transform:translateY(-1px)}
+button:active{transform:translateY(1px);box-shadow:0 0 0 3px rgba(34,211,238,.12) inset}
+button:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+button:disabled{opacity:.45;cursor:not-allowed;transform:none}
 button.ghost{background:transparent}
+
+/* 监控画面放大层：点磁贴出大图，Esc / 点任意处关闭 */
+.zoom{position:fixed;inset:0;z-index:90;display:none;align-items:center;justify-content:center;
+  background:rgba(3,7,14,.92);backdrop-filter:blur(3px);cursor:zoom-out}
+.zoom.on{display:flex}
+.zoom img{max-width:94vw;max-height:88vh;border-radius:12px;border:1px solid var(--line);
+  box-shadow:0 30px 80px -30px #000}
+.zoom .zcap{position:absolute;bottom:18px;left:50%;transform:translateX(-50%);
+  font-size:12px;color:var(--dim);display:flex;gap:12px;align-items:center}
+.zoom .zcap b{color:var(--fg)}
 
 /* ---------------- 主体 ---------------- */
 main{
@@ -193,7 +208,7 @@ main.has-video{grid-template-rows:auto minmax(200px,1fr) minmax(210px,.86fr) min
   height:100%;min-height:0}
 
 /* 磁贴：撑满卡片给的高度（不写死 16:9 —— 否则小屏下高度被裁，占位文字和底部条都看不见） */
-.vid-tile{position:relative;height:100%;min-height:0;border-radius:12px;
+.vid-tile{position:relative;height:100%;min-height:0;border-radius:12px;cursor:zoom-in;
   overflow:hidden;border:1px solid var(--line);
   background:
     radial-gradient(120% 80% at 50% 0%,rgba(34,211,238,.10),transparent 60%),
@@ -227,6 +242,7 @@ main.has-video{grid-template-rows:auto minmax(200px,1fr) minmax(210px,.86fr) min
 @keyframes vidPulse{0%,100%{opacity:1}50%{opacity:.35}}
 
 /* 表头右侧的"待机/接收中"胶囊 */
+.vid-card > h2{cursor:pointer;user-select:none}
 .vid-live{display:inline-flex;align-items:center;gap:6px;font-size:11px;
   padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
 .vid-live i{width:6px;height:6px;border-radius:50%;background:#3a4a63}
@@ -451,6 +467,12 @@ footer .bad{color:var(--red)}
       </article>
     </section>
   </main>
+
+  <!-- 监控画面放大层（点磁贴打开，Esc / 点任意处关闭） -->
+  <div class="zoom" id="zoom">
+    <img id="zoomImg" alt="">
+    <div class="zcap"><b id="zoomCap">摄像头</b><span id="zoomMeta">—</span><span>（Esc 或点任意处关闭）</span></div>
+  </div>
 
   <footer>
     <span><span class="k">数据源</span> <span class="mono" id="fApi">—</span></span>
@@ -980,10 +1002,47 @@ function vidLive(on) {
   if (t) t.textContent = on ? "接收中" : "待机";
 }
 
+/* 放大层：点磁贴 → 大图（边看边刷新），Esc / 点任意处关闭 */
+const zoomState = { on: false, i: 0, timer: null };
+
+function openZoom(i) {
+  const img = $("vid" + i);
+  if (!img || !video.on) {          /* 没在播放时，点磁贴 = 直接开始播放 */
+    if (!video.on) toggleVideo();
+    return;
+  }
+  zoomState.on = true;
+  zoomState.i = i;
+  $("zoomCap").textContent = ($("vidCap" + i) || {}).textContent || ("摄像头 " + (i + 1));
+  $("zoom").classList.add("on");
+  const z = $("zoomImg");
+  z.src = videoUrl(i) + "&t=" + Date.now();
+  z.classList.add("on");
+  clearInterval(zoomState.timer);
+  zoomState.timer = setInterval(() => {
+    if (!zoomState.on || document.hidden) return;
+    z.src = videoUrl(zoomState.i) + "&t=" + Date.now();
+    $("zoomMeta").textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  }, 1200);
+}
+
+function closeZoom() {
+  zoomState.on = false;
+  clearInterval(zoomState.timer);
+  zoomState.timer = null;
+  const z = $("zoom");
+  if (z) z.classList.remove("on");
+  const img = $("zoomImg");
+  if (img) img.removeAttribute("src");
+}
+
 function bindVidEvents() {
   for (let i = 0; i < 2; i++) {
     const img = $("vid" + i);
     if (!img) continue;
+    /* 点磁贴：播放中→放大；未播放→先开播放（别让人对着黑框点半天没反应） */
+    const tile = $("vidTile" + i);
+    if (tile) tile.addEventListener("click", () => openZoom(i));
     img.addEventListener("load", () => {
       img.classList.add("on");                  /* 有帧才淡入，避免"碎图标" */
       const tile = $("vidTile" + i);
@@ -1103,6 +1162,19 @@ function bind() {
     load(true);
   };
   $("inToken").addEventListener("keydown", (e) => { if (e.key === "Enter") $("btnConnect").click(); });
+
+  /* 放大层：点任意处关闭；Esc 关闭（先关放大层，再关连接弹层） */
+  $("zoom").addEventListener("click", closeZoom);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && zoomState.on) { closeZoom(); e.stopPropagation(); }
+  }, true);
+
+  /* 监控画面标题也能点（整条命中区更大），但不影响标题里的按钮 */
+  const vh = document.querySelector(".vid-card > h2");
+  if (vh) vh.addEventListener("click", (e) => {
+    if (e.target.closest("button")) return;
+    toggleVideo();
+  });
 
   /* 悬停提示（趋势图） */
   const tip = $("tip");

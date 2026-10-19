@@ -306,6 +306,45 @@ def apply_ttk(root):
     return st
 
 
+def darken_tk_widgets(root, count_only=False):
+    """把还在用系统默认配色的**原生 tk 控件**刷成深色，返回处理个数。
+
+    为什么需要：ttk 样式只管 ttk 控件；「复核留痕」的复核理由/复核记录、
+    各种日志框用的是 `tk.Text`，默认是白底黑字 —— 在深色界面上就是一块刺眼的
+    "白板"（用户反馈"白色的太丑"）。逐个控件改既易漏又易新增时忘，所以统一递归刷。
+
+    只动 Text/Listbox/Entry/Spinbox 这几类（Canvas 图表本来就是自绘深色）。
+    """
+    want = {"Text": PANEL, "Listbox": PANEL2, "Entry": PANEL2, "Spinbox": PANEL2}
+    n = 0
+    stack = [root]
+    while stack:
+        try:
+            w = stack.pop()
+        except IndexError:
+            break
+        try:
+            stack.extend(w.winfo_children())
+        except Exception:
+            pass
+        cls = ""
+        try:
+            cls = w.winfo_class()
+        except Exception:
+            continue
+        if cls not in want:
+            continue
+        try:
+            w.configure(bg=want[cls], fg=FG, insertbackground=ACCENT,
+                        selectbackground=BORDER, selectforeground="#ffffff",
+                        highlightthickness=1, highlightbackground=BORDER,
+                        highlightcolor=ACCENT, relief="flat", borderwidth=0)
+            n += 1
+        except Exception:
+            pass
+    return n
+
+
 # ---------------------------------------------------------------- 容器组件
 class VScroll(ttk.Frame):
     r"""竖向滚动容器：内容比可视区高时可以滚动，**不会像 pack 那样把内容裁掉**。

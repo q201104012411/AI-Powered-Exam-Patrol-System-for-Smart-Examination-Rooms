@@ -327,6 +327,13 @@ class CockpitTab(object):
         self.btn_video = ttk.Button(card.head, text="▶ 播放", style="Mini.TButton",
                                     command=self.toggle_video)
         self.btn_video.pack(side="right", padx=(6, 0))
+        # 整张卡片的标题区都能点（命中区比一个小按钮大得多）；
+        # 点「▶ 播放」按钮时事件不会冒泡到这里，不会来回切两次。
+        for w in (card, card.head):
+            try:
+                w.bind("<Button-1>", lambda _e: self.toggle_video())
+            except Exception:
+                pass
         holder = tk.Frame(card, bg=T.PANEL)
         # 默认**折叠**：驾驶舱在 1180×820 的小窗口里本来就紧，一块 170px 的
         # 视频墙会把明细区挤到需要滚动。点「▶ 播放」时再展开（展开后由 VScroll 接管）。

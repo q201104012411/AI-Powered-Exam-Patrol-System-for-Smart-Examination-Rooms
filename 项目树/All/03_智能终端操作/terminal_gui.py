@@ -413,8 +413,36 @@ class TerminalApp(object):
 
         self.status = ttk.Label(self.root, text="就绪", foreground="#666")
         self.status.pack(fill="x", padx=12, pady=(0, 6))
+        # 收尾：把原生 tk 控件（复核理由/复核记录等 tk.Text）刷成深色 ——
+        # 否则深色界面上会突然出现几块"白板"（ttk 样式管不到它们）。
+        try:
+            import theme as _theme
+            self._tk_darkened = _theme.darken_tk_widgets(self.root)
+        except Exception:
+            self._tk_darkened = 0
+        try:
+            self.root.bind_all("<Map>", self._on_any_map, add="+")
+        except Exception:
+            pass
         self.refresh_all()
         self._tick()
+
+    def _on_any_map(self, _event=None):
+        """有新窗口/控件被映射时，补一次深色化（防止后续弹出的 Toplevel 里 Text 是白底）。"""
+        if getattr(self, "_darken_after", None):
+            return
+        try:
+            self._darken_after = self.root.after(200, self._darken_now)
+        except Exception:
+            pass
+
+    def _darken_now(self):
+        self._darken_after = None
+        try:
+            import theme as _t
+            _t.darken_tk_widgets(self.root)
+        except Exception:
+            pass
 
     # ---------- 告警处置 ----------
     def _build_alerts_tab(self):
