@@ -65,7 +65,9 @@ AI_CHAT_FLAG = DATA_ROOT / "ai_chat.on"
 AI_SETTINGS_PATH = DATA_ROOT / "ai_settings.json"
 
 AI_SETTINGS_DEFAULT = {
-    "ai_mode": "standard",    # standard / dense / energy —— 决定 AI 分析长边
+    # auto（默认）：按当前播放路数自动选分析长边（1 路 1280 / 2~4 路 960 / 更多 640）
+    # standard / dense / energy 为固定档位，仍可手动指定。
+    "ai_mode": "auto",        # auto / standard / dense / energy
     "ai_input_dim": 0,        # 直接指定分析长边（0=按 ai_mode 取预设）
     "yolo_model_path": "",    # 显式指定 YOLO onnx（留空=自动用 models\yolo11n.onnx）
     "yolo_conf": 0.25,        # YOLO 置信度阈值（无模型时无意义）
@@ -87,6 +89,8 @@ AI_SETTINGS_DEFAULT = {
     "yolo_tiling": "auto",    # auto / on / off
     "yolo_tile_size": 640,    # 分块边长：480 更准更慢，640 均衡
     "yolo_tile_max": 12,      # 单帧最多几块（限制算力上限）
+    "yolo_tile_margin": 0.0,  # 块外扩比例（默认 0；现场块边界切人可开 0.05~0.08）
+    "hog_fallback_sec": 2.0,  # YOLO 已加载时，空画面补跑 HOG 的最小间隔（秒）
     "detect_backend": "",     # 只读展示位：由终端按实际检测链回填（多模态/YOLO11n/HOG）
 }
 

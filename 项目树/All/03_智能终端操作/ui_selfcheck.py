@@ -72,9 +72,51 @@ def main():
     line("TerminalApp 类存在", hasattr(tg, "TerminalApp"))
     for name in ("_build_login", "_do_login", "_build_main", "_build_monitor_tab",
                  "_monitor_manage", "_monitor_render_grid", "_cam_update",
+                 "_open_camera_zoom", "_zoom_tick", "_ai_dim_for", "_ai_worker",
+                 "_ai_pump", "_open_ai_settings", "_monitor_apply_layout",
+                 "_frame_quality_ok",
                  "_ai_send", "_ai_watch_maybe", "_ai_snapshot",
                  "_current_interface", "_refresh_ai_mode_label", "_demo"):
         line("TerminalApp.%s 方法存在" % name, hasattr(tg.TerminalApp, name))
+    line("默认识别模式=auto（按路数自动选 1920/960/640）",
+         config.load_ai_settings().get("ai_mode") == "auto")
+    line("画面大小预设含 大/超大", "大" in tg.PANEL_PRESETS and "超大" in tg.PANEL_PRESETS)
+
+    # auto 档取分析长边的规则（纯函数式调用，不启动真界面）
+    class _Dummy(object):
+        pass
+
+    class _YoloDet(object):
+        _yolo_session = object()
+
+    class _HogDet(object):
+        _yolo_session = None
+
+    d = _Dummy()
+    d._ai_cfg = {"ai_mode": "auto", "ai_input_dim": 0}
+    d._cam_running = {"a": True}
+    line("auto：1 路分析长边=1920",
+         tg.TerminalApp._ai_dim_for(d, "a", _YoloDet()) == 1920)
+    d._cam_running = {"a": True, "b": True, "c": True, "e": True}
+    line("auto：4 路分析长边=960",
+         tg.TerminalApp._ai_dim_for(d, "a", _YoloDet()) == 960)
+    d._cam_running = {"u%d" % i: True for i in range(5)}
+    line("auto：5 路以上分析长边=640",
+         tg.TerminalApp._ai_dim_for(d, "u0", _YoloDet()) == 640)
+    line("auto：HOG 兜底固定 640",
+         tg.TerminalApp._ai_dim_for(d, "u0", _HogDet()) == 640)
+    d._ai_cfg = {"ai_mode": "dense", "ai_input_dim": 0}
+    d._cam_running = {"a": True}
+    line("固定密集中档=1280",
+         tg.TerminalApp._ai_dim_for(d, "a", _YoloDet()) == 1280)
+
+    import numpy as np
+    _gray = np.full((90, 160, 3), 128, np.uint8)
+    line("坏帧判定：纯灰帧应被跳过", tg.TerminalApp._frame_quality_ok(_gray) is False)
+    _scene = np.zeros((90, 160, 3), np.uint8)
+    _scene[:, :80] = (30, 90, 180)
+    _scene[20:70, 40:120] = (200, 180, 60)
+    line("坏帧判定：正常画面应通过", tg.TerminalApp._frame_quality_ok(_scene) is True)
     line("_BehaviorTracker 在模块级",
          hasattr(tg, "_BehaviorTracker") and not hasattr(tg.TerminalApp, "_BehaviorTracker"))
 

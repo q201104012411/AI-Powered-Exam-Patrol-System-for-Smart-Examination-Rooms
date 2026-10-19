@@ -849,17 +849,77 @@ class TestDenseTiling(unittest.TestCase):
         if tr._yolo_session is None:
             self.skipTest("未安装 models/yolo11n.onnx")
         calls = []
-        orig = tr._detect_yolo_single
+        orig = tr._detect_yolo_single_scored
 
         def spy(frame):
             calls.append(frame.shape[:2])
             return orig(frame)
 
-        tr._detect_yolo_single = spy
+        tr._detect_yolo_single_scored = spy
         tr._detect_yolo(np.zeros((720, 1280, 3), np.uint8))
         self.assertGreater(len(calls), 1, "分块推理应调用多次单块检测")
         self.assertTrue(tr._last_tiling)
         self.assertGreater(tr._last_tile_count, 1)
+
+    def test_tile_margin_expands_crop_but_stays_in_frame(self):
+        """每块外扩 margin 后再送模型：块边界的人不会被切成半个"""
+        tr = self._tracker(yolo_tiling="on", yolo_tile_margin=0.1)
+        self.assertAlmostEqual(tr.yolo_tile_margin, 0.1)
+        # 负值/过大都夹到 [0, 0.30]
+        self.assertEqual(self._tracker(yolo_tile_margin=-1).yolo_tile_margin, 0.0)
+        self.assertAlmostEqual(self._tracker(yolo_tile_margin=9).yolo_tile_margin, 0.30)
+
+    def test_wbf_fuses_same_person_across_tiles(self):
+        """同一个人在两块里各检一次：WBF 应融合成一个框，且中心取加权平均"""
+        boxes = [(100, 100, 60, 160, 0.9, False),
+                 (104, 98, 62, 162, 0.6, False),
+                 (600, 100, 60, 160, 0.8, False)]
+        out = pd._weighted_box_fuse(boxes)
+        self.assertEqual(len(out), 2, "左边两框是同一人，右边是另一人")
+        # 高分框权重更大：融合框应更靠近 (100,100,60,160) 而不是中间值
+        x, y, w, h = out[0]
+        self.assertTrue(100 <= x <= 104 and 98 <= y <= 100)
+        self.assertTrue(60 <= w <= 62 and 160 <= h <= 162)
+
+    def test_wbf_prefers_complete_over_clipped(self):
+        """贴边被切断的框权重更低：融合框尺寸更靠近完整框"""
+        boxes = [(100, 100, 30, 160, 0.95, True),     # 半个身子，分数高但被切断
+                 (100, 100, 60, 160, 0.55, False)]    # 完整框
+        out = pd._weighted_box_fuse(boxes, iou_thresh=0.3)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0][0], 100)
+        self.assertGreater(out[0][2], 45,
+                           "融合宽度应偏向完整框（60），而不是两框简单平均（45）")
+
+    def test_wbf_does_not_shrink_body_with_nested_head(self):
+        """头框与整体框尺寸差太多：WBF 不做加权平均（否则整体框会缩到人腰上）。
+
+        部分-整体去重由 `_detect` 末尾的 _suppress_contained 负责（已有单测
+        test_detect_returns_one_box_for_nested_detections 锁住）。
+        """
+        out = pd._weighted_box_fuse([(100, 100, 120, 300, 0.9, False),
+                                     (140, 110, 40, 60, 0.8, False)])
+        self.assertIn((100, 100, 120, 300), out,
+                      "整体框必须原样保留，不能被小框拉小")
+
+    def test_hog_fallback_is_throttled_when_yolo_present(self):
+        """YOLO 已加载时空画面不每帧补跑 HOG（单次约 1 秒，会卡界面）"""
+        tr = self._tracker()
+        if tr._yolo_session is None:
+            self.skipTest("未安装 models/yolo11n.onnx")
+        calls = []
+        tr._detect_hog = lambda frame, dense: (calls.append(1), [])[1]
+        tr._detect_yolo = lambda frame: []
+        tr._detect_bg_rois = lambda frame: []
+        tr._detect_heads = lambda frame: []
+        frame = np.full((360, 640, 3), 120, np.uint8)
+        tr._last_hog_ts = 0.0                    # 首次允许补一次
+        tr._detect(frame)
+        tr._detect(frame)                        # 2 秒内不再补
+        self.assertEqual(len(calls), 1)
+        tr._last_hog_ts = 0.0                    # 超过冷却后再允许
+        tr._detect(frame)
+        self.assertEqual(len(calls), 2)
 
     def test_compact_labels_are_used_for_crowds(self):
         """40 人时只给异常框写文字：同等条件下画出来的像素必须更少"""

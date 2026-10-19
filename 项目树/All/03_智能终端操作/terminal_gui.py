@@ -17,6 +17,7 @@ import os
 import shutil
 import inspect
 import json
+import queue
 import sys
 import threading
 import time
@@ -44,6 +45,23 @@ try:
 except Exception:
     vlm_mod = None
     HAS_VLM = False
+try:
+    import theme as theme_mod             # 统一主题（颜色单一真源，取不到时用下面的兜底色）
+except Exception:
+    theme_mod = None
+
+# 监控页配色：优先用 theme 的语义色，避免深色页面上突然出现一块白板
+UI_BG = getattr(theme_mod, "BG", "#070d1a")
+UI_BG2 = getattr(theme_mod, "BG2", "#0b1526")
+UI_PANEL = getattr(theme_mod, "PANEL", "#101d33")
+UI_PANEL2 = getattr(theme_mod, "PANEL2", "#16253f")
+UI_BORDER = getattr(theme_mod, "BORDER", "#1e3557")
+UI_FG = getattr(theme_mod, "FG", "#e6f0ff")
+UI_DIM = getattr(theme_mod, "FG_DIM", "#8ba3c7")
+UI_ACCENT = getattr(theme_mod, "ACCENT", "#22d3ee")
+UI_OK = getattr(theme_mod, "OK", "#34d399")
+UI_WARN = getattr(theme_mod, "WARN", "#fbbf24")
+UI_ALARM = getattr(theme_mod, "ALARM", "#f43f5e")
 
 import access
 import access as access_mod
@@ -117,7 +135,7 @@ DENSITY_LOW = "low"
 DENSITY_MED = "medium"
 DENSITY_HIGH = "high"
 DENSITY_TEXT = {DENSITY_LOW: "低", DENSITY_MED: "中", DENSITY_HIGH: "高"}
-DENSITY_COLOR = {DENSITY_LOW: "#0a7d28", DENSITY_MED: "#1f56b8", DENSITY_HIGH: "#e67e00"}
+DENSITY_COLOR = {DENSITY_LOW: UI_OK, DENSITY_MED: UI_ACCENT, DENSITY_HIGH: UI_WARN}
 
 
 def _density_level(persons, frame_or_shape):
@@ -152,17 +170,33 @@ AI_INTERVAL_MS = 500        # 单路 AI 分析最小间隔（2 次/秒）
 # 密集档因此改为 1280，并让 person_detect 走"分块推理"（切成 640 的块分别送模型）：
 # 实测合成 40 人考场 召回 25% → 67.5%（单路分析约 170 ms）。
 # 可在 data\ai_settings.json 里用 ai_input_dim / ai_mode / yolo_tiling 覆盖。
-AI_MODE_DIM = {             # 预设：标准 / 密集（40 人考场）/ 节能
+AI_MODE_DIM = {             # 预设：自动 / 标准 / 密集（40 人考场）/ 节能
+    "auto": 0,              # 0 = 按当前播放路数与检测后端自动选（见 _ai_dim_for）
     "standard": 640,
     "dense": 1280,
     "energy": 416,
 }
+# 自动档：路数越少，单路越舍得给分辨率。
+# 实测（真实 2960×1666 摄像头画面，6~8 人教室）：
+#   960 → 6 人 ｜ 1280 → 4 人（后排躺着/被挡的人漏）｜ 1920 → 8 人（全部找到）
+# 合成 40 人考场：640 召回 17.5% ｜ 960 52.5%（约 91 ms）｜ 1280 62.5%（约 217 ms）
+AI_AUTO_DIM_ONE = 1920      # 1 路：给足分辨率（单次约 300 ms，后台线程跑，不卡界面）
+AI_AUTO_DIM_FEW = 960       # 2~4 路
+AI_AUTO_DIM_MANY = 640      # 5 路以上：优先保证多路都能跑
+AI_AUTO_FEW_MAX = 4
 AI_INPUT_DIM = AI_MODE_DIM["standard"]   # 兼容旧引用；启动时按设置覆盖
 INFO_BAR_MS = 500           # 顶部状态条最小刷新间隔
-MAX_PANEL_W = 480
-MAX_PANEL_H = 300
-PANEL_W = 384               # 单路画面初始像素宽（Label 显示 image 时按像素解释）
-PANEL_H = 216               # 单路画面初始像素高
+MAX_PANEL_W = 1600          # 单路/放大窗口渲染上限（超过就缩，省 CPU）
+MAX_PANEL_H = 900
+PANEL_PRESETS = {           # 监控页「画面大小」：值 = 单路视频区像素尺寸（16:9）
+    "小": (384, 216),
+    "中": (480, 270),
+    "大": (640, 360),
+    "超大": (800, 450),
+}
+PANEL_W = PANEL_PRESETS["大"][0]   # 单路画面初始像素宽（Label 显示 image 时按像素解释）
+PANEL_H = PANEL_PRESETS["大"][1]   # 单路画面初始像素高
+MONITOR_UI_PATH = config.DATA_ROOT / "monitor_ui.json"
 BOUNDARY_RATIO = 0.92       # 警戒线：只有走到镜头前（画面底部 8%）才算越界
 
 
@@ -188,9 +222,36 @@ class TerminalApp(object):
         # 关窗口 = 停掉所有取流（卡在网络 read 里的线程是 daemon，退出时自然结束）
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._build_login()
+        # 单文件总控台登录后会把账户通过环境变量带进来，免二次输入。
+        self._launch_auto_login()
+
+    def _launch_auto_login(self):
+        """总控台直达登录：只认 EXAM_LAUNCH_USER + EXAM_LAUNCH_PWD + AUTO=1。
+
+        安全边界：口令只放在进程环境里，读完立即 pop，不落盘、不写日志；
+        未设置或校验失败时保持普通登录页，不伪造成功。
+        """
+        user = (os.environ.pop("EXAM_LAUNCH_USER", "") or "").strip()
+        pwd = os.environ.pop("EXAM_LAUNCH_PWD", "")
+        auto = os.environ.pop("EXAM_LAUNCH_AUTO", "") in ("1", "true", "True")
+        if not (user and pwd and auto):
+            return
+        try:
+            self.u_var.set(user)
+            self.p_var.set(pwd)
+            self._do_login()
+        except Exception:
+            pass
 
     def _on_close(self):
         """退出前尽力收尾：停取流、取消渲染定时器，然后立刻销毁窗口（不做任何 join）"""
+        self._monitor_alive = False
+        try:
+            if getattr(self, "_ai_pump_after", None):
+                self.root.after_cancel(self._ai_pump_after)
+                self._ai_pump_after = None
+        except Exception:
+            pass
         try:
             for after_id in list(getattr(self, "_cam_render_after", {}).values()):
                 try:
@@ -219,6 +280,14 @@ class TerminalApp(object):
 
     # ================= 登录（建在主窗口内，避免 Toplevel 不显示） =================
     def _build_login(self):
+        # 切账号/退出前必须收掉监控页的后台循环与取流，否则控件销毁后
+        # 定时器还会往已销毁的 Label 上贴图（表现为 TclError 刷日志）。
+        self._monitor_pump_stop()
+        if getattr(self, "monitors", None) and getattr(self, "_cam_running", None):
+            try:
+                self._monitor_stop_all()
+            except Exception:
+                pass
         for w in self.root.winfo_children():
             w.destroy()
         self.root.geometry("620x460")
@@ -577,10 +646,24 @@ class TerminalApp(object):
             c.setdefault("area", self.AREA_EXAM)
         return cams
 
+    @staticmethod
+    def _monitor_plain(cam):
+        """把一路摄像头配置压成"可序列化"的纯数据。
+
+        为什么需要：运行时会给 cam 挂界面句柄（`_label` / `_status` / `_btn` /
+        `_density` 等 tk 控件），它们不是 JSON 能表示的东西。直接 json.dumps 整条
+        就会报 `Object of type Label is not JSON serializable`（保存摄像头时踩过）。
+        这里只保留不以 `_` 开头的字段，界面句柄一律丢弃。
+        """
+        return {k: v for k, v in (cam or {}).items()
+                if not str(k).startswith("_")}
+
     def _monitor_save(self):
+        """保存摄像头台账到 data/monitors.json（**只写纯数据**，不写界面句柄）。"""
         try:
+            payload = [self._monitor_plain(c) for c in (self.monitors or [])]
             (config.DATA_ROOT / "monitors.json").write_text(
-                json.dumps(self.monitors, ensure_ascii=False, indent=2),
+                json.dumps(payload, ensure_ascii=False, indent=2),
                 encoding="utf-8")
         except Exception as e:
             messagebox.showerror("保存失败", str(e))
@@ -598,7 +681,7 @@ class TerminalApp(object):
         self._cam_readers = {}      # url -> camera_stream.FrameReader（取流内核）
         self._cam_running = {}      # url -> bool
         self._cam_photos = {}       # url -> PhotoImage
-        self._cam_latest = {}       # url -> 最新帧
+        self._cam_latest = {}       # url -> 最新帧（放大窗口用）
         self._cam_seen = {}         # url -> (generation, seq) 已渲染过的帧
         self._cam_render_after = {}  # url -> after id（渲染循环，避免重复排程）
         self._person_detectors = {}  # url -> PersonTracker（仅考场路）
@@ -607,10 +690,20 @@ class TerminalApp(object):
         self._info_ts = 0.0         # 顶部状态条限频用
         self._ai_error_file = config.DATA_ROOT / "ai_detect_error.txt"
         self._mon_log = config.LOG_DIR / "monitor_ui.log"
+        # AI 分析放后台线程：1920 分析长边单次约 300 ms，放界面线程会把视频和按钮
+        # 一起卡住（2 次/秒 → 每秒卡 600 ms）。结果经队列回到主线程再更新控件。
+        self._ai_busy = {}
+        self._ai_queue = queue.Queue()
+        self._shot_wins = {}         # url -> 放大窗口（同一路只允许一个）
+        self._ai_cfg = config.load_ai_settings()
+        self._mon_ui = self._monitor_ui_load()
+        self._monitor_pump_stop()        # 防止切换账号后残留两个泵
+        self._ai_pump_after = None
+        self._monitor_alive = True
 
         # ---- 顶部工具条 ----
         bar = ttk.Frame(f)
-        bar.pack(fill="x", pady=(6, 6))
+        bar.pack(fill="x", pady=(6, 4))
         # 管理摄像头（增删改推流地址与监控区域）：仅所有者可调整
         if self.session.role == config.ROLE_OWNER:
             ttk.Button(bar, text="📹 管理摄像头",
@@ -626,19 +719,45 @@ class TerminalApp(object):
         if HAS_PD:
             if self.session.role == config.ROLE_OWNER:
                 ttk.Checkbutton(
-                    bar, text="AI 辅助识别（仅考场监考生效：绿=正常 橙=异常 红=越界）",
+                    bar, text="AI 辅助识别（绿=正常 橙=异常 红=越界）",
                     variable=self.mon_ai).pack(side="left", padx=12)
             else:
                 ttk.Label(bar, text="AI 辅助识别：开启（仅所有者可调整）",
-                          foreground="#1f56b8").pack(side="left", padx=12)
-        self.monitor_status = ttk.Label(bar, text="就绪", foreground="#666")
+                          foreground=UI_ACCENT).pack(side="left", padx=12)
+        self.monitor_status = ttk.Label(bar, text="就绪", foreground=UI_DIM)
         self.monitor_status.pack(side="right")
+
+        # ---- 画面布局条：画面大小 / 每行几路 / 识别设置 ----
+        opt = ttk.Frame(f)
+        opt.pack(fill="x", pady=(0, 6))
+        ttk.Label(opt, text="画面大小：").pack(side="left")
+        self._panel_var = tk.StringVar(value=self._mon_ui.get("panel", "大"))
+        self._panel_cb = ttk.Combobox(
+            opt, textvariable=self._panel_var, width=5, state="readonly",
+            values=list(PANEL_PRESETS.keys()))
+        self._panel_cb.pack(side="left")
+        self._panel_cb.bind("<<ComboboxSelected>>",
+                            lambda _e: self._monitor_apply_layout())
+        ttk.Label(opt, text="　每行：").pack(side="left")
+        self._cols_var = tk.StringVar(value=str(self._mon_ui.get("cols", 2)))
+        self._cols_cb = ttk.Combobox(
+            opt, textvariable=self._cols_var, width=3, state="readonly",
+            values=["1", "2", "3", "4"])
+        self._cols_cb.pack(side="left")
+        self._cols_cb.bind("<<ComboboxSelected>>",
+                           lambda _e: self._monitor_apply_layout())
+        if HAS_PD and self.session.role == config.ROLE_OWNER:
+            ttk.Button(opt, text="🎯 YOLO 识别设置",
+                       command=self._open_ai_settings).pack(side="left", padx=12)
+        ttk.Label(opt, text="🖱 单击画面放大（放大窗口内再点一次=全屏，Esc 退出）",
+                  foreground=UI_ACCENT, font=("Microsoft YaHei", 9)
+                  ).pack(side="right")
 
         # ---- 全局状态条 ----
         self.info_bar = ttk.LabelFrame(f, text=" 实时状态 ", padding=6)
         self.info_bar.pack(fill="x", pady=(0, 6))
         self.info_label = ttk.Label(self.info_bar, text="暂无摄像头",
-                                    font=FONT, foreground="#333")
+                                    font=FONT, foreground=UI_FG)
         self.info_label.pack(anchor="w")
 
         # ---- 两个子页签：考场监考（有 AI） / 非考场监控（纯视频） ----
@@ -654,27 +773,97 @@ class TerminalApp(object):
         self.mon_other_canvas, self.mon_other_grid = self._make_scroll_area(self.other_tab)
 
         self._monitor_render_grid()
+        self._ai_pump()
+
+    # ---------- 监控页 UI 偏好（画面大小 / 每行几路） ----------
+    def _monitor_pump_stop(self):
+        """停掉 AI 结果泵（重建界面/退出时调用；可重复调用）。"""
+        self._monitor_alive = False
+        after_id = getattr(self, "_ai_pump_after", None)
+        if after_id:
+            try:
+                self.root.after_cancel(after_id)
+            except (tk.TclError, ValueError):
+                pass
+        self._ai_pump_after = None
+
+    def _monitor_ui_load(self):
+        cfg = {"panel": "大", "cols": 2}
+        try:
+            if MONITOR_UI_PATH.exists():
+                data = json.loads(MONITOR_UI_PATH.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    if data.get("panel") in PANEL_PRESETS:
+                        cfg["panel"] = data["panel"]
+                    try:
+                        cfg["cols"] = min(4, max(1, int(data.get("cols", 2))))
+                    except (TypeError, ValueError):
+                        pass
+        except Exception:
+            pass
+        return cfg
+
+    def _monitor_ui_save(self):
+        try:
+            MONITOR_UI_PATH.parent.mkdir(parents=True, exist_ok=True)
+            MONITOR_UI_PATH.write_text(
+                json.dumps(self._mon_ui, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+        except Exception:
+            pass
+
+    def _monitor_apply_layout(self):
+        """切换「画面大小 / 每行几路」：只重建面板，不打断正在播放的流。"""
+        panel = self._panel_var.get()
+        if panel not in PANEL_PRESETS:
+            panel = "大"
+        try:
+            cols = min(4, max(1, int(self._cols_var.get())))
+        except (TypeError, ValueError):
+            cols = 2
+        self._mon_ui = {"panel": panel, "cols": cols}
+        self._monitor_ui_save()
+        self._monitor_render_grid(stop=False)
+        self.monitor_status.config(
+            text="布局已调整：%s · 每行 %d 路" % (panel, cols))
 
     def _make_scroll_area(self, parent):
-        """可滚动摄像头网格容器，支持鼠标滚轮；返回 (canvas, grid)"""
-        canvas = tk.Canvas(parent, highlightthickness=0, bg="#f4f4f4")
+        """可滚动摄像头网格容器，支持鼠标滚轮；返回 (canvas, grid)
+
+        深色化要点：tk.Canvas/tk.Frame **不受 ttk 主题控制**，旧版这里写死
+        #f4f4f4，于是深色终端上监控页会突然出现一大块白板（现场截图里很明显）。
+        """
+        canvas = tk.Canvas(parent, highlightthickness=0, bg=UI_BG2)
         canvas.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         sb.pack(side="right", fill="y")
         canvas.configure(yscrollcommand=sb.set)
-        grid = ttk.Frame(canvas)
-        canvas.create_window((0, 0), window=grid, anchor="nw")
+        grid = tk.Frame(canvas, bg=UI_BG2)
+        win_id = canvas.create_window((0, 0), window=grid, anchor="nw")
         grid.bind("<Configure>",
                   lambda _e, c=canvas: c.configure(scrollregion=c.bbox("all")))
+
+        # 让内层网格宽度跟随画布：多路面板才能均分宽度、单路才能居中
+        # （否则 create_window 只按控件请求宽度，右侧永远空一大块）
+        def _fit_canvas(event, c=canvas, wid=win_id):
+            try:
+                c.itemconfigure(wid, width=max(1, event.width))
+            except tk.TclError:
+                pass
+
+        canvas.bind("<Configure>", _fit_canvas)
         self._bind_mousewheel(canvas)
         return canvas, grid
 
-    def _monitor_render_grid(self):
+    def _monitor_render_grid(self, stop=True):
         """按区域分别渲染：考场监考 -> AI 网格；非考场监控 -> 纯视频网格
 
-        重建网格前先停掉所有取流与渲染定时器，避免残留循环往已销毁的控件贴图。
+        stop=True 时先停掉所有取流（换摄像头台账/关管理窗口）；
+        stop=False 用于改布局（画面大小/每行几路）——**不打断正在播放的流**，
+        只重建面板控件，渲染循环下一拍会自动贴到新 Label 上。
         """
-        self._monitor_stop_all()
+        if stop:
+            self._monitor_stop_all()
         for grid in (self.mon_exam_grid, self.mon_other_grid):
             for w in grid.winfo_children():
                 w.destroy()
@@ -689,11 +878,35 @@ class TerminalApp(object):
 
     def _render_cam_grid(self, grid, cams, empty_text):
         if not cams:
-            ttk.Label(grid, text=empty_text,
-                      foreground="#888", wraplength=560,
-                      justify="center").pack(pady=30)
+            tk.Label(grid, text=empty_text, bg=UI_BG2, fg=UI_DIM,
+                     wraplength=560, justify="center",
+                     font=("Microsoft YaHei", 10)).pack(pady=34)
             return
-        cols = 2
+        panel_key = self._mon_ui.get("panel", "大")
+        panel_w, panel_h = PANEL_PRESETS.get(panel_key, PANEL_PRESETS["大"])
+        # 只有 1 路时自动占满一行（用户点开监控就是想看大画面）；
+        # 多路时按用户选的「每行几路」排。
+        try:
+            cols = min(4, max(1, int(self._mon_ui.get("cols", 2))))
+        except (TypeError, ValueError):
+            cols = 2
+        cols = min(cols, len(cams))
+        # 按画布实际宽度收窄面板：2 路 × 640 在 1180 窗口里会横向溢出
+        # （只有纵向滚动条，右边就被裁掉了）。这里保持 16:9，宁可略小也不裁。
+        avail = 1100
+        try:
+            canvas = (self.mon_exam_canvas if grid is self.mon_exam_grid
+                      else self.mon_other_canvas)
+            cw = canvas.winfo_width()
+            if cw and cw > 200:
+                avail = cw
+        except Exception:
+            pass
+        max_w = int((avail - 22 * cols) / float(cols))
+        panel_w = max(180, min(panel_w, max_w))
+        panel_h = max(100, int(round(panel_w * 9.0 / 16.0)))
+        for c in range(cols):
+            grid.columnconfigure(c, weight=1)
         for i, cam in enumerate(cams):
             room = cam.get("room", "未命名考场")
             device = cam.get("device", "未命名设备")
@@ -702,11 +915,11 @@ class TerminalApp(object):
             prefix = "🎓" if is_exam else "🚪"
             # tk.LabelFrame 支持 highlightbackground，可做状态色边框（绿=正常 橙=异常 红=越界）
             frame = tk.LabelFrame(grid, text=" %s %s · %s " % (prefix, room, device),
-                                  bg="#f9f9f9", fg="#333", font=FONT,
-                                  highlightthickness=2, highlightbackground="#888")
-            frame.grid(row=i // cols, column=i % cols, sticky="nsew", padx=4, pady=4)
-            grid.rowconfigure(i // cols, weight=1)
-            grid.columnconfigure(i % cols, weight=1)
+                                  bg=UI_PANEL, fg=UI_FG, font=FONT,
+                                  highlightthickness=2,
+                                  highlightbackground=UI_BORDER,
+                                  bd=1, relief="flat")
+            frame.grid(row=i // cols, column=i % cols, sticky="n", padx=6, pady=6)
             cam["_frame"] = frame
             cam["_border_state"] = None
 
@@ -714,29 +927,40 @@ class TerminalApp(object):
             # 必须先给一张 1x1 黑图再定像素尺寸，否则画面会被压成细缝。
             blank = tk.PhotoImage(width=1, height=1)
             blank.put("#000000", to=(0, 0))
-            lbl = tk.Label(frame, bg="#000", relief="sunken",
-                           image=blank, width=PANEL_W, height=PANEL_H)
+            lbl = tk.Label(frame, bg="#000", relief="flat", cursor="hand2",
+                           text="▶ 未播放", fg=UI_DIM,
+                           font=("Microsoft YaHei", 11),
+                           image=blank, width=panel_w, height=panel_h,
+                           borderwidth=0, highlightthickness=0)
             lbl._blank_img = blank
-            lbl.pack(fill="both", expand=True)
+            lbl.pack(fill="both", expand=True, padx=3, pady=(4, 0))
+            lbl.bind("<Button-1>", lambda _e, u=url: self._open_camera_zoom(u))
             cam["_label"] = lbl
-            srow = ttk.Frame(frame)
-            srow.pack(fill="x", pady=(2, 0))
+            srow = tk.Frame(frame, bg=UI_PANEL)
+            srow.pack(fill="x", padx=4, pady=(3, 0))
             status = ttk.Label(srow, text=("未播放" if is_exam else "未播放（该区域无 AI）"),
-                               foreground="#666")
+                               foreground=UI_DIM)
             status.pack(side="left")
             cam["_status"] = status
             cam["_status_text"] = None
             if is_exam:
-                density = ttk.Label(srow, text="密度：-", foreground="#888", font=FONT)
+                density = ttk.Label(srow, text="密度：-", foreground=UI_DIM, font=FONT)
                 density.pack(side="left", padx=(8, 0))
                 cam["_density"] = density
-            bbar = ttk.Frame(frame)
-            bbar.pack(fill="x", pady=(4, 0))
+            bbar = tk.Frame(frame, bg=UI_PANEL)
+            bbar.pack(fill="x", padx=4, pady=(4, 5))
             cam["_btn"] = ttk.Button(bbar, text="▶ 播放",
                                      command=lambda u=url: self._cam_play(u))
             cam["_btn"].pack(side="left", padx=(0, 4), pady=(2, 2))
             ttk.Button(bbar, text="⏹ 停止",
-                       command=lambda u=url: self._cam_stop(u)).pack(side="left", padx=(0, 4), pady=(2, 2))
+                       command=lambda u=url: self._cam_stop(u)).pack(
+                side="left", padx=(0, 4), pady=(2, 2))
+            ttk.Button(bbar, text="🔍 放大",
+                       command=lambda u=url: self._open_camera_zoom(u)).pack(
+                side="left", padx=(0, 4), pady=(2, 2))
+            if is_exam:
+                ttk.Label(bbar, text="AI", foreground=UI_ACCENT,
+                          font=("Microsoft YaHei", 9, "bold")).pack(side="right")
 
     def _cam_play(self, url):
         """开始播放一路监控。
@@ -754,7 +978,15 @@ class TerminalApp(object):
         self._cam_running[url] = True
         self._cam_seen.pop(url, None)
         self._cam_latest.pop(url, None)
-        self._cam_set_status(url, "正在连接…", "#1f56b8")
+        cam = self._cam_by_url(url)
+        if cam is not None:
+            cam["_ai_busy"] = False
+            cam["_ai_ts"] = 0.0
+            cam["_ai_scale"] = None
+            cam["_persons"] = []
+            cam["_viol"] = 0
+            cam["_latest_raw"] = None
+        self._cam_set_status(url, "正在连接…", UI_ACCENT)
         self._cam_btn_text(url, "连接中…")
         reader.start()
         self._cam_poll(url)
@@ -769,15 +1001,17 @@ class TerminalApp(object):
         state = snap["state"]
         if state == "live":
             if snap["seq"]:
-                self._cam_set_status(url, "播放中 ｜ %.1f fps" % snap["fps"], "#0a7d28")
+                self._cam_set_status(url, "播放中 ｜ %.1f fps" % snap["fps"], UI_OK)
+                # 旧版连上后按钮一直停在「连接中…」，看起来像没连上
+                self._cam_btn_text(url, "▶ 播放中")
             else:
-                self._cam_set_status(url, "已连接，等待画面…", "#1f56b8")
+                self._cam_set_status(url, "已连接，等待画面…", UI_ACCENT)
         elif state == "connecting":
-            self._cam_set_status(url, snap["status"] or "正在连接…", "#1f56b8")
+            self._cam_set_status(url, snap["status"] or "正在连接…", UI_ACCENT)
         elif state == "stalled":
-            self._cam_set_status(url, snap["status"], "#c07000")
+            self._cam_set_status(url, snap["status"], UI_WARN)
         elif state in ("error", "stopped"):
-            self._cam_set_status(url, snap["status"] or "取流已停止", "#c00")
+            self._cam_set_status(url, snap["status"] or "取流已停止", UI_ALARM)
             if state == "error":
                 self._cam_btn_text(url, "▶ 重试")
         try:
@@ -832,13 +1066,17 @@ class TerminalApp(object):
             pass
 
     @staticmethod
-    def _fit_frame(frame, w, h):
-        """等比缩放到不超过 (w,h)（cv2.resize，下采样用 INTER_AREA）"""
+    def _fit_frame(frame, w, h, upscale=False):
+        """等比缩放到不超过 (w,h)（cv2.resize，下采样用 INTER_AREA）
+
+        upscale=True 时允许放大（放大窗口用）：摄像头原帧只有 640×360 时，
+        放大窗口里也铺满，而不是留一圈黑边。
+        """
         fh, fw = frame.shape[:2]
         if fw <= 0 or fh <= 0:
             return frame
         scale = min(w / float(fw), h / float(fh))
-        if scale >= 1.0 and fw <= MAX_PANEL_W and fh <= MAX_PANEL_H:
+        if scale >= 1.0 and not upscale and fw <= MAX_PANEL_W and fh <= MAX_PANEL_H:
             return frame
         scale = min(scale, MAX_PANEL_W / float(fw), MAX_PANEL_H / float(fh))
         nw = max(2, int(fw * scale))
@@ -847,7 +1085,12 @@ class TerminalApp(object):
         return cv2.resize(frame, (nw, nh), interpolation=interp)
 
     def _cam_update(self, url, snap):
-        """渲染一路监控：AI 分析与视频贴图解耦"""
+        """渲染一路监控：AI 分析与视频贴图解耦
+
+        2026-10-19：AI 分析移到后台线程（`_ai_worker`），UI 线程只贴缓存框。
+        原因：自动档给单路 1280 时，一次分析约 200 ms；若在 Tk 主线程里跑，
+        每秒 2 次就会把视频、按钮、放大窗口一起卡住。
+        """
         cam = self._cam_by_url(url)
         if cam is None:
             return
@@ -856,6 +1099,11 @@ class TerminalApp(object):
             return
         raw = snap.get("frame")
         if raw is None or getattr(raw, "size", 0) == 0:
+            return
+        if not self._frame_quality_ok(raw):
+            # HEVC 取流偶尔会吐出一帧灰块/花屏（实测 6 帧里出现 1 帧）。
+            # 这种帧送进 YOLO 会生成几个莫名其妙的框，还会污染轨迹与告警；
+            # 直接跳过、保留上一帧好画面，下一帧（约 50 ms 后）就恢复了。
             return
         try:
             h = lbl.winfo_height()
@@ -869,66 +1117,154 @@ class TerminalApp(object):
             now_ms = time.time() * 1000.0
             ai_on = (HAS_PD and getattr(self, "mon_ai", None) and self.mon_ai.get()
                      and cam.get("area", self.AREA_EXAM) == self.AREA_EXAM)
-            persons = cam.get("_persons", []) or []
-            viol = cam.get("_viol", 0)
+            # 放大窗口/驾驶舱要原帧：这里只存引用，不拷贝、不额外解码
+            cam["_latest_raw"] = raw
+            cam["_latest_ts"] = time.time()
 
             if ai_on:
-                due = (now_ms - cam.get("_ai_ts", 0.0)) >= AI_INTERVAL_MS
-                if due:
-                    rh, rw = raw.shape[:2]
-                    # 分析长边按设置解析（缓存到 cam，避免每帧读配置）
-                    dim = cam.get("_ai_dim")
-                    if dim is None:
-                        try:
-                            cfg = config.load_ai_settings()
-                            dim = int(cfg.get("ai_input_dim") or 0) or \
-                                AI_MODE_DIM.get(str(cfg.get("ai_mode") or "standard"),
-                                                AI_INPUT_DIM)
-                        except Exception:
-                            dim = AI_INPUT_DIM
-                        cam["_ai_dim"] = dim
-                    if max(rh, rw) > dim:
-                        s = dim / float(max(rh, rw))
-                        ai_frame = cv2.resize(raw, (max(2, int(rw * s)),
-                                                    max(2, int(rh * s))),
-                                              interpolation=cv2.INTER_AREA)
-                    else:
-                        ai_frame = raw
-                    det = self._person_detector_for(url)
-                    if det is not None:
-                        persons, viol, line_y = det.analyze_only(
-                            ai_frame, boundary_ratio=BOUNDARY_RATIO)
-                        for p in persons:
-                            tr = getattr(det, "_tracks", {}).get(p["pid"])
-                            fa = getattr(tr, "face_cache", None) if tr is not None else None
-                            p["face"] = (fa or {}).get("face") if fa else None
-                        cam["_ai_ts"] = now_ms
-                        cam["_persons"] = persons
-                        cam["_viol"] = viol
-                        cam["_ai_line_y"] = line_y
-                        cam["_ai_shape"] = ai_frame.shape
-                        cam["_ai_scale"] = disp.shape[1] / float(ai_frame.shape[1])
-                        cam["_ai_count"] = (det.stable_count()
-                                            if hasattr(det, "stable_count")
-                                            else len(persons))
-                        # 手机识别：新版检测链（YOLO11n 检测头）只解码 COCO person 类，
-                        # 不再产出 has_phone / 手机类峰值置信度，故此处不再统计手机。
-                        self._cam_ai_side_effects(url, cam, persons, viol)
-                scale = cam.get("_ai_scale")
-                if scale is None:
-                    scale = disp.shape[1] / float(raw.shape[1])
-                    cam["_ai_scale"] = scale
-                det = self._person_detectors.get(url)
-                if det is not None and persons:
-                    det.draw_boxes(disp, persons, line_y=cam.get("_ai_line_y"),
-                                   scale=scale, font_size=12)
+                det = self._person_detector_for(url)
+                if det is not None and not cam.get("_ai_busy") and \
+                        (now_ms - cam.get("_ai_ts", 0.0)) >= AI_INTERVAL_MS:
+                    dim = self._ai_dim_for(url, det)
+                    cam["_ai_busy"] = True
+                    cam["_ai_dim"] = dim
+                    # 缩放也放到后台线程：2960×1666 原帧缩到 1920 在 UI 线程里
+                    # 每次要 ~20 ms，2 次/秒就是肉眼可见的轻微顿挫。
+                    try:
+                        threading.Thread(
+                            target=self._ai_worker,
+                            args=(url, det, raw, dim), daemon=True).start()
+                    except Exception:
+                        cam["_ai_busy"] = False
+                persons = cam.get("_persons", []) or []
+                shape = cam.get("_ai_shape")
+                if persons and shape and shape[1] > 0 and disp.shape[1] > 0:
+                    det_now = det or self._person_detectors.get(url)
+                    if det_now is not None:
+                        scale = disp.shape[1] / float(shape[1])
+                        det_now.draw_boxes(disp, persons,
+                                           line_y=cam.get("_ai_line_y"),
+                                           scale=scale, font_size=12)
 
             rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
             self._cam_photos[url] = ImageTk.PhotoImage(image=Image.fromarray(rgb))
             lbl.config(image=self._cam_photos[url])
-            self._cam_set_status(url, "播放中", "#0a7d28")
+            if not cam.get("_ai_busy"):
+                self._cam_set_status(url, "播放中", UI_OK)
         except Exception as e:
-            self._cam_set_status(url, "渲染失败：%s" % e, "#c00")
+            self._cam_set_status(url, "渲染失败：%s" % e, UI_ALARM)
+
+    @staticmethod
+    def _frame_quality_ok(frame):
+        """粗判一帧是不是"坏帧"（灰块/花屏）：缩到 96×54 看灰度标准差。
+
+        正常室内画面 std 约 30~60；HEVC 解码失败产生的灰块实测 std ≈ 2.6。
+        阈值 3.0 只拦明显坏帧，正常偏暗/偏白的画面仍会通过。
+        """
+        try:
+            small = cv2.resize(frame, (96, 54), interpolation=cv2.INTER_AREA)
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            return float(gray.std()) >= 3.0
+        except Exception:
+            return True
+
+    def _ai_dim_for(self, url, det=None):
+        """这一路该用多大的分析长边（像素）。
+
+        auto（默认）：1 路 1920 ｜ 2~4 路 960 ｜ 5 路以上 640。
+        实测真实摄像头画面（2960×1666，6~8 人教室）：
+          960 → 6 人 ｜ 1280 → 4 人（后排/被挡的人漏）｜ 1920 → 8 人（全部找到）；
+        合成 40 人考场单路召回：640=17.5%、960=52.5%、1280=62.5%。
+        1920 单次约 300 ms，但跑在后台线程，界面不卡。
+        纯 HOG 兜底时始终 640 —— HOG 在更大画面上只会更慢，召回不会明显变好。
+        """
+        cfg = getattr(self, "_ai_cfg", None) or {}
+        try:
+            dim = int(cfg.get("ai_input_dim") or 0)
+        except (TypeError, ValueError):
+            dim = 0
+        if dim > 0:
+            return max(320, min(3840, dim))
+        mode = str(cfg.get("ai_mode") or "auto").strip().lower()
+        if mode == "auto":
+            if det is not None and getattr(det, "_yolo_session", None) is None:
+                return AI_MODE_DIM["standard"]
+            n = sum(1 for v in self._cam_running.values() if v)
+            if n <= 1:
+                return AI_AUTO_DIM_ONE
+            if n <= AI_AUTO_FEW_MAX:
+                return AI_AUTO_DIM_FEW
+            return AI_AUTO_DIM_MANY
+        return AI_MODE_DIM.get(mode, AI_MODE_DIM["standard"])
+
+    def _ai_worker(self, url, det, raw, dim):
+        """后台线程：缩放 + 检测/跟踪/行为分析，结果放进队列（不碰任何 Tk 控件）。"""
+        try:
+            rh, rw = raw.shape[:2]
+            if max(rh, rw) > dim:
+                s = dim / float(max(rh, rw))
+                ai_frame = cv2.resize(raw, (max(2, int(rw * s)),
+                                            max(2, int(rh * s))),
+                                      interpolation=cv2.INTER_AREA)
+            else:
+                ai_frame = raw
+            persons, viol, line_y = det.analyze_only(
+                ai_frame, boundary_ratio=BOUNDARY_RATIO)
+            for p in persons:
+                tr = getattr(det, "_tracks", {}).get(p["pid"])
+                fa = getattr(tr, "face_cache", None) if tr is not None else None
+                p["face"] = (fa or {}).get("face") if fa else None
+            count = (det.stable_count() if hasattr(det, "stable_count")
+                     else len(persons))
+            self._ai_queue.put((url, det, persons, viol, line_y,
+                                ai_frame.shape, count, None))
+        except Exception as e:                       # noqa: BLE001
+            self._ai_queue.put((url, det, None, 0, None, None, 0, e))
+
+    def _ai_pump(self):
+        """主线程定时取 AI 结果（80 ms 一拍，单次最多处理 12 路）。"""
+        if not getattr(self, "_monitor_alive", False):
+            return
+        for _ in range(12):
+            try:
+                item = self._ai_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                self._ai_apply(item)
+            except Exception:
+                pass
+        try:
+            self._ai_pump_after = self.root.after(80, self._ai_pump)
+        except (tk.TclError, RuntimeError):
+            self._ai_pump_after = None
+
+    def _ai_apply(self, item):
+        """把后台分析结果落到界面状态（主线程执行）。"""
+        url, det, persons, viol, line_y, shape, count, err = item
+        cam = self._cam_by_url(url)
+        if cam is None:
+            return
+        # 停止/重播/换检测器后，旧线程的结果必须丢弃
+        if not self._cam_running.get(url) or self._person_detectors.get(url) is not det:
+            cam["_ai_busy"] = False
+            return
+        cam["_ai_busy"] = False
+        if err is not None:
+            self._cam_set_status(url, "识别失败：%s" % str(err)[:60], UI_ALARM)
+            return
+        # 分析期间用户可能已经关掉 AI：结果丢弃，不产生告警/边框
+        if not (getattr(self, "mon_ai", None) and self.mon_ai.get()):
+            cam["_persons"] = []
+            cam["_viol"] = 0
+            return
+        cam["_ai_ts"] = time.time() * 1000.0
+        cam["_persons"] = persons or []
+        cam["_viol"] = viol
+        cam["_ai_line_y"] = line_y
+        cam["_ai_shape"] = shape
+        cam["_ai_count"] = count
+        self._cam_ai_side_effects(url, cam, cam["_persons"], viol)
 
     def _person_detector_for(self, url):
         """取（或创建）该路的 AI 检测器。
@@ -947,10 +1283,11 @@ class TerminalApp(object):
             ai_cfg = config.load_ai_settings()
         except Exception:
             ai_cfg = {}
-        kwargs = {"boundary_ratio": BOUNDARY_RATIO, "max_input_dim": 1280,
+        kwargs = {"boundary_ratio": BOUNDARY_RATIO, "max_input_dim": 1920,
                   "confirm_frames": 4, "min_hits": 2}
         for k in ("yolo_model_path", "yolo_conf", "yolo_iou", "yolo_input_dim",
-                  "yolo_tiling", "yolo_tile_size", "yolo_tile_max"):
+                  "yolo_tiling", "yolo_tile_size", "yolo_tile_max",
+                  "yolo_tile_margin", "hog_fallback_sec"):
             if ai_cfg.get(k) not in (None, ""):
                 kwargs[k] = ai_cfg[k]
         # 多模态参数（provider=off 时不会被接受，等于不传）
@@ -987,7 +1324,7 @@ class TerminalApp(object):
                     pass
             except TypeError:
                 # 兼容尚未升级的 person_detect 版本
-                det = pd_mod.PersonTracker(max_input_dim=1280)
+                det = pd_mod.PersonTracker(max_input_dim=1920)
                 self._person_detectors[url] = det
             except Exception as e:
                 self.mon_ai.set(False)
@@ -1134,7 +1471,7 @@ class TerminalApp(object):
                 cam["_density_text"] = level
                 try:
                     density.config(text="密度：%s" % DENSITY_TEXT.get(level, level),
-                                   foreground=DENSITY_COLOR.get(level, "#888"))
+                                   foreground=DENSITY_COLOR.get(level, UI_DIM))
                 except tk.TclError:
                     pass
         # 面板边框：越界红 > 异常橙 > 正常绿
@@ -1174,8 +1511,8 @@ class TerminalApp(object):
         if cam.get("_border_state") == state:
             return
         cam["_border_state"] = state
-        color = {"ok": "#0a7d28", "warn": "#c07000",
-                 "error": "#c00", "idle": "#888"}.get(state, "#888")
+        color = {"ok": UI_OK, "warn": UI_WARN,
+                 "error": UI_ALARM, "idle": UI_BORDER}.get(state, UI_BORDER)
         try:
             frame.config(highlightbackground=color)
         except tk.TclError:
@@ -1302,6 +1639,8 @@ class TerminalApp(object):
         if reader is not None:
             reader.stop("界面停止播放")
         self._cam_running.pop(url, None)
+        self._ai_busy.pop(url, None)
+        self._cam_latest.pop(url, None)
         after_id = self._cam_render_after.pop(url, None)
         if after_id:
             try:
@@ -1324,21 +1663,26 @@ class TerminalApp(object):
         if cam is None:
             return
         try:
-            if cam.get("_label") and cam["_label"].winfo_exists():
-                cam["_label"].config(image="")
+            lbl = cam.get("_label")
+            if lbl is not None and lbl.winfo_exists():
+                # 不能 image=""：Label 一旦没有 image，width/height 会从像素
+                # 变回字符单位，面板会突然被撑大。贴回 1×1 黑图保持像素尺寸。
+                lbl.config(image=getattr(lbl, "_blank_img", ""))
             self._cam_btn_text(url, "▶ 播放")
-            self._cam_set_status(url, "已停止", "#666")
+            self._cam_set_status(url, "已停止", UI_DIM)
             cam["_persons"] = []
             cam["_viol"] = 0
             cam["_ai_ts"] = 0.0
+            cam["_ai_busy"] = False
             cam["_ai_scale"] = None
             cam["_ai_line_y"] = None
+            cam["_latest_raw"] = None
             cam["_status_text"] = None
             cam["_density_level"] = DENSITY_LOW
             cam["_density_text"] = None
             density = cam.get("_density")
             if density is not None and density.winfo_exists():
-                density.config(text="密度：-", foreground="#888")
+                density.config(text="密度：-", foreground=UI_DIM)
             self._cam_set_border(cam, "idle")
             self._monitor_update_info_bar()
         except tk.TclError:
@@ -1366,6 +1710,9 @@ class TerminalApp(object):
     def _cam_btn_text(self, url, text):
         cam = self._cam_by_url(url)
         if cam and cam.get("_btn") and cam["_btn"].winfo_exists():
+            if cam.get("_btn_text") == text:
+                return
+            cam["_btn_text"] = text
             cam["_btn"].config(text=text)
 
     def _monitor_play_all(self):
@@ -1387,6 +1734,398 @@ class TerminalApp(object):
             self._cam_stopped_ui(url)
         self._mon_log_line("全部停止：%d 路" % len(urls))
         self.monitor_status.config(text="已停止全部摄像头")
+
+    def _reset_monitor_detectors(self):
+        """参数变了就重建检测器（YOLO 置信度/分块方式不是每帧可变的）。"""
+        for url, det in list(getattr(self, "_person_detectors", {}).items()):
+            try:
+                det.stop()
+            except Exception:
+                pass
+        getattr(self, "_person_detectors", {}).clear()
+        for cam in self.monitors:
+            cam["_ai_ts"] = 0.0
+            cam["_ai_busy"] = False
+            cam["_ai_scale"] = None
+            cam["_persons"] = []
+            cam["_viol"] = 0
+        for watch in list(getattr(self, "_cheat_watches", {}).values()):
+            try:
+                watch.reset()
+            except Exception:
+                pass
+        getattr(self, "_cheat_watches", {}).clear()
+
+    def _open_ai_settings(self):
+        """YOLO 识别设置：模式/分析长边/置信度/分块方式（仅所有者）。"""
+        if self.session.role != config.ROLE_OWNER:
+            messagebox.showerror("权限不足", "YOLO 识别设置仅所有者可调整。")
+            return
+        cfg = config.load_ai_settings()
+        win = tk.Toplevel(self.root)
+        win.title("YOLO 识别设置")
+        win.geometry("760x600")
+        win.transient(self.root)
+        win.grab_set()
+        f = ttk.Frame(win, padding=16)
+        f.pack(fill="both", expand=True)
+
+        ttk.Label(f, text="YOLO 识别设置", font=("Microsoft YaHei", 14, "bold")
+                  ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        ttk.Label(f, text="改完点保存即生效（检测器会按新参数重建，正在播放的流不中断）。",
+                  foreground=UI_DIM).grid(row=1, column=0, columnspan=3,
+                                          sticky="w", pady=(0, 12))
+
+        ttk.Label(f, text="检测模式：").grid(row=2, column=0, sticky="e", pady=4)
+        mode_var = tk.StringVar(value=str(cfg.get("ai_mode") or "auto"))
+        ttk.Combobox(f, textvariable=mode_var, state="readonly", width=16,
+                     values=["auto", "standard", "dense", "energy"]
+                     ).grid(row=2, column=1, sticky="w")
+        ttk.Label(f, text="auto=按路数自动（推荐）｜standard=640｜dense=1280+分块｜energy=416",
+                  foreground=UI_DIM, font=("Microsoft YaHei", 9)
+                  ).grid(row=2, column=2, sticky="w", padx=(10, 0))
+
+        ttk.Label(f, text="分析长边：").grid(row=3, column=0, sticky="e", pady=4)
+        dim_var = tk.StringVar(value=str(cfg.get("ai_input_dim") or 0))
+        ttk.Spinbox(f, from_=0, to=1920, increment=160, textvariable=dim_var,
+                    width=14).grid(row=3, column=1, sticky="w")
+        ttk.Label(f, text="0=按模式自动；手动填 640/960/1280（越大越能看清后排，也越费算力）",
+                  foreground=UI_DIM, font=("Microsoft YaHei", 9)
+                  ).grid(row=3, column=2, sticky="w", padx=(10, 0))
+
+        ttk.Label(f, text="YOLO 置信度：").grid(row=4, column=0, sticky="e", pady=4)
+        conf_var = tk.StringVar(value=str(cfg.get("yolo_conf", 0.25)))
+        ttk.Spinbox(f, from_=0.10, to=0.90, increment=0.05, textvariable=conf_var,
+                    width=14).grid(row=4, column=1, sticky="w")
+        ttk.Label(f, text="默认 0.25；漏检多可降到 0.20，误检多可升到 0.30~0.35",
+                  foreground=UI_DIM, font=("Microsoft YaHei", 9)
+                  ).grid(row=4, column=2, sticky="w", padx=(10, 0))
+
+        ttk.Label(f, text="分块推理：").grid(row=5, column=0, sticky="e", pady=4)
+        tiling_var = tk.StringVar(value=str(cfg.get("yolo_tiling") or "auto"))
+        ttk.Combobox(f, textvariable=tiling_var, state="readonly", width=16,
+                     values=["auto", "on", "off"]).grid(row=5, column=1, sticky="w")
+        ttk.Label(f, text="auto=分析长边≥864 自动分块（密集考场召回关键）；off=单张推理",
+                  foreground=UI_DIM, font=("Microsoft YaHei", 9)
+                  ).grid(row=5, column=2, sticky="w", padx=(10, 0))
+
+        ttk.Label(f, text="块边距：").grid(row=6, column=0, sticky="e", pady=4)
+        margin_var = tk.StringVar(value=str(cfg.get("yolo_tile_margin", 0.0)))
+        ttk.Spinbox(f, from_=0.0, to=0.25, increment=0.05, textvariable=margin_var,
+                    width=14).grid(row=6, column=1, sticky="w")
+        ttk.Label(f, text="默认 0；现场发现块边界上的人框总不全，可试 0.05~0.08",
+                  foreground=UI_DIM, font=("Microsoft YaHei", 9)
+                  ).grid(row=6, column=2, sticky="w", padx=(10, 0))
+
+        # 当前真实后端（不伪造）：模型在不在、YOLO 还是 HOG、是否分块
+        det = next(iter(getattr(self, "_person_detectors", {}).values()), None)
+        backend = self._ai_chain_name(det) if det is not None else "尚未开始识别"
+        model_path = cfg.get("yolo_model_path") or (
+            pd_mod.default_yolo_model_path() if HAS_PD else "")
+        model_ok = bool(model_path and os.path.exists(model_path))
+        info = ("当前后端：%s\n"
+                "模型：%s\n"
+                "模型文件：%s\n"
+                "实测参考（合成 40 人考场，真人裁片）：640→召回 17.5%%，"
+                "960→52.5%%，1280→62.5%%" % (
+                    backend, os.path.basename(model_path) if model_path else "—",
+                    "存在" if model_ok else "缺失（运行 工具_YOLO模型导出.py 生成）"))
+        ttk.Label(f, text=info, foreground=UI_ACCENT, justify="left",
+                  font=("Microsoft YaHei", 9)).grid(
+            row=7, column=0, columnspan=3, sticky="w", pady=(14, 4))
+
+        ttk.Label(f, text="说明：YOLO11n 只解码 COCO person 类（手机类实测不可用，详见 11 目录报告）。\n"
+                          "分块推理会按 640 的块分别送模型，后排考生才有足够像素被检出。",
+                  foreground=UI_DIM, justify="left",
+                  font=("Microsoft YaHei", 9)).grid(
+            row=8, column=0, columnspan=3, sticky="w", pady=(0, 10))
+
+        def save():
+            try:
+                dim = max(0, int(float(dim_var.get())))
+                conf = min(0.9, max(0.1, float(conf_var.get())))
+                margin = min(0.25, max(0.0, float(margin_var.get())))
+            except (TypeError, ValueError):
+                messagebox.showwarning("提示", "分析长边/置信度/块边距要是数字")
+                return
+            new = {
+                "ai_mode": mode_var.get(),
+                "ai_input_dim": dim,
+                "yolo_conf": conf,
+                "yolo_tiling": tiling_var.get(),
+                "yolo_tile_margin": margin,
+            }
+            if not config.save_ai_settings(new):
+                messagebox.showerror("保存失败", "写 data\\ai_settings.json 失败")
+                return
+            self._ai_cfg = config.load_ai_settings()
+            self._reset_monitor_detectors()
+            self.monitor_status.config(
+                text="识别设置已保存：%s ｜ 置信度 %.2f ｜ 分块 %s"
+                     % (new["ai_mode"], conf, new["yolo_tiling"]))
+            try:
+                self._mon_log_line("AI 设置更新：%s" % json.dumps(
+                    new, ensure_ascii=False))
+            except Exception:
+                pass
+            win.destroy()
+
+        bbar = ttk.Frame(f)
+        bbar.grid(row=9, column=0, columnspan=3, sticky="e", pady=(8, 0))
+        ttk.Button(bbar, text="保存并生效", command=save).pack(side="left", padx=6)
+        ttk.Button(bbar, text="取消", command=win.destroy).pack(side="left")
+
+    # ---------- 摄像头放大窗口（单击画面弹出） ----------
+    def _open_camera_zoom(self, url):
+        """把一路摄像头放大成独立窗口：左侧大画面（带 AI 框），右侧实时信息。
+
+        交互：窗口里再点一下画面 = 全屏；Esc = 退出全屏/关闭；F11 = 全屏切换。
+        同一路只保留一个放大窗口（重复点击是把已有窗口提到最前）。
+        """
+        if not url:
+            return
+        old = self._shot_wins.get(url)
+        if old is not None:
+            try:
+                if old.winfo_exists():
+                    old.deiconify()
+                    old.lift()
+                    old.focus_force()
+                    return
+            except tk.TclError:
+                pass
+            self._shot_wins.pop(url, None)
+        cam = self._cam_by_url(url)
+        if cam is None:
+            return
+        room = cam.get("room", "-")
+        device = cam.get("device", "-")
+        win = tk.Toplevel(self.root)
+        win.title("摄像头放大 · %s · %s" % (room, device))
+        win.configure(bg=UI_BG)
+        win.minsize(900, 560)
+        win.transient(self.root)
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        ww = min(1500, max(1000, int(sw * 0.86)))
+        wh = min(950, max(640, int(sh * 0.82)))
+        win.geometry("%dx%d+%d+%d" % (ww, wh, max(0, (sw - ww) // 2),
+                                      max(0, (sh - wh) // 2)))
+        self._shot_wins[url] = win
+        state = {"photo": None, "full": False, "info_ts": 0.0,
+                 "ptext": None, "win": win}
+
+        body = tk.Frame(win, bg=UI_BG)
+        body.pack(fill="both", expand=True)
+
+        left = tk.Frame(body, bg=UI_BG)
+        left.pack(side="left", fill="both", expand=True)
+        video = tk.Label(left, bg="#000", cursor="hand2", relief="flat",
+                         borderwidth=0, highlightthickness=0,
+                         text="等待视频帧…\n（若未播放，请先在监控页点「▶ 播放」）",
+                         fg=UI_DIM, font=("Microsoft YaHei", 13))
+        video.pack(fill="both", expand=True, padx=8, pady=(8, 4))
+        vstatus = tk.Label(left, text="", bg=UI_BG, fg=UI_DIM, anchor="w",
+                           font=("Microsoft YaHei", 9))
+        vstatus.pack(fill="x", padx=10, pady=(0, 8))
+        tk.Label(left, text="🖱 点画面 = 全屏 ｜ F11 = 全屏 ｜ Esc = 退出全屏 / 关闭窗口",
+                 bg=UI_BG, fg=UI_ACCENT, anchor="w",
+                 font=("Microsoft YaHei", 9)).pack(fill="x", padx=10, pady=(0, 6))
+
+        side = tk.Frame(body, bg=UI_PANEL, width=340)
+        side.pack(side="right", fill="y")
+        side.pack_propagate(False)
+        tk.Label(side, text="%s · %s" % (room, device), bg=UI_PANEL, fg=UI_FG,
+                 font=("Microsoft YaHei", 12, "bold"), anchor="w",
+                 padx=12, pady=8).pack(fill="x")
+        info = tk.Label(side, text="AI 辅助识别：等待分析…", bg=UI_PANEL,
+                        fg=UI_ACCENT, justify="left", anchor="w", padx=12,
+                        font=("Microsoft YaHei", 9))
+        info.pack(fill="x")
+        tk.Label(side, text="人员列表（#编号 · 行为 · 异常）", bg=UI_PANEL,
+                 fg=UI_DIM, anchor="w", padx=12,
+                 font=("Microsoft YaHei", 9)).pack(fill="x", pady=(10, 2))
+        pbox = tk.Frame(side, bg=UI_PANEL)
+        pbox.pack(fill="both", expand=True, padx=12)
+        ptxt = tk.Text(pbox, bg=UI_PANEL2, fg=UI_FG, relief="flat",
+                       insertbackground=UI_FG, font=("Microsoft YaHei", 10),
+                       wrap="word", height=12, padx=6, pady=6,
+                       highlightthickness=0, borderwidth=0)
+        psb = ttk.Scrollbar(pbox, orient="vertical", command=ptxt.yview)
+        ptxt.configure(yscrollcommand=psb.set)
+        ptxt.pack(side="left", fill="both", expand=True)
+        psb.pack(side="right", fill="y")
+        ptxt.config(state="disabled")
+
+        bbar = tk.Frame(side, bg=UI_PANEL)
+        bbar.pack(fill="x", padx=12, pady=10)
+        play_btn = ttk.Button(bbar, text="⏹ 停止")
+        play_btn.pack(fill="x", pady=2)
+        full_btn = ttk.Button(bbar, text="⛶ 全屏")
+        full_btn.pack(fill="x", pady=2)
+        ttk.Button(bbar, text="关闭（Esc）", command=lambda: close()).pack(
+            fill="x", pady=2)
+
+        def set_text(text):
+            if state.get("ptext") == text:
+                return
+            state["ptext"] = text
+            try:
+                ptxt.config(state="normal")
+                ptxt.delete("1.0", "end")
+                ptxt.insert("1.0", text)
+                ptxt.config(state="disabled")
+            except tk.TclError:
+                pass
+
+        def toggle_play():
+            try:
+                if self._cam_running.get(url):
+                    self._cam_stop(url)
+                else:
+                    self._cam_play(url)
+            except Exception:
+                pass
+
+        def set_full(on):
+            state["full"] = bool(on)
+            try:
+                win.attributes("-fullscreen", state["full"])
+            except tk.TclError:
+                pass
+            if state["full"]:
+                side.pack_forget()
+                full_btn.config(text="⤢ 退出全屏")
+            else:
+                side.pack(side="right", fill="y")
+                full_btn.config(text="⛶ 全屏")
+            video.focus_set()
+
+        def toggle_full(_e=None):
+            set_full(not state["full"])
+            return "break"
+
+        def close(_e=None):
+            self._shot_wins.pop(url, None)
+            state["photo"] = None
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+            return "break"
+
+        def on_escape(_e=None):
+            if state["full"]:
+                set_full(False)
+            else:
+                close()
+            return "break"
+
+        play_btn.config(command=toggle_play)
+        full_btn.config(command=toggle_full)
+        video.bind("<Button-1>", toggle_full)
+        win.bind("<Escape>", on_escape)
+        win.bind("<F11>", toggle_full)
+        win.protocol("WM_DELETE_WINDOW", close)
+        try:
+            video.focus_set()
+        except Exception:
+            pass
+
+        state["set_text"] = set_text
+        self._zoom_tick(url, cam, win, video, vstatus, info, play_btn, state)
+
+    def _zoom_tick(self, url, cam, win, video, vstatus, info, play_btn, state):
+        """放大窗口的渲染循环（80 ms 一拍；帧序号不变不重贴）。"""
+        try:
+            if not win.winfo_exists():
+                self._shot_wins.pop(url, None)
+                state["photo"] = None
+                return
+        except tk.TclError:
+            self._shot_wins.pop(url, None)
+            state["photo"] = None
+            return
+        # 摄像头台账可能被「管理摄像头」整条替换，按 url 重新取一次，别抱旧字典
+        cam = self._cam_by_url(url) or cam
+        frame = None
+        snap = None
+        reader = self._cam_readers.get(url)
+        if reader is not None:
+            try:
+                snap = reader.snapshot()
+            except Exception:
+                snap = None
+        if snap is not None and snap.get("frame") is not None:
+            frame = snap["frame"]
+        if frame is None:
+            frame = cam.get("_latest_raw")
+        if frame is not None and getattr(frame, "size", 0):
+            try:
+                w = max(160, video.winfo_width())
+                h = max(120, video.winfo_height())
+                disp = self._fit_frame(frame, w, h, upscale=True)
+                persons = cam.get("_persons", []) or []
+                shape = cam.get("_ai_shape")
+                if persons and shape and shape[1] > 0:
+                    det = self._person_detectors.get(url)
+                    if det is not None:
+                        scale = disp.shape[1] / float(shape[1])
+                        det.draw_boxes(disp, persons,
+                                       line_y=cam.get("_ai_line_y"),
+                                       scale=scale, font_size=14)
+                rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
+                photo = ImageTk.PhotoImage(image=Image.fromarray(rgb))
+                state["photo"] = photo
+                if str(video.cget("text")):
+                    video.config(text="")
+                video.config(image=photo)
+                playing = bool(self._cam_running.get(url))
+                vstatus.config(
+                    text="%s ｜ 原始 %d×%d ｜ 显示 %d×%d%s" % (
+                        "播放中" if playing else "已停止",
+                        frame.shape[1], frame.shape[0],
+                        disp.shape[1], disp.shape[0],
+                        (" ｜ %.1f fps" % snap["fps"]) if snap and playing else ""),
+                    fg=UI_OK if playing else UI_WARN)
+            except Exception as e:
+                vstatus.config(text="渲染失败：%s" % str(e)[:60], fg=UI_ALARM)
+        else:
+            vstatus.config(text="未取到画面（该路可能未播放）", fg=UI_WARN)
+
+        now = time.time()
+        if (now - state.get("info_ts", 0.0)) >= 0.25:
+            state["info_ts"] = now
+            try:
+                persons = cam.get("_persons", []) or []
+                det = self._person_detectors.get(url)
+                chain = self._ai_chain_name(det) if det is not None else "—"
+                if det is not None and getattr(det, "_last_tiling", False):
+                    chain += "（分块 %d）" % getattr(det, "_last_tile_count", 0)
+                level = cam.get("_density_level")
+                info.config(
+                    text="人数：%d ｜ 越界：%d\n密度：%s ｜ 分析长边：%s\n检测链：%s"
+                         % (cam.get("_ai_count", len(persons)),
+                            cam.get("_viol", 0),
+                            DENSITY_TEXT.get(level, "—"),
+                            cam.get("_ai_dim") or "—", chain),
+                    fg=UI_ALARM if cam.get("_viol") else UI_ACCENT)
+                lines = []
+                for p in persons:
+                    acts = "、".join(p.get("behaviors") or []) or p.get("action", "正常")
+                    flag = " ⚠" if (p.get("bad") or p.get("behaviors")) else ""
+                    lines.append("#%d  %s%s" % (p.get("pid", 0), acts, flag))
+                setter = state.get("set_text")
+                if setter is not None:
+                    setter("\n".join(lines) or "（暂无人员；未播放或 AI 未开启时为空）")
+                play_btn.config(text="⏹ 停止" if self._cam_running.get(url) else "▶ 播放")
+            except tk.TclError:
+                pass
+        try:
+            win.after(80, lambda: self._zoom_tick(
+                url, cam, win, video, vstatus, info, play_btn, state))
+        except tk.TclError:
+            pass
+
 
     def _monitor_manage(self):
         """管理摄像头配置（仅所有者）：考场编号、设备名称、监控区域、推流URL"""

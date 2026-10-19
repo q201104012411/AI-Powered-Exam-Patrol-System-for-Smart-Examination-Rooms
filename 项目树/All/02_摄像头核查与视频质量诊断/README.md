@@ -1,7 +1,7 @@
 # 摄像头核查与视频质量诊断
 
 > 实现《[摄像头核查与视频质量诊断.md](摄像头核查与视频质量诊断.md)》里的核查能力。
-> 本目录是**真代码，可运行、有测试**：233 项单元测试 + 108 项端到端自检。
+> 本目录是**真代码，可运行、有测试**：265 项单元测试 + 108 项端到端自检。
 > 涉及**真实摄像头/录像系统/音频设备/现场样本**的指标必须靠现场巡检积累，
 > 自检不替代现场验收（见文末"范围与如实说明"）。
 
@@ -146,10 +146,10 @@ python -c "import storage,json;print(sorted(storage.Store().get_kv('web.accounts
 
 ```python
 adj, factor, why = runner.adjust_alert_score("CAM-A01-2", 0.9)
-# 该机位存在 画面模糊/失焦，可信度 ×0.5  ->  0.9 -> 0.450
+# 该机位存在 画面模糊/失焦，可信度 ×0.4  ->  0.9 -> 0.360
 ```
 
-有 fail 级缺陷 ×0.5、仅 warn ×0.8、正常 ×1.0，下限 0.3（避免完全失效）。
+有 fail 级缺陷 ×0.4、仅 warn ×0.7、正常 ×1.0，下限 0.3（避免完全失效）。
 
 ### 6.1 局域网联动：把记录上传到 03 智能终端（2026-10-15 新增）
 
@@ -171,7 +171,7 @@ set EXAM_TERMINAL_TOKEN=<在终端的「启动局域网接入服务.bat」里显
 python push_oplog.py                 :: 补传积压 + 上报新增
 python push_oplog.py --status        :: 水位线/积压/本机链校验/对端健康
 python push_oplog.py --loop 120      :: 常驻（巡检场景建议）
-python push_oplog.py --alert VIDEO_BLUR --detail "CAM-A01-1 画面模糊" --credibility 0.5
+python push_oplog.py --alert VIDEO_BLUR --detail "CAM-A01-1 画面模糊" --credibility 0.4
 ```
 
 - **只读原则**：上报客户端用 `sqlite3 ... ?mode=ro` **只读**打开本库，并自己复刻链校验
@@ -233,7 +233,7 @@ python push_oplog.py --alert VIDEO_BLUR --detail "CAM-A01-1 画面模糊" --cred
 ├── 多模态检测.bat 上面这个工具的菜单式启动器（检查/拉模型/写设置/验图片/关闭）
 ├── gui.py         桌面界面（登录页 + 4 页签，按角色控权）
 ├── main.py        端到端自检（108 项）
-├── tests\         单元测试（233 项；含 test_person_detect 68 项 + test_vlm_detect 38 项）
+├── tests\         单元测试（265 项；含 test_person_detect 85 项 + test_vlm_detect 38 项）
 ├── 网页核查面板\server\app.py   Flask 后端（端口 5010，账户/权限与桌面端同源）
 └── 文档\程序结构.txt
 ```
@@ -276,7 +276,7 @@ python push_oplog.py --alert VIDEO_BLUR --detail "CAM-A01-1 画面模糊" --cred
   删除机位/终端账户管理/审计链查看/隐藏 cmd 开关、网页端同源权限（含 403 拦截）、
   隐藏命令行窗口标记与启动器支持、`web_accounts.py` 两端共用一份账户、新增 42 项单测与自检项。
 - **验证方式**：账户改造那一轮是 97 项单测 + 108 项自检全绿（当时的记录），
-  测试总数随后续模型层改造与框去重优化已增至 **233 项**（2026-10-14 多模态版 + 密集场景优化后实测 `Ran 233 tests, OK`）；
+  测试总数随后续模型层改造与框去重优化已增至 **265 项**（2026-10-19 分块 WBF 优化后实测 `Ran 265 tests, OK`）；
   用 Pillow 截图核对过登录页/主界面（owner 与 admin
   受限按钮状态）/账户管理/审计链四个界面；网页端用 `Invoke-WebRequest`（HttpWebRequest）
   实测各接口状态码（见交付简报）。
@@ -294,7 +294,8 @@ python push_oplog.py --alert VIDEO_BLUR --detail "CAM-A01-1 画面模糊" --cred
 
 ### 现在跑的是什么
 
-`person_detect.py` 已**整体替换为 YOLO11n ONNX 版**（1,611 行 / 70,810 字节）。
+`person_detect.py` 已**整体替换为 YOLO11n ONNX 版**（2026-10-19 版：1,592 行 / 84,825 字节，
+与 03/11 逐字节相同）。
 检测链是**固定优先级、自动选择**的，**界面与配置都无法指定后端族**：
 
 | 优先级 | 后端 | 触发条件 | 本目录现状 |
@@ -307,8 +308,12 @@ python push_oplog.py --alert VIDEO_BLUR --detail "CAM-A01-1 画面模糊" --cred
   模型默认 `models\yolo11n.onnx`（10,741,326 字节，本机用 `工具_YOLO模型导出.py` 从官方
   `yolo11n.pt` 导出，opset 12、simplify=True、自带元数据），可用环境变量
   `EXAM_YOLO_MODEL` 指向别的 onnx。
-- **YOLO 可用时，某帧 YOLO 零检出仍会再跑一次 HOG 兜底并把结果合并**（新版行为），
-  所以对比报告里的"YOLO11n-ONNX 行"会如实标注"零检出帧叠加 HOG 兜底"，不冒充纯 YOLO。
+- **YOLO 可用时，某帧 YOLO 零检出才补跑 HOG 兜底**；且为避免空画面每帧跑 HOG
+  （单次约 1 秒）把界面拖住，YOLO 就绪时最多每 `hog_fallback_sec`（默认 2 秒）补一次。
+  纯 HOG 模式仍每帧都跑。
+- **分块推理跨块融合（2026-10-19）**：同一目标在相邻块被各检一次时，按置信度做
+  **加权框融合（WBF）**，而不是旧版"留面积最大的一个"（旧法框会随块边界抖，
+  切成两半时还会被算成两个人）。块边距 `yolo_tile_margin` 默认 0（实测比 0.08 稳）。
 - `EXAM_YOLO_DISABLE=1` 强制禁用 YOLO（对比/排查用）；`EXAM_YOLO_EP=coreml` 优先 CoreML
   （失败自动回退 CPU）。缺 `onnxruntime` 或缺模型时**静默回落 HOG**，不报错、不崩。
 - 逐人信息字段为 `pid / rect / action / bad / crosses / behaviors / density_level`
@@ -326,9 +331,9 @@ python push_oplog.py --alert VIDEO_BLUR --detail "CAM-A01-1 画面模糊" --cred
     报告落 `data\reports\`。`--selftest` 打印的是**检测链**，不是旧版的"后端探测"。
 - 旧的"后端探测/上报"接口与 `PersonTracker` 的模型族/GPU 相关参数**已随替换删除**；
   现在要查"到底会跑哪条链"，统一用 `python 工具_模型对比.py --selftest`。
-- 界面侧：AI 分析长边在 standard / dense / energy **三档统一 640**（因为 YOLO11n 输入固定 640），
-  三档差别只在分析频率与跳帧；手机相关的界面元素（手机计数、手机相关红框）已一并移除，
-  人数与越界显示不变。
+- 界面侧：02 仍按 standard(640) / dense(1280) / energy(640) 三档；**03 已改为按路数自动**
+  （1 路 1920 / 2~4 路 960 / 5+ 路 640，见 03 README）。三档差别在分析长边、频率与跳帧；
+  手机相关的界面元素（手机计数、手机相关红框）已一并移除，人数与越界显示不变。
 - **框去重（2026-10-14 追加优化，现场反馈"框太多了"）**：YOLO 会把同一个人同时检成
   "头/上半身"和"整体"，两者 IoU 很低（≈ 小框面积/大框面积），IoU-NMS 压不掉；跟踪层的
   `_same_person` 又要求两个框尺寸相近，头框 vs 整体框的高度比只有 ~0.3，于是同一个人稳定占住
@@ -342,7 +347,7 @@ python push_oplog.py --alert VIDEO_BLUR --detail "CAM-A01-1 画面模糊" --cred
 
 ### 验证方式（2026-10-14，本机实测）
 
-- `python -m unittest discover -s tests -t .`：**Ran 233 tests, OK**。
+- `python -m unittest discover -s tests -t .`：**Ran 265 tests, OK**。
 - `python main.py`：**自检通过 108/108**。
 - `python 工具_模型对比.py --selftest`：`OpenCV 4.14.0` /
   `检测链：YOLO11n 就绪(yolo11n.onnx)；MobileNet-SSD 缺模型；HOG+SVM 兜底可用`。
@@ -430,7 +435,7 @@ python 工具_多模态检测.py --image data\captures\考场1.jpg           :: 
 
 ### 12.5 验证
 
-- 单元测试：`Ran 233 tests, OK`（新增 `tests\test_vlm_detect.py` 38 项 + 密集场景分块推理 11 项，
+- 单元测试：`Ran 265 tests, OK`（新增 `tests\test_vlm_detect.py` 38 项 + 密集场景分块推理 11 项，
   **不联网**：JSON 容错 / 坐标归一 / 两种后端请求体 / 探测 / 回落行为都有覆盖）。
 - 端到端：`python main.py` → 108/108；`python ui_selfcheck.py` → FAIL 0。
 - 实测探测（本机）：`Qwen3-4B-GGUF` → “不能看图（capabilities 只有 completion、tools、thinking）”；

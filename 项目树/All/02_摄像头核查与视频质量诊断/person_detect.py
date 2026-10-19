@@ -23,6 +23,7 @@ YOLO11n 模型获取：运行 `python 工具_YOLO模型导出.py` 生成 models/
 import os
 import math
 import threading
+import time
 from collections import deque
 from functools import lru_cache
 
@@ -167,12 +168,11 @@ def _letterbox(frame, new_shape=640, color=(114, 114, 114)):
     return img, r, (dw, dh)
 
 
-def _nms_rects(rects, scores, iou_thresh=0.45, max_keep=300):
-    """标准贪婪 NMS：按分数降序保留，抑制与已保留框 IoU 超阈值的框。
+def _nms_keep_indices(rects, scores, iou_thresh=0.45, max_keep=300):
+    """标准贪婪 NMS 的**索引版**：返回保留下来的下标（按分数降序）。
 
-    与 _soft_nms 的区别：硬抑制（直接丢弃），更适合 YOLO 的高分输出，
-    避免高分框周围残留一串衰减后的重叠框又被跟踪层合并统计。
-    rects 为 (x, y, w, h)，与 _soft_nms 接口一致。
+    单独拆出索引版，是为了分块融合时能同时保留每个框的置信度
+    （`_yolo_postprocess_scored` 要按分数做加权平均；只返回矩形会把分数丢掉）。
     """
     if not rects:
         return []
@@ -186,15 +186,28 @@ def _nms_rects(rects, scores, iou_thresh=0.45, max_keep=300):
         rest = order[1:]
         ious = np.array([_iou(rects[i], rects[int(j)]) for j in rest])
         order = [j for j, ov in zip(rest, ious) if ov <= iou_thresh]
+    return keep
+
+
+def _nms_rects(rects, scores, iou_thresh=0.45, max_keep=300):
+    """标准贪婪 NMS：按分数降序保留，抑制与已保留框 IoU 超阈值的框。
+
+    与 _soft_nms 的区别：硬抑制（直接丢弃），更适合 YOLO 的高分输出，
+    避免高分框周围残留一串衰减后的重叠框又被跟踪层合并统计。
+    rects 为 (x, y, w, h)，与 _soft_nms 接口一致。
+    """
+    keep = _nms_keep_indices(rects, scores, iou_thresh=iou_thresh,
+                             max_keep=max_keep)
     return [tuple(int(v) for v in rects[i]) for i in keep]
 
 
-def _yolo_postprocess(raw, frame_shape, ratio, pad, conf_thres=0.25,
-                      iou_thres=0.45):
-    """把 YOLO 原始输出解码成去 letterbox 后的 (x, y, w, h) 列表。
+def _yolo_postprocess_scored(raw, frame_shape, ratio, pad, conf_thres=0.25,
+                             iou_thres=0.45):
+    """把 YOLO 原始输出解码成 [(rect, score), ...]（去 letterbox 后的坐标）。
 
-    raw 形如 [1, 84, 8400]（COCO：4 bbox + 80 类；行=通道）或转置形式；
-    本函数为纯函数，便于单元测试。frame_shape 为（letterbox 前）帧的 (h, w)。
+    与 `_yolo_postprocess` 的区别：**保留每个框的置信度**。分块推理要把同一
+    目标在相邻块里的多个框做加权融合（WBF），没有分数就没法加权，只能像旧版
+    那样"留面积最大的一个"——定位精度会跟着那块检测一起抖。
     """
     pred = np.asarray(raw)
     if pred.ndim == 3:
@@ -253,7 +266,24 @@ def _yolo_postprocess(raw, frame_shape, ratio, pad, conf_thres=0.25,
     # 先 IoU-NMS 压"几乎重合"，再压"小框套在大框里"（头框/上半身 vs 整体）。
     # 缺了后一步，同一个人会同时留下头框和身体框，跟踪层各开一条轨迹，
     # 界面上就是"一个人被画出一堆框、人数虚高"。
-    return _suppress_contained(_nms_rects(rects, scores, iou_thresh=iou_thres))
+    keep_idx = _nms_keep_indices(rects, scores, iou_thresh=iou_thres)
+    rects = [rects[i] for i in keep_idx]
+    scores = [float(scores[i]) for i in keep_idx]
+    kept = _suppress_contained(rects)
+    score_of = {tuple(int(v) for v in r): s for r, s in zip(rects, scores)}
+    return [(r, score_of.get(r, 0.0)) for r in kept]
+
+
+def _yolo_postprocess(raw, frame_shape, ratio, pad, conf_thres=0.25,
+                      iou_thres=0.45):
+    """把 YOLO 原始输出解码成去 letterbox 后的 (x, y, w, h) 列表。
+
+    raw 形如 [1, 84, 8400]（COCO：4 bbox + 80 类；行=通道）或转置形式；
+    本函数为纯函数，便于单元测试。frame_shape 为（letterbox 前）帧的 (h, w)。
+    """
+    return [r for r, _s in _yolo_postprocess_scored(
+        raw, frame_shape, ratio, pad, conf_thres=conf_thres,
+        iou_thres=iou_thres)]
 
 # 三色语义（BGR）：绿=正常，橙=异常行为，红=越界/贴边
 COLOR_OK = (0, 200, 0)
@@ -449,6 +479,78 @@ def _suppress_contained(rects, contain_thresh=0.85, area_ratio=1.8):
     return [tuple(int(v) for v in rects[i]) for i in keep]
 
 
+def _weighted_box_fuse(boxes, iou_thresh=0.55, max_keep=300):
+    """分块推理的跨块融合（Weighted Box Fusion, WBF）。
+
+    为什么不能只"留面积最大的一个"：
+      同一个人在相邻两块的检测框通常**不完全重合**（各偏几像素、大小也不同）。
+      旧做法直接丢掉其中一个，留下的那个是"单块视角"的框，定位会随块边界抖；
+      更糟的是两块各切到半个人时，两个半框 IoU 不高，会被当成两个人。
+      WBF 把重叠框按置信度加权平均：既去重，又让框中心/尺寸更接近真实目标。
+
+    输入 boxes：[(x, y, w, h, score, clipped), ...]（clipped=是否贴块边被切断）。
+    输出：融合后的矩形列表 [(x, y, w, h), ...]（按融合分数降序）。
+
+    两个关键细节：
+      · 只融合"同尺寸"的跨块重复框；部分框（头/上半身）不参与加权平均，
+        否则整体框会被拉小。部分-整体去重仍由 `_detect` 末尾统一处理。
+      · clipped 框权重乘 0.40：它可能是"半个人"，不该和完整框等权；若它单独成簇
+        （画面边缘只有这一个框），仍然保留，不漏掉边缘的人。
+    """
+    items = []
+    for b in (boxes or []):
+        if len(b) >= 6:
+            x, y, w, h, score, clipped = b[:6]
+        else:                                   # 兼容旧 5 元组（x,y,w,h,clipped）
+            x, y, w, h, clipped = b[:5]
+            score = 0.5
+        if w <= 0 or h <= 0:
+            continue
+        items.append((int(x), int(y), int(w), int(h),
+                      max(float(score), 1e-6), bool(clipped)))
+    if not items:
+        return []
+    items.sort(key=lambda t: -t[4])             # 高分先做簇代表
+
+    def _weight(it):
+        # 贴边被切断的框只给 40% 权重：有完整框存在时让完整框主导定位；
+        # 若全是半人框（目标就在画面边缘），权重会整体归一化，不影响保留。
+        return it[4] * (0.40 if it[5] else 1.0)
+
+    # 只按 IoU 聚类：这里只融合"同一个人在不同块里被重复检出"的**同尺寸**框。
+    # 头框/上半身 vs 整体框这类"部分-整体"重复不在这里处理 —— 它们尺寸差太多，
+    # 一起加权会把整体框拉小（框会缩到人腰上）；交给 _detect 末尾的
+    # _suppress_contained 统一去重（那是既有且已按密集场景调过的阈值）。
+    clusters = []                               # [[item, ...], ...]
+    for it in items:
+        rect = it[:4]
+        best_ci, best_iou = None, 0.0
+        for ci, cl in enumerate(clusters):
+            v = _iou(rect, cl[0][:4])
+            if v > best_iou:
+                best_iou, best_ci = v, ci
+        if best_ci is not None and best_iou >= iou_thresh:
+            clusters[best_ci].append(it)
+        else:
+            clusters.append([it])
+
+    fused = []
+    for cl in clusters:
+        ws = [_weight(it) for it in cl]
+        sw = sum(ws) or 1.0
+        x = sum(it[0] * wt for it, wt in zip(cl, ws)) / sw
+        y = sum(it[1] * wt for it, wt in zip(cl, ws)) / sw
+        w = sum(it[2] * wt for it, wt in zip(cl, ws)) / sw
+        h = sum(it[3] * wt for it, wt in zip(cl, ws)) / sw
+        # 同一目标被多个块重复检出，本身就是一次"确认"；但最多按 3 次计，
+        # 否则重叠块多的区域分数会被系统性抬高。
+        score = (sum(it[4] for it in cl) / len(cl)) * (min(len(cl), 3) / 3.0)
+        fused.append((int(round(x)), int(round(y)), max(2, int(round(w))),
+                      max(2, int(round(h))), float(score)))
+    fused.sort(key=lambda t: -t[4])
+    return [(x, y, w, h) for (x, y, w, h, _s) in fused[:max_keep]]
+
+
 def _soft_nms(rects, scores=None, iou_thresh=0.5, sigma=0.5, score_thresh=0.001):
     """基于高斯惩罚的贪婪软 NMS，返回保留下来的矩形"""
     if not rects:
@@ -541,7 +643,9 @@ class PersonTracker(object):
                  yolo_input_dim=640,
                  yolo_tiling="auto", yolo_tile_size=640,
                  yolo_tile_overlap=0.25, yolo_tile_max=12,
-                 yolo_tile_min_dim=1.35, contain_thresh=0.85,
+                 yolo_tile_min_dim=1.35, yolo_tile_margin=0.0,
+                 hog_fallback_sec=2.0,
+                 contain_thresh=0.85,
                  stand_aspect=0.62, stand_min_height_ratio=0.10):
         if not hasattr(cv2, "HOGDescriptor"):
             raise RuntimeError(
@@ -589,6 +693,15 @@ class PersonTracker(object):
         self.yolo_tile_overlap = float(min(0.6, max(0.0, yolo_tile_overlap)))
         self.yolo_tile_max = int(max(1, yolo_tile_max))
         self.yolo_tile_min_dim = float(max(1.0, yolo_tile_min_dim))
+        # 块边距：每块向外多取 margin（相对块边长的比例）再送模型，减少"块边界
+        # 上的人只被切到半个"。默认 0（实测合成本机场景 0 比 0.08 更稳：
+        # 1280 长边 62.5% vs 55~65% 波动、1920 长边 72.5% vs 62.5%）；
+        # 现场如果发现"站在块边界的考生框总是不全"，可在 ai_settings.json 里开 0.05~0.08。
+        self.yolo_tile_margin = float(min(0.30, max(0.0, yolo_tile_margin)))
+        # HOG 兜底频率：YOLO 已加载时，空画面不再每帧跑 HOG（单帧约 1 秒，
+        # 会把界面主线程卡住）；每 hog_fallback_sec 秒最多补一次。
+        self.hog_fallback_sec = float(max(0.0, hog_fallback_sec))
+        self._last_hog_ts = 0.0          # 首次空画面仍补一次 HOG（保持旧召回行为）
         # "部分-整体"去重阈值：同一人被检成"头+整体"时丢小框。密集考场里
         # 后排的人可能确实落在前排人的框内，阈值太低会把真人吞掉
         # （实测：0.85 在合成 40 人场景里吞掉 7 个真检出），所以做成可调，
@@ -768,16 +881,24 @@ class PersonTracker(object):
         return max(fh, fw) >= self.yolo_input_dim * self.yolo_tile_min_dim
 
     def _tile_windows(self, fh, fw):
-        """生成覆盖整帧的分块窗口 [(x, y, w, h)]，含重叠，且不超过 yolo_tile_max。"""
+        """生成覆盖整帧的**核心块**窗口 [(x, y, w, h)]，含重叠，且不超过 yolo_tile_max。
+
+        为什么窗口比模型输入小一圈：检测时会向外扩 `yolo_tile_margin` 再送模型。
+        外扩后的裁剪必须仍是 640×640，否则 letterbox 会把 742 的裁剪压到 640，
+        等于把每块的有效像素数又降了 14%（实测召回会掉 5~20 个百分点）。
+        所以这里给"核心"尺寸 = 640 − 2×margin，外扩后正好回到 640。
+        """
+        margin = int(round(self.yolo_tile_size * self.yolo_tile_margin))
         size = int(min(self.yolo_tile_size, max(fh, fw)))
-        base_step = int(max(32, round(size * (1.0 - self.yolo_tile_overlap))))
+        core = max(64, size - 2 * margin)
+        base_step = int(max(32, round(core * (1.0 - self.yolo_tile_overlap))))
 
         def axis(total, step):
-            if total <= size:
+            if total <= core:
                 return [0]
-            coords = list(range(0, total - size + 1, step))
-            if coords[-1] != total - size:
-                coords.append(total - size)      # 保证贴到边缘，不漏最后一条
+            coords = list(range(0, total - core + 1, step))
+            if coords[-1] != total - core:
+                coords.append(total - core)      # 保证贴到边缘，不漏最后一条
             return sorted(set(coords))
 
         step, wins = base_step, []
@@ -787,30 +908,52 @@ class PersonTracker(object):
             if len(wins) <= self.yolo_tile_max:
                 break
             step = int(round(step * 1.35))
-        return [(x, y, size, size) for (x, y) in wins]
+        return [(x, y, core, core) for (x, y) in wins]
 
     def _detect_yolo_tiled(self, frame):
-        """分块检测 + 跨块合并（同一个人出现在相邻块里要去重）"""
+        """分块检测 + 跨块融合（同一个人出现在相邻块里要去重）。
+
+        2026-10-19 优化：
+          · 每块向外扩 `yolo_tile_margin`（默认 8%）再送模型 —— 块边界上的
+            考生不会只被切到半个，减少"跨块半人框"；
+          · 保留每块检测的置信度，跨块重复框用 WBF 加权融合（旧版直接丢一个，
+            框会随块边界抖，切成两半时还会被算成两个人）。
+        """
         fh, fw = frame.shape[:2]
         windows = self._tile_windows(fh, fw)
+        margin = int(round(self.yolo_tile_size * self.yolo_tile_margin))
         boxes = []
         for (x, y, tw, th) in windows:
-            crop = frame[y:y + th, x:x + tw]
+            x0 = max(0, x - margin)
+            y0 = max(0, y - margin)
+            x1 = min(fw, x + tw + margin)
+            y1 = min(fh, y + th + margin)
+            crop = frame[y0:y1, x0:x1]
             if crop.size == 0:
                 continue
-            for (bx, by, bw, bh) in self._detect_yolo_single(crop):
-                # 贴着块边缘的框可能被切断，合并时优先保留"完整落在块内"的
+            ch, cw = crop.shape[:2]
+            for (bx, by, bw, bh), score in self._detect_yolo_single_scored(crop):
+                # 贴着块（含外扩边距）的框可能被切断，融合时降权但不直接丢
                 clipped = (bx <= 1 or by <= 1 or
-                           bx + bw >= tw - 1 or by + bh >= th - 1)
-                boxes.append((x + bx, y + by, bw, bh, clipped))
-        out = self._merge_tiled(boxes)
+                           bx + bw >= cw - 1 or by + bh >= ch - 1)
+                boxes.append((x0 + bx, y0 + by, bw, bh, score, clipped))
+        out = self._merge_tiled_scored(boxes)
         self._last_tiling = True
         self._last_tile_count = len(windows)
         return out
 
     @staticmethod
+    def _merge_tiled_scored(boxes):
+        """带置信度的跨块融合（WBF）。boxes 为 6 元组，见 `_weighted_box_fuse`。"""
+        return _weighted_box_fuse(boxes)
+
+    @staticmethod
     def _merge_tiled(boxes, iou_thresh=0.45, contain_thresh=0.75):
-        """合并分块结果：优先"没被块边缘切断 + 面积更大"的框，再按 IoU/包含去重。"""
+        """【兼容保留】无置信度的跨块去重（旧接口/单测仍可用）。
+
+        新代码走 `_merge_tiled_scored`（WBF）。这里保留旧语义：
+        优先"没被块边缘切断 + 面积更大"的框，再按 IoU/包含去重。
+        """
         if not boxes:
             return []
         items = sorted(boxes, key=lambda b: (bool(b[4]), -(b[2] * b[3])))
@@ -866,7 +1009,11 @@ class PersonTracker(object):
         return self._detect_yolo_tiled(frame)
 
     def _detect_yolo_single(self, frame):
-        """单张 YOLO11n ONNX 行人检测（COCO person 类）。
+        """单张 YOLO11n ONNX 行人检测（COCO person 类），只返回矩形。"""
+        return [r for r, _s in self._detect_yolo_single_scored(frame)]
+
+    def _detect_yolo_single_scored(self, frame):
+        """单张 YOLO11n ONNX 行人检测，返回 [(rect, score), ...]。
 
         输入沿用 _detect 传入的缩放帧（small），内部 letterbox 到 640×640，
         推理后把框还原回 small 帧坐标系，与其他检测源保持同一契约。
@@ -887,9 +1034,9 @@ class PersonTracker(object):
                 print("[person_detect] YOLO 推理异常，本帧跳过：%s" % e)
                 _YOLO_WARNED = True
             return []
-        return _yolo_postprocess(outputs[0], frame.shape[:2], ratio, pad,
-                                 conf_thres=self.yolo_conf,
-                                 iou_thres=self.yolo_iou)
+        return _yolo_postprocess_scored(outputs[0], frame.shape[:2], ratio, pad,
+                                        conf_thres=self.yolo_conf,
+                                        iou_thres=self.yolo_iou)
 
     def _detect_hog(self, frame, dense):
         """HOG 行人检测；dense=True 时使用更密的 winStride/scale"""
@@ -1059,7 +1206,10 @@ class PersonTracker(object):
         # 2) HOG 兜底：主力引擎完全没结果时才跑。
         #    实测（合成 40 人考场）HOG 在这类远景里只加 7 个框、0 个命中 ——
         #    既没补上召回，又拉低精确率，所以不再无脑叠加。
-        if not rects:
+        #    2026-10-19：HOG 在 640 帧上单次要 ~1 秒。YOLO 已加载时若每帧空画面
+        #    都补跑 HOG，界面会周期性卡死；改为每 hog_fallback_sec 秒最多一次，
+        #    且用非密集参数（同一画面快约 4 倍）。纯 HOG 模式仍保持原行为。
+        if not rects and self._hog_fallback_due():
             hog_rects = self._detect_hog(small, dense)
             rects = self._merge_sources(rects, [hog_rects], iou_thresh=0.35)
 
@@ -1079,11 +1229,18 @@ class PersonTracker(object):
         return _suppress_contained(_soft_nms(cleaned, iou_thresh=0.35, sigma=0.5),
                                    contain_thresh=self.contain_thresh)
 
-        # 4) 映射回原图、收紧、剔除不合理框、最终 NMS + 部分-整体去重
-        orig_rects = [self._rect_to_orig(r, scale) for r in rects]
-        shrunk = [self._shrink_rect(r, orig_w, orig_h) for r in orig_rects]
-        cleaned = self._sanitize_boxes(shrunk, orig_w, orig_h)
-        return _suppress_contained(_soft_nms(cleaned, iou_thresh=0.35, sigma=0.5))
+    def _hog_fallback_due(self):
+        """YOLO 已加载时空画面要不要补跑 HOG（限频，防止主线程被拖住）。
+
+        纯 HOG 模式（没有 YOLO）保持"每帧都跑"的旧行为 —— 那时 HOG 就是主链。
+        """
+        if self._yolo_session is None or self.hog_fallback_sec <= 0:
+            return True
+        now = time.time()
+        if (now - self._last_hog_ts) < self.hog_fallback_sec:
+            return False
+        self._last_hog_ts = now
+        return True
 
     # ---------------- 跟踪 ----------------
     def _greedy_assignment(self, cost):

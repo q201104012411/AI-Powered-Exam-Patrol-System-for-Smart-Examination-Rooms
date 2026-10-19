@@ -123,3 +123,8 @@ data_backup_*/
 离线安装包必要环境/bootstrap/
 离线安装包必要环境/__pycache__/
 离线安装包必要环境/_src/__pycache__/
+
+# --- 17. 单文件 exe 构建/输出目录（约 1.5GB：自带 runtime + 模块副本 + 成品 exe）---
+# 成品 exe 超过 GitHub 普通仓库单文件 100MB 限制，走 GitHub Release / 本地分发；
+# 源码入口是 项目树/All/总控台.py，构建脚本在本地 exe打包文件/_build（不入库）
+exe打包文件/
