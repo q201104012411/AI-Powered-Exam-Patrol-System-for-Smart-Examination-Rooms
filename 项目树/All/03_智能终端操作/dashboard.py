@@ -321,7 +321,7 @@ class CockpitTab(object):
         """
         card, _ = T.card(body, "监控画面", manager="grid", row=3, column=0,
                          sticky="ew", pady=(0, 6), accent=T.OK,
-                         subtitle="点击播放可在此直接看考场")
+                         subtitle=self._video_subtitle())
         self.card_video = card
         self.lbl_video_sub = card.subtitle
         self.btn_video = ttk.Button(card.head, text="▶ 播放", style="Mini.TButton",
@@ -349,6 +349,16 @@ class CockpitTab(object):
                             text="—", anchor="w", padx=6)
             info.pack(fill="x")
             self._vid_tiles.append({"box": box, "label": lab, "info": info})
+
+    def _video_subtitle(self):
+        """折叠状态下的副标题：先说清"这里有几路"，再说怎么开。"""
+        try:
+            n = len(self._video_monitors())
+        except Exception:
+            n = 0
+        if n:
+            return "已配置 %d 路 · 点「▶ 播放」直接看考场" % n
+        return "未配置摄像头（到「监控查看」页添加推流地址）"
 
     def _video_monitors(self):
         """读 data/monitors.json（与「监控查看」页同一份配置），最多取 2 路。"""
