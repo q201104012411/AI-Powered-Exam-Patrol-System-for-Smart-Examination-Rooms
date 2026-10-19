@@ -53,6 +53,7 @@
 总控台.py                目录树 + 登录 + 启动逻辑
 launcher_auth.py         总控台账户（PBKDF2）
 模块清单.json            模块/分组/入口/角色配置
+icon\icon.png            窗口/任务栏图标（exe 文件图标由启动器资源嵌入）
 runtime\                 自带 Python 3.12 + 依赖（不依赖系统 Python）
 00..13\                  各子系统源码与数据
 _build\                  打包工具（launcher 源码、pack.py、assemble.ps1）

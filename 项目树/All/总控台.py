@@ -247,6 +247,7 @@ class App(object):
         self._missing = set()
         self._build_style()
         self._build_window()
+        self._set_window_icon()
         self._build_header()
         self._build_body()
         self._build_footer()
@@ -304,6 +305,18 @@ class App(object):
         w, h = min(1260, max(1040, int(sw * 0.8))), min(840, max(660, int(sh * 0.8)))
         self.root.geometry("%dx%d+%d+%d" % (w, h, max(0, (sw - w) // 2),
                                             max(0, (sh - h) // 2 - 20)))
+
+    def _set_window_icon(self):
+        """窗口/任务栏图标用 icon\\icon.png（exe 文件图标由启动器资源嵌入）。"""
+        try:
+            p = os.path.join(PKG, "icon", "icon.png")
+            if os.path.isfile(p):
+                img = tk.PhotoImage(file=p)
+                self.root.iconphoto(True, img)
+                self.root.iconname("智能考场 AI 巡考系统")
+                self._icon_photo = img          # 保住引用，避免被 GC
+        except Exception:
+            pass
 
     def _build_header(self):
         head = tk.Frame(self.root, bg=PANEL, height=92)
