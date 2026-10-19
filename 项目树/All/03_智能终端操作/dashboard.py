@@ -27,6 +27,7 @@ r"""
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 import tkinter as tk
@@ -35,6 +36,18 @@ from tkinter import ttk
 import config
 import models
 import theme as T
+
+# 驾驶舱里的"监控画面"用到取流渲染；缺依赖时**如实降级**（显示原因，不放假图）
+try:
+    import cv2
+    HAS_CV2 = True
+except Exception:                                        # noqa: BLE001
+    HAS_CV2 = False
+try:
+    from PIL import Image, ImageTk
+    HAS_PIL = True
+except Exception:                                        # noqa: BLE001
+    HAS_PIL = False
 
 #: 告警状态 -> 中文（03 的状态常量在 models 里，不在 config）
 _STATUS_TEXT = {
@@ -222,15 +235,17 @@ class CockpitTab(object):
         body = self.scroll.body
         body.columnconfigure(0, weight=1)
         body.rowconfigure(2, weight=3, minsize=205)     # 图表区
-        body.rowconfigure(3, weight=2, minsize=205)     # 明细区
+        body.rowconfigure(3, weight=0, minsize=0)       # 监控画面（可收起）
+        body.rowconfigure(4, weight=2, minsize=205)     # 明细区
 
         self._build_header(body)
         self._build_kpis(body)
         self._build_charts(body)
+        self._build_video(body)
         self._build_tables(body)
 
         self.lbl_foot = ttk.Label(body, text="", style="TLabel", foreground=T.FG_DIM)
-        self.lbl_foot.grid(row=4, column=0, sticky="w", pady=(4, 0))
+        self.lbl_foot.grid(row=5, column=0, sticky="w", pady=(4, 0))
 
     # ---- 顶部标题条（整条画在 Canvas 上：渐变底/发光标题/胶囊按钮/警戒线）----
     def _build_header(self, body):
@@ -294,10 +309,213 @@ class CockpitTab(object):
         for cv in (self.cv_level, self.cv_trend, self.cv_type):
             cv.bind("<Configure>", self._on_chart_resize)
 
+    # ---- 监控画面（驾驶舱里直接看考场，不用切页签）----
+    def _build_video(self, body):
+        """驾驶舱里的"监控画面"卡片。
+
+        设计取舍（为什么不是一进来就自动播）：
+          · 取流是**后台线程 + 网络**，在没配摄像头/网络不通的机器上自动播会白烧 CPU；
+          · 但"要看就能看"是这页的核心诉求，所以按钮做得显眼，并记住上次选择
+            （`kv['cockpit_video']`），配合全屏一起用。
+        诚实原则：没配摄像头 / 缺 cv2 / 取流失败，都显示**具体原因**，不摆一张假画面。
+        """
+        card, _ = T.card(body, "监控画面", manager="grid", row=3, column=0,
+                         sticky="ew", pady=(0, 6), accent=T.OK,
+                         subtitle="点击播放可在此直接看考场")
+        self.card_video = card
+        self.lbl_video_sub = card.subtitle
+        self.btn_video = ttk.Button(card.head, text="▶ 播放", style="Mini.TButton",
+                                    command=self.toggle_video)
+        self.btn_video.pack(side="right", padx=(6, 0))
+        holder = tk.Frame(card, bg=T.PANEL)
+        # 默认**折叠**：驾驶舱在 1180×820 的小窗口里本来就紧，一块 170px 的
+        # 视频墙会把明细区挤到需要滚动。点「▶ 播放」时再展开（展开后由 VScroll 接管）。
+        self.video_holder = holder
+        self._vid_tiles = []
+        self._vid_readers = {}
+        self._vid_seen = {}
+        self._vid_photos = {}
+        self._vid_after = None
+        self._vid_running = False
+        for i in range(2):
+            box = tk.Frame(holder, bg=T.PANEL2, highlightthickness=1,
+                           highlightbackground=T.BORDER, height=168)
+            box.pack(side="left", fill="both", expand=True, padx=(0 if i == 0 else 6, 0))
+            box.pack_propagate(False)
+            lab = tk.Label(box, bg="#05090f", fg=T.FG_MUTE, font=T.FONT_SMALL,
+                           text="监控画面未开始")
+            lab.pack(fill="both", expand=True)
+            info = tk.Label(box, bg=T.PANEL2, fg=T.FG_DIM, font=T.FONT_TINY,
+                            text="—", anchor="w", padx=6)
+            info.pack(fill="x")
+            self._vid_tiles.append({"box": box, "label": lab, "info": info})
+
+    def _video_monitors(self):
+        """读 data/monitors.json（与「监控查看」页同一份配置），最多取 2 路。"""
+        try:
+            p = config.DATA_ROOT / "monitors.json"
+            if not p.exists():
+                return []
+            cams = json.loads(p.read_text(encoding="utf-8")) or []
+            return [c for c in cams if (c.get("url") or "").strip()][:2]
+        except Exception:
+            return []
+
+    def toggle_video(self):
+        if self._vid_running:
+            self.video_stop()
+        else:
+            self.video_start()
+
+    def video_start(self):
+        """开始取流：后台 FrameReader + 主线程按帧序号贴图（不阻塞界面）。"""
+        if self._vid_running:
+            return
+        # 先展开再取流：哪怕没有摄像头/缺依赖，用户点了「播放」也应该看到
+        # **具体原因**（"未配置摄像头，去监控查看页添加"），而不是点了没反应。
+        try:
+            self.video_holder.pack(fill="both", expand=True)
+        except Exception:
+            pass
+        cams = self._video_monitors()
+        if not cams:
+            self._video_msg(0, "未配置摄像头",
+                            "到「监控查看」页点「📹 管理摄像头」添加推流地址")
+            self.lbl_video_sub.config(text="未配置摄像头（配置后这里直接出画面）")
+            self.btn_video.config(text="⏹ 收起")
+            self._vid_running = True          # 保持"已展开"态，让用户能点停止收起
+            return
+        try:
+            import camera_stream
+        except Exception as e:                            # noqa: BLE001
+            self._video_msg(0, "缺少取流组件", str(e)[:60])
+            self.btn_video.config(text="⏹ 收起")
+            self._vid_running = True
+            return
+        if not (HAS_CV2 and HAS_PIL):
+            self._video_msg(0, "缺少依赖", "需要 opencv-python 与 Pillow 才能显示画面")
+            self.btn_video.config(text="⏹ 收起")
+            self._vid_running = True
+            return
+        self._vid_running = True
+        self.btn_video.config(text="⏹ 停止")
+        self.lbl_video_sub.config(text="取流中（不通会自动重连）")
+        try:
+            self.video_holder.pack(fill="both", expand=True)
+        except Exception:
+            pass
+        for i, cam in enumerate(cams):
+            url = cam.get("url", "")
+            reader = camera_stream.FrameReader(
+                url, label="03/cockpit/%s" % camera_stream.short_url(url, 24))
+            self._vid_readers[i] = reader
+            self._vid_seen[i] = None
+            reader.start()
+            self._vid_tiles[i]["info"].config(
+                text="%s ｜ %s" % (cam.get("name") or "摄像头 %d" % (i + 1),
+                                  camera_stream.short_url(url, 28)))
+        self._video_tick()
+
+    def _video_msg(self, idx, head, tail=""):
+        try:
+            self._vid_tiles[idx]["label"].config(
+                image="", text="%s\n%s" % (head, tail), fg=T.FG_MUTE)
+            self._vid_tiles[idx]["label"].image = None
+        except Exception:
+            pass
+
+    def _video_tick(self):
+        """每 250ms 取一次最新帧；帧序号没变就不重贴（省 CPU）。"""
+        if not self._vid_running or self._stopped:
+            return
+        for i, reader in list(self._vid_readers.items()):
+            try:
+                snap = reader.snapshot()
+            except Exception:
+                continue
+            tile = self._vid_tiles[i]
+            state = snap.get("state")
+            if state == "live" and snap.get("frame") is not None and snap.get("seq"):
+                key = (snap.get("generation"), snap.get("seq"))
+                if self._vid_seen.get(i) != key:
+                    self._vid_seen[i] = key
+                    self._video_draw(i, snap)
+                continue
+            # 非 live：给具体状态，别让用户盯着一块黑屏猜
+            txt = {"connecting": "正在连接…", "stalled": "画面中断，重连中…",
+                   "error": "取流失败（检查地址/网络）", "stopped": "已停止"}.get(
+                       state, snap.get("status") or "等待画面…")
+            if tile["label"].cget("text") != txt:
+                self._video_msg(i, txt, snap.get("status") or "")
+        try:
+            self._vid_after = self.parent.after(250, self._video_tick)
+        except Exception:
+            self._vid_after = None
+
+    def _video_draw(self, i, snap):
+        """把一帧画到磁贴上（等比缩放 + 居中黑边）。"""
+        try:
+            import cv2
+            from PIL import Image, ImageTk
+            tile = self._vid_tiles[i]
+            w = max(80, tile["label"].winfo_width() or 320)
+            h = max(60, tile["label"].winfo_height() or 150)
+            frame = snap["frame"]
+            fh, fw = frame.shape[:2]
+            if fw <= 0 or fh <= 0:
+                return
+            scale = min(w / float(fw), h / float(fh))
+            nw, nh = max(1, int(fw * scale)), max(1, int(fh * scale))
+            interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+            small = cv2.resize(frame, (nw, nh), interpolation=interp)
+            if len(small.shape) == 3 and small.shape[2] == 3:      # BGR -> RGB
+                small = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+            photo = ImageTk.PhotoImage(Image.fromarray(small))
+            tile["label"].config(image=photo, text="")
+            tile["label"].image = photo
+            self._vid_photos[i] = photo
+            tile["info"].config(
+                text="%s ｜ %.1f fps ｜ %s" % (
+                    tile["info"].cget("text").split("｜")[0].strip(),
+                    float(snap.get("fps") or 0.0),
+                    time.strftime("%H:%M:%S")))
+        except Exception as e:                                # noqa: BLE001
+            self._video_msg(i, "画面渲染失败", str(e)[:60])
+
+    def video_stop(self, quiet=False):
+        self._vid_running = False
+        if self._vid_after:
+            try:
+                self.parent.after_cancel(self._vid_after)
+            except Exception:
+                pass
+            self._vid_after = None
+        for i, reader in list(self._vid_readers.items()):
+            try:
+                reader.stop("驾驶舱停止播放")
+            except Exception:
+                pass
+        self._vid_readers.clear()
+        self._vid_seen.clear()
+        for i, tile in enumerate(getattr(self, "_vid_tiles", [])):
+            try:
+                tile["label"].config(image="", text="监控画面已停止", fg=T.FG_MUTE)
+                tile["label"].image = None
+                tile["info"].config(text="—")
+            except Exception:
+                pass
+        if not quiet:
+            try:
+                self.btn_video.config(text="▶ 播放")
+                self.lbl_video_sub.config(text="点击播放可在此直接看考场")
+                self.video_holder.pack_forget()          # 收起，给明细区让位
+            except Exception:
+                pass
+
     # ---- 明细区（3 张表）----
     def _build_tables(self, body):
         row = ttk.Frame(body, style="TFrame")
-        row.grid(row=3, column=0, sticky="nsew")
+        row.grid(row=4, column=0, sticky="nsew")
         row.columnconfigure(0, weight=12)
         row.columnconfigure(1, weight=8)
         row.columnconfigure(2, weight=20)
@@ -407,6 +625,7 @@ class CockpitTab(object):
                 except Exception:
                     pass
                 setattr(self, attr, None)
+        self.video_stop(quiet=True)
         try:
             self.app.root.unbind("<Escape>")
         except Exception:

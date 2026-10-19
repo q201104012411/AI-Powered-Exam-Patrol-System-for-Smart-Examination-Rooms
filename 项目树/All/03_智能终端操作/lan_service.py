@@ -161,10 +161,13 @@ class LanService(object):
         self._chain_at = 0.0
 
     # ---------------- 鉴权 ----------------
-    def authorized(self, client_ip, headers, path=""):
+    def authorized(self, client_ip, headers, path="", query_token=""):
         """
         返回 (是否放行, 原因)。**fail-closed**：非本机来源一律要令牌；
         没配令牌时非本机来源直接拒（而不是放行）。
+
+        `query_token`：`<img src>` / MJPEG 这类"不能用请求头"的浏览器原生请求
+        只能把令牌放查询串（`?token=`）。只给只读的图片接口用，写接口一概不认。
         """
         if is_loopback(client_ip) and self.allow_local_no_token:
             return True, "本机访问"
@@ -179,6 +182,8 @@ class LanService(object):
                     got = auth[7:].strip()
         except Exception:                             # noqa: BLE001
             got = ""
+        if not got and query_token:
+            got = str(query_token).strip()
         if got and hmac.compare_digest(str(got).encode("utf-8"),
                                        str(self.token).encode("utf-8")):
             return True, "令牌校验通过"
@@ -268,6 +273,72 @@ class LanService(object):
             "data_dir": str(config.DATA_ROOT)}
 
     # ---------------- GET /api/cockpit（网页版驾驶舱的数据源） ----------------
+    # ---------------- GET /api/snapshot（网页驾驶舱的监控画面） ----------------
+    def snapshot(self, idx=0):
+        """取第 idx 路摄像头的**最新一帧 JPEG**，返回 (ok, bytes|{}, reason)。
+
+        实现取舍：
+          · 复用 `camera_stream.FrameReader`（后台打开/断线重连/超时可控），
+            第一次请求时才启动，之后每路一个常驻 reader；
+          · JPEG 缓存 400ms：浏览器 1.2 秒一帧，没必要每秒编码两次；
+          · 没有配置 / 缺依赖 / 还没拿到帧，一律**如实说明**（503 + reason），
+            网页那边显示"无信号"，不摆一张假画面。
+        """
+        cams = []
+        try:
+            p = config.DATA_ROOT / "monitors.json"
+            if p.exists():
+                cams = [c for c in (json.loads(p.read_text(encoding="utf-8")) or [])
+                        if (c.get("url") or "").strip()]
+        except Exception:                             # noqa: BLE001
+            cams = []
+        if not cams:
+            return False, {}, "未配置摄像头（在 03 的「监控查看」页添加推流地址）"
+        if idx < 0 or idx >= len(cams):
+            return False, {}, "没有第 %d 路摄像头（共 %d 路）" % (idx + 1, len(cams))
+        try:
+            import camera_stream
+        except Exception as e:                        # noqa: BLE001
+            return False, {}, "缺少取流组件：%s" % str(e)[:80]
+        url = cams[idx].get("url", "")
+        hub = getattr(self, "_snap_hub", None)
+        if hub is None:
+            hub = self._snap_hub = {}
+        reader = hub.get(url)
+        if reader is None:
+            try:
+                reader = camera_stream.FrameReader(
+                    url, label="03/web/%s" % camera_stream.short_url(url, 24))
+                reader.start()
+                hub[url] = reader
+            except Exception as e:                    # noqa: BLE001
+                return False, {}, "取流启动失败：%s" % str(e)[:80]
+        # 缓存：同一路 400ms 内重复请求直接复用
+        cache = getattr(self, "_snap_cache", None)
+        if cache is None:
+            cache = self._snap_cache = {}
+        now = time.time()
+        hit = cache.get(url)
+        if hit and now - hit[0] < 0.4 and hit[1]:
+            return True, hit[1], ""
+        try:
+            snap = reader.snapshot()
+        except Exception as e:                        # noqa: BLE001
+            return False, {}, "取帧失败：%s" % str(e)[:80]
+        frame = snap.get("frame")
+        if frame is None:
+            return False, {}, snap.get("status") or "画面还没到（%s）" % snap.get("state")
+        try:
+            import cv2
+            ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 78])
+            if not ok:
+                return False, {}, "JPEG 编码失败"
+            data = buf.tobytes()
+        except Exception as e:                        # noqa: BLE001
+            return False, {}, "缺 opencv-python，无法编码画面：%s" % str(e)[:60]
+        cache[url] = (now, data)
+        return True, data, ""
+
     def _modules(self, force=False):
         """跨模块态势（带 TTL 缓存）。
 
@@ -626,8 +697,9 @@ def make_handler(service):
                 self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
                 self.send_header("Access-Control-Max-Age", "600")
 
-        def _auth(self, path):
-            ok, why = service.authorized(self._client(), self.headers, path)
+        def _auth(self, path, query_token=""):
+            ok, why = service.authorized(self._client(), self.headers, path,
+                                         query_token=query_token)
             if not ok:
                 service._deny(self._client(), why, path)
                 self._send(401, {"ok": False, "reason": why,
@@ -662,6 +734,24 @@ def make_handler(service):
                                      "reason": "缺少 web/cockpit.html（页面文件未随仓库提供？）"})
                 else:
                     self._send_bytes(200, html, "text/html; charset=utf-8")
+                return
+            # ---- 监控画面快照（网页驾驶舱里的"监控画面"，2026-10-19 新增）----
+            # 为什么不给 MJPEG：一条长连接会把 threading 服务器的一个线程长期占住，
+            # 断线/重连也难处理；快照（1~1.5 秒一帧）足够"看见"且实现简单、可控。
+            if path == "/api/snapshot":
+                q = urllib.parse.parse_qs(parsed.query)
+                if not self._auth(path, (q.get("token") or [""])[0]):
+                    return
+                idx = 0
+                try:
+                    idx = int((q.get("idx") or ["0"])[0])
+                except (TypeError, ValueError):
+                    idx = 0
+                ok, payload, why = service.snapshot(idx)
+                if ok:
+                    self._send_bytes(200, payload, "image/jpeg")
+                else:
+                    self._send(503, {"ok": False, "reason": why})
                 return
             # ---- 驾驶舱数据（含告警态势，必须鉴权）----
             if path == "/api/cockpit":
@@ -929,6 +1019,18 @@ def _selfcheck_child():
         chk("驾驶舱计数与库内一致（同一份 SQL 聚合口径）",
             st == 200 and (out.get("kpi") or {}).get("total") == total_db,
             "接口=%s 库内=%s" % ((out.get("kpi") or {}).get("total"), total_db))
+
+        # ---- 监控画面快照（2026-10-19 新增）----
+        # 自检环境里没有摄像头配置，这里要验证的是"**如实告知**"而不是真出画面
+        st, out = call("/api/snapshot")
+        chk("无摄像头时快照接口如实回 503 + 原因（不返回假图）",
+            st == 503 and out.get("ok") is False
+            and ("未配置摄像头" in (out.get("reason") or "")), 
+            "状态=%s 原因=%s" % (st, (out.get("reason") or "")[:40]))
+        chk("快照接口支持令牌走查询串（<img> 不能带头）",
+            service.authorized("192.168.1.50", _H(), "/api/snapshot", "selfcheck-token")[0]
+            and not service.authorized("192.168.1.50", _H(), "/api/snapshot", "错的")[0],
+            "查询串令牌：对=放行 / 错=拒绝")
 
         summary = store.remote_summary()
         chk("远端记录落库分链存储", summary.get("records") == 2,

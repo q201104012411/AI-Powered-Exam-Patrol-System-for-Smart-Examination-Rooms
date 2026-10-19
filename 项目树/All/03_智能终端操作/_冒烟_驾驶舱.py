@@ -104,6 +104,26 @@ check("1180×820 下内容装得下（不裁切）", need <= view,
       "内容 %d px / 可视 %d px" % (need, view))
 check("装得下时不显示滚动条", not ck.scroll.vsb.winfo_ismapped())
 
+# ---- 1b) 监控画面卡片（2026-10-19 新增）----
+check("驾驶舱有「监控画面」卡片（默认折叠，不挤占明细区）",
+      ck.card_video.winfo_ismapped() and not ck.video_holder.winfo_manager(),
+      "按钮文案=%s" % ck.btn_video.cget("text"))
+check("监控画面卡片有播放按钮", bool(ck.btn_video.cget("text")))
+need0 = ck.scroll.body.winfo_reqheight()
+ck.video_start()                       # 真实走一遍"开始取流"分支
+pump(root, 0.5)
+need1 = ck.scroll.body.winfo_reqheight()
+check("点播放后视频墙展开（内容变高，由滚动容器接管）",
+      bool(ck.video_holder.winfo_manager()) and need1 > need0,
+      "折叠 %d px → 展开 %d px" % (need0, need1))
+check("无摄像头/取流失败时如实提示（不摆假画面）",
+      any(t["label"].cget("text") for t in ck._vid_tiles),
+      (ck._vid_tiles[0]["label"].cget("text") or "")[:40].replace("\n", " "))
+ck.video_stop()
+pump(root, 0.3)
+check("停止后视频墙收起（明细区恢复）",
+      not ck.video_holder.winfo_manager() and ck.btn_video.cget("text") == "▶ 播放")
+
 # ---- 2) KPI 与库内一致 ----
 want = {"total": stats["total"], "red": stats["by_level"].get(config.LEVEL_RED, 0),
         "orange": stats["by_level"].get(config.LEVEL_ORANGE, 0)}
