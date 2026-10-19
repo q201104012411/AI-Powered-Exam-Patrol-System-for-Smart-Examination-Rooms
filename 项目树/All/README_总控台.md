@@ -60,7 +60,10 @@ _build\                  打包工具（launcher 源码、pack.py、assemble.ps1
 
 04 巡考机器人只有方案文档，没有可运行入口，树里显示“缺入口”。
 
-## 六、重新打包（改完代码后）
+## 六、重新打包（仅打包机）
+
+> `_build\`（launcher/main.go、pack.py、assemble.ps1）与 `runtime\` 体积大，**未入库**；
+> 下面是打包机上的本地步骤，源码仓库只保留启动器代码。
 
 ```powershell
 cd exe打包文件
