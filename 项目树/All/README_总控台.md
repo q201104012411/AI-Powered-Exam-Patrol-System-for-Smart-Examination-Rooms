@@ -10,7 +10,7 @@
 
 `智能考场AI巡考系统.exe`（发布包目录下，约 525 MB）
 
-- SHA256：`4DECB58851985A73FECF5FD9552CAFC922978ED615CCAD4574534AE4EB616889`
+- SHA256：`CAD954B23361BDE13E0BDE3D6F791011B38B9D0ECD8695BCA8FF79055503B5E0`
 - 第一次运行：会先把运行环境解压到
   `%LOCALAPPDATA%\智能考场AI巡考系统\app-<hash>`，控制台窗口显示解压进度；
   解压完成后自动打开「总控台」。
@@ -75,3 +75,17 @@ powershell -ExecutionPolicy Bypass -File _build\assemble.ps1
 ```
 
 `assemble.ps1` 输出本目录的 `智能考场AI巡考系统.exe`。
+
+## 七、图标
+
+- 源图：`icon/icon.png`（512×512 RGBA）。
+- 文件/控制台图标：`_build/app.ico`（16/24/32/48/64/128/256 多尺寸），由
+  `rsrc -arch amd64 -ico app.ico -o launcher/rsrc.syso` 生成资源，
+  再用 `go build -o launcher_icon.exe .` 编进启动器；`assemble.ps1` 默认用它。
+- 总控台窗口/任务栏图标：`总控台.py` 的 `_set_window_icon()` 用
+  `root.iconphoto(True, tk.PhotoImage(file="icon/icon.png"))` 设置，
+  登录框/账户管理等 Toplevel 也会继承。
+- 换图标：替换 `icon/icon.png` → 重新生成 `app.ico` → 重新生成 `rsrc.syso` →
+  重新编译 `launcher_icon.exe` → 重新 `pack.py` → `assemble.ps1`。
+- Windows 资源管理器有图标缓存：替换同名 exe 后如仍显示旧图标，按 F5、
+  重启资源管理器，或把 exe 复制成新文件名查看。
