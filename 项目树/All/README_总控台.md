@@ -10,7 +10,7 @@
 
 `智能考场AI巡考系统.exe`（发布包目录下，约 525 MB）
 
-- SHA256：`CAD954B23361BDE13E0BDE3D6F791011B38B9D0ECD8695BCA8FF79055503B5E0`
+- SHA256：`FCD88BEA31CD1162893E9F204945D92DEFDED9F99F1155CD57AC8BB99C56E6C0`
 - 第一次运行：会先把运行环境解压到
   `%LOCALAPPDATA%\智能考场AI巡考系统\app-<hash>`，控制台窗口显示解压进度；
   解压完成后自动打开「总控台」。
@@ -56,6 +56,7 @@ launcher_auth.py         总控台账户（PBKDF2）
 icon\icon.png            窗口/任务栏图标（exe 文件图标由启动器资源嵌入）
 runtime\                 自带 Python 3.12 + 依赖（不依赖系统 Python）
 00..13\                  各子系统源码与数据
+一键打包.sh              Git Bash 一键打包（图标取 icon/icon.png）
 _build\                  打包工具（launcher 源码、pack.py、assemble.ps1）
 ```
 
@@ -65,6 +66,20 @@ _build\                  打包工具（launcher 源码、pack.py、assemble.ps1
 
 > `_build\`（launcher/main.go、pack.py、assemble.ps1）与 `runtime\` 体积大，**未入库**；
 > 下面是打包机上的本地步骤，源码仓库只保留启动器代码。
+
+### 一键打包（推荐，Git Bash）
+
+```bash
+cd exe打包文件
+bash 一键打包.sh           # 完整打包
+bash 一键打包.sh --check   # 只检查环境 + 试转图标，不生成大文件
+```
+
+脚本会自动完成：PNG → 多尺寸 ico → rsrc 资源 → `go build`（把图标编进启动器）
+→ `pack.py` → 组装（启动器 + payload + 24 字节尾部索引）→ 校验图标/索引/SHA256。
+依赖 Git Bash、Python 3.8+（Pillow）、Go 1.20+；`rsrc.exe` 缺失时会自动获取。
+
+### 手工分步
 
 ```powershell
 cd exe打包文件
