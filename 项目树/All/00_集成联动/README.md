@@ -120,7 +120,7 @@ lk = linkage.Linkage()                       # 都用真实数据目录
 lk = linkage.Linkage(sandbox_root=r"D:\tmp") # 02/03 走临时目录
 lk = linkage.Linkage(sandbox_root=r"D:\tmp", sandbox_keys=("02", "03", "06"))
 
-lk.status()                                  # 各套状态（01/02/03/05/06/07/08/09/10/13）
+lk.status()                                  # 各套状态（01/02/03/05/06/07/08/09/10）
 lk.call("08", "status", {})                  # 按专题号通用调用
 lk.camera_credibility("CAM-A01-1")           # -> (factor, reason, 详情)
 lk.inspect_site("现场画面.jpg", device_code="CAM-A01-1")   # 02 诊断
