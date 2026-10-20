@@ -22,6 +22,15 @@ import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 
+try:
+    import sso
+except Exception:                                            # noqa: BLE001
+    sso = None
+try:
+    import ui_theme
+except Exception:                                            # noqa: BLE001
+    ui_theme = None
+
 import capture
 import accounts
 import config
@@ -59,6 +68,8 @@ class FaceVerifyGUI:
         # 真正的主界面尺寸在 _do_login 里设置（1180x900）。
         # 要调窗口大小请改 _do_login，改这里没有任何效果。
         self.root.geometry("980x780")
+        if ui_theme is not None:
+            ui_theme.apply(self.root)
 
         self.store = CandidateStore()
         self.candidates = {}
@@ -90,8 +101,10 @@ class FaceVerifyGUI:
         self._ai_busy_since = 0
         self._ai_guard_sched = False
 
-        # 操作人员必须先登录（登录界面直接建在主窗口内，避免 Toplevel/transient 不显示的问题）
-        self._build_login_ui()
+        # 操作人员必须先登录；从总控台进入时用 SSO 令牌直达。
+        # 登录界面直接建在主窗口内，避免 Toplevel/transient 不显示的问题。
+        if not self._try_sso():
+            self._build_login_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ---------------- 登录（直接建在主窗口内，最稳） ----------------
@@ -111,7 +124,7 @@ class FaceVerifyGUI:
 
         ttk.Label(box, text="智能考场", font=("Microsoft YaHei", 20, "bold")).pack(pady=(30, 2))
         ttk.Label(box, text="人脸识别与身份核对系统", font=("Microsoft YaHei", 11),
-                  foreground="#555").pack(pady=(0, 22))
+                  foreground=(ui_theme.DIM if ui_theme else "#555")).pack(pady=(0, 22))
 
         card = ttk.LabelFrame(box, text="操作人员登录", padding=18)
         card.pack(fill="x", padx=20)
@@ -135,7 +148,35 @@ class FaceVerifyGUI:
         ttk.Label(box, text="提示：所有者 owner ｜ 管理员 teacher1（账户与网页端通用）",
                   foreground="#999", font=("Microsoft YaHei", 9)).pack(pady=(16, 0))
         self.root.bind("<Return>", lambda e: self._do_login())
+        if ui_theme is not None:
+            ui_theme.polish(self.root)
         e_p.focus_set()
+
+    def _try_sso(self):
+        """总控台一次登录后直达 01：不再要求输入第二遍账户/口令。"""
+        if sso is None:
+            return False
+        info = sso.verify_launch("01")
+        if not info:
+            return False
+        role = sso.map_role(info["role"], {
+            "owner": accounts.ROLE_OWNER,
+            "admin": accounts.ROLE_ADMIN,
+            "patrol": accounts.ROLE_TEACHER,
+            "invigilator": accounts.ROLE_TEACHER,
+            "checker": accounts.ROLE_TEACHER,
+        }, accounts.ROLE_TEACHER)
+        user = {"uid": 0, "username": info["username"], "role": role,
+                "display_name": info.get("name") or info["username"],
+                "must_change_password": False, "sso": True}
+        try:
+            self._enter_main(user)
+            if ui_theme is not None:
+                ui_theme.polish_later(self.root)
+            return True
+        except Exception:                                    # noqa: BLE001
+            self.user = None
+            return False
 
     def _do_login(self):
         user, err = accounts.authenticate(self.login_user.get(), self.login_pwd.get(),
@@ -144,6 +185,9 @@ class FaceVerifyGUI:
             self.login_msg.config(text=err)
             self.login_pwd.set("")
             return
+        self._enter_main(user)
+
+    def _enter_main(self, user):
         self.user = user
         self.action_log.set_operator(user["username"])
         # 清空登录界面，构建主界面
@@ -155,13 +199,16 @@ class FaceVerifyGUI:
         self.root.title("智能考场 · 人脸识别与身份核对　｜　%s（%s）"
                         % (user.get("display_name") or user["username"],
                            accounts.role_text(user["role"])))
-        self.action_log.log("GUI启动", "操作人=%s 角色=%s"
-                            % (user["username"], accounts.role_text(user["role"])))
+        self.action_log.log("GUI启动", "操作人=%s 角色=%s%s"
+                            % (user["username"], accounts.role_text(user["role"]),
+                               "（总控台单点登录）" if user.get("sso") else ""))
         if user.get("must_change_password"):
             messagebox.showwarning("建议修改口令",
                                    "账户 %s 使用的是默认口令，建议尽快修改：\n"
                                    "「操作记录」→「修改口令」。" % user["username"])
         self._load_data_async()
+        if ui_theme is not None:
+            ui_theme.polish_later(self.root)
 
     # ---------------- UI ----------------
     def _build_ui(self):

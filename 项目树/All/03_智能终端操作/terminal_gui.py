@@ -49,6 +49,10 @@ try:
     import theme as theme_mod             # 统一主题（颜色单一真源，取不到时用下面的兜底色）
 except Exception:
     theme_mod = None
+try:
+    import sso                            # 总控台单点登录令牌
+except Exception:                                            # noqa: BLE001
+    sso = None
 
 # 监控页配色：优先用 theme 的语义色，避免深色页面上突然出现一块白板
 UI_BG = getattr(theme_mod, "BG", "#070d1a")
@@ -224,6 +228,27 @@ class TerminalApp(object):
         self._build_login()
         # 单文件总控台登录后会把账户通过环境变量带进来，免二次输入。
         self._launch_auto_login()
+        self._launch_sso()
+
+    def _launch_sso(self):
+        """总控台签名令牌直达（优先于明文口令方式，账户改名/改口令也不受影响）。"""
+        if sso is None or self.session is not None:
+            return
+        info = sso.verify_launch("03")
+        if not info:
+            return
+        role = info["role"] if info["role"] in config.ROLE_ACTIONS else config.ROLE_ADMIN
+        rooms = ["A-01"] if role == config.ROLE_INVIGILATOR else []
+        self.session = access.Session(
+            info["username"], role, info.get("name") or info["username"], rooms)
+        try:
+            self.store.log("登录", "总控台单点登录 %s（%s）"
+                           % (self.session.username,
+                              config.ROLE_TEXT.get(role, role)),
+                           self.session.username)
+        except Exception:                                    # noqa: BLE001
+            pass
+        self._build_main()
 
     def _launch_auto_login(self):
         """总控台直达登录：只认 EXAM_LAUNCH_USER + EXAM_LAUNCH_PWD + AUTO=1。

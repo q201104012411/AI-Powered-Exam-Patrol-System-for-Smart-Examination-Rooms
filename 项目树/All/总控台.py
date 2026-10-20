@@ -3,9 +3,9 @@ r"""
 智能考场 AI 巡考系统 · 总控台（目录树 + 账户登录）
 
 界面：
+  启动时统一登录一次（账户 + 口令），之后进入模块不再重复输入；
   左侧「系统结构目录」按 业务 / 安全 / AI / 集成 分组列出全部子系统；
-  选中模块看说明，双击（或回车 / 「进入模块」）弹出账户 + 口令；
-  校验通过后用自带 runtime 启动对应模块。
+  选中模块看说明，双击（或回车 / 「进入模块」）用自带 runtime 直接启动。
 
 账户：
   默认值与 03 智能终端一致（owner/EDY_POWERQ、admin/admin、patrol1/patrol1、
@@ -14,7 +14,8 @@ r"""
 
 诚实说明：
   · 这是**入口门禁**，不是文件系统权限；拿到解压目录的人仍可直接运行模块脚本。
-  · 各模块内部可能还有自己的登录（03 会自动带入总控台账户；其余模块按原样）。
+  · 登录一次后，总控台给模块签发 HMAC 令牌（sso.py）：01/02/03/05/08 自动建会话，
+    不再要求第二遍口令；直接双击模块自己的 .bat/.py 时仍走原登录页。
   · 总控台退出不会关闭已启动的模块进程。
 """
 import json
@@ -26,6 +27,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 
 import launcher_auth as auth
+import sso
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -103,10 +105,12 @@ MODULE_ORDER = ["01", "02", "03", "10", "12",
 class LoginDialog(object):
     """账户 + 口令弹窗；成功时 result = {"rec":..., "pwd":...}"""
 
-    def __init__(self, app, module_code=None, title=None, require_owner=False):
+    def __init__(self, app, module_code=None, title=None, require_owner=False,
+                 subtitle=None):
         self.app = app
         self.code = module_code
         self.require_owner = require_owner
+        self.subtitle = subtitle
         self.result = None
         self.win = tk.Toplevel(app.root)
         self.win.title(title or "登录")
@@ -123,10 +127,12 @@ class LoginDialog(object):
         top = tk.Frame(self.win, bg=PANEL, height=86)
         top.pack(fill="x")
         top.pack_propagate(False)
-        tk.Label(top, text="🔐  进入模块" if module_code else "🔐  账户验证",
+        heading = ("🔐  进入模块" if module_code
+                   else ("🔐  统一登录" if subtitle else "🔐  账户验证"))
+        tk.Label(top, text=heading,
                  bg=PANEL, fg=ACCENT, font=FONT_H1, anchor="w",
                  padx=18).pack(anchor="w", pady=(16, 2))
-        sub = (meta.get("name") or module_code or "总控台账户管理")
+        sub = (subtitle or meta.get("name") or module_code or "总控台账户管理")
         tk.Label(top, text=sub, bg=PANEL, fg=FG, font=FONT,
                  anchor="w", padx=18).pack(anchor="w")
 
@@ -200,7 +206,9 @@ class LoginDialog(object):
         rec, why = self.app.accounts.authenticate(user, pwd)
         if rec is None:
             self.err.config(text=why or "账户或口令不正确")
-            self.app.audit("login", user, self.code or "-", False, why)
+            self.app.audit("login", user,
+                           self.code or ("总控台登录" if self.subtitle else "-"),
+                           False, why)
             try:
                 self.win.bell()
             except Exception:
@@ -219,7 +227,9 @@ class LoginDialog(object):
             return
         self.result = {"rec": rec, "pwd": pwd}
         self.app.last_user = user
-        self.app.audit("login", user, self.code or "账户管理", True, "")
+        self.app.audit("login", user,
+                       self.code or ("总控台登录" if self.subtitle else "账户管理"),
+                       True, "")
         self.close()
 
     def close(self):
@@ -242,6 +252,7 @@ class App(object):
         self.root = root
         self.accounts = auth.AccountStore(ACC_PATH)
         self.last_user = "owner"
+        self.session = None                  # 一次登录，后续进入模块直接复用
         self._procs = {}
         self._current = None
         self._missing = set()
@@ -254,6 +265,8 @@ class App(object):
         self._populate_tree()
         self._check_env()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # 启动即要求统一登录；登录一次后进入任何模块都不再弹口令框。
+        root.after(180, self._startup_login)
 
     # ---------------------------------------------------------------- 外观
     def _build_style(self):
@@ -326,10 +339,15 @@ class App(object):
         left.pack(side="left", fill="both", expand=True, padx=18)
         tk.Label(left, text="智能考场 · AI 巡考系统", bg=PANEL, fg=FG,
                  font=FONT_TITLE, anchor="w").pack(anchor="w", pady=(16, 0))
-        tk.Label(left, text="总控台 · 按结构目录进入子系统（账户 + 口令）",
+        tk.Label(left, text="总控台 · 登录一次，所有模块直接进入（不再重复输入口令）",
                  bg=PANEL, fg=DIM, font=FONT_SMALL, anchor="w").pack(anchor="w")
         right = tk.Frame(head, bg=PANEL)
         right.pack(side="right", padx=14)
+        self.user_badge = tk.Label(right, text="👤 未登录", bg=PANEL, fg=DIM,
+                                   font=FONT_SMALL)
+        self.user_badge.pack(side="left", padx=(0, 8))
+        ttk.Button(right, text="🔁 切换账号", style="Mini.TButton",
+                   command=self._switch_account).pack(side="left", padx=4)
         ttk.Button(right, text="👥 账户管理", style="Mini.TButton",
                    command=self._account_admin).pack(side="left", padx=4)
         ttk.Button(right, text="📜 审计日志", style="Mini.TButton",
@@ -410,11 +428,8 @@ class App(object):
         self.btn_enter = ttk.Button(btns, text="🚀 进入模块", style="Accent.TButton",
                                     command=self._try_enter)
         self.btn_enter.pack(side="left")
-        self.btn_dir = ttk.Button(btns, text="📂 打开目录", style="Mini.TButton",
-                                  command=self._open_current_dir)
-        self.btn_dir.pack(side="left", padx=10)
         ttk.Button(btns, text="🧾 模块说明", style="Mini.TButton",
-                   command=self._module_help).pack(side="left")
+                   command=self._module_help).pack(side="left", padx=10)
 
     def _build_footer(self):
         foot = tk.Frame(self.root, bg=BG)
@@ -518,8 +533,50 @@ class App(object):
         else:
             self.d_status.config(text="✅ 入口就绪 · 双击或点「进入模块」", fg=OK)
             self.btn_enter.state(["!disabled"])
-        self.btn_dir.state(["!disabled"] if os.path.isdir(
-            os.path.join(PKG, meta.get("dir", "").replace("/", os.sep))) else ["disabled"])
+
+    # ---------------------------------------------------------------- 统一登录
+    def _startup_login(self):
+        """启动时登录一次；之后进入模块、账户管理都复用这个会话。"""
+        if self.session is not None:
+            return
+        dlg = LoginDialog(
+            self, module_code=None,
+            title="登录 · 智能考场 AI 巡考系统",
+            subtitle="输入一次账户 + 口令；进入各模块不再重复输入")
+        res = dlg.show()
+        if not res:
+            self._on_close()
+            return
+        self.session = res
+        self._refresh_user_badge()
+        rec = res["rec"]
+        self.status.config(
+            text="已登录：%s（%s） · 可直接双击模块进入"
+                 % (rec.get("username"), auth.role_text(rec.get("role"))),
+            fg=OK)
+
+    def _refresh_user_badge(self):
+        try:
+            if self.session:
+                rec = self.session["rec"]
+                text = "👤 %s（%s）" % (rec.get("username"),
+                                       auth.role_text(rec.get("role")))
+                self.user_badge.config(text=text, fg=ACCENT)
+            else:
+                self.user_badge.config(text="👤 未登录", fg=DIM)
+        except tk.TclError:
+            pass
+
+    def _switch_account(self):
+        if self.session is None:
+            self._startup_login()
+            return
+        if not messagebox.askyesno("切换账号", "退出当前账号并重新登录？"):
+            return
+        self.session = None
+        self._refresh_user_badge()
+        self.status.config(text="已退出登录", fg=DIM)
+        self.root.after(80, self._startup_login)
 
     # ---------------------------------------------------------------- 登录 / 启动
     def _try_enter(self):
@@ -542,12 +599,20 @@ class App(object):
                                 "%s 已在运行（PID %s）。\n请到任务栏查看它的窗口。"
                                 % (meta.get("name", code), proc.pid))
             return
-        dlg = LoginDialog(self, module_code=code,
-                          title="登录 · %s" % meta.get("name", code))
-        res = dlg.show()
-        if not res:
+        if self.session is None:
+            self._startup_login()
+            if self.session is None:
+                return
+        rec = self.session["rec"]
+        if not self.accounts.can_access(rec, code):
+            messagebox.showwarning(
+                "无权进入",
+                "当前账户 %s 无权进入「%s」。\n可进入：%s\n\n"
+                "如需切换，请点右上角「切换账号」。"
+                % (rec.get("username"), meta.get("name", code),
+                   self.accounts.modules_text(rec)))
             return
-        self._launch(code, res["rec"], res["pwd"])
+        self._launch(code, rec, self.session.get("pwd", ""))
 
     def _launch(self, code, rec, pwd):
         meta = MAN.get("modules", {}).get(code, {})
@@ -559,12 +624,21 @@ class App(object):
         env = os.environ.copy()
         env["PYTHONUTF8"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
-        # 03 支持总控台账户直达；其他模块内部若还有登录，按各自账户登录
-        if code == "03" and rec.get("username") in (
-                "owner", "admin", "patrol1", "inv01", "check1"):
-            env["EXAM_LAUNCH_USER"] = rec["username"]
+        # 单点登录：签名令牌 + 包根 PYTHONPATH，模块读 sso.py 后直接建会话。
+        token = sso.make_token(rec.get("username", ""), rec.get("role", ""),
+                               rec.get("name", ""), [code], ttl=900)
+        env["EXAM_SSO_TOKEN"] = token
+        env["EXAM_SSO_USER"] = rec.get("username", "")
+        env["EXAM_SSO_ROLE"] = rec.get("role", "")
+        env["EXAM_SSO_NAME"] = rec.get("name", "")
+        # 兼容 03 既有的 EXAM_LAUNCH_* 直达方式（令牌校验失败时仍可兜底）；
+        # 其他模块只拿签名令牌，不把明文口令传给子进程。
+        if code == "03":
+            env["EXAM_LAUNCH_USER"] = rec.get("username", "")
             env["EXAM_LAUNCH_PWD"] = pwd or ""
             env["EXAM_LAUNCH_AUTO"] = "1"
+        env["PYTHONPATH"] = PKG + (
+            os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         try:
             if meta.get("kind") == "console":
                 if not os.path.isfile(PY):
@@ -604,18 +678,7 @@ class App(object):
             self.d_status.config(text="○ 已退出（退出码 %s）" % proc.returncode,
                                  fg=DIM)
 
-    # ---------------------------------------------------------------- 目录 / 帮助
-    def _open_current_dir(self):
-        code = self._selected_code() or self._current
-        if not code:
-            return
-        meta = MAN.get("modules", {}).get(code, {})
-        d = os.path.join(PKG, meta.get("dir", "").replace("/", os.sep))
-        try:
-            os.startfile(d)
-        except Exception as e:                       # noqa: BLE001
-            messagebox.showerror("打不开", str(e))
-
+    # ---------------------------------------------------------------- 帮助
     def _module_help(self):
         code = self._selected_code() or self._current
         if not code:
@@ -641,9 +704,10 @@ class App(object):
         content = """智能考场 AI 巡考系统 · 总控台
 
 一、怎么进入模块
-  1) 左侧「系统结构目录」单击模块 -> 右侧看说明；
-  2) 双击模块（或回车 / 点「进入模块」）-> 输入账户 + 口令；
-  3) 校验通过后，用包内自带 runtime 启动对应模块。
+  1) 启动后先在「统一登录」输入一次账户 + 口令；
+  2) 左侧「系统结构目录」单击模块 -> 右侧看说明；
+  3) 双击模块（或回车 / 点「进入模块」）-> 直接启动，不再重复输入口令；
+     模块内部登录由总控台签发的 SSO 令牌自动完成。
 
 二、默认账户（首次登录后请到「账户管理」修改）
   owner    / EDY_POWERQ   所有者：全部模块
@@ -655,8 +719,9 @@ class App(object):
 三、账户与权限
   · 账户存  总控台账户.json  （PBKDF2-HMAC-SHA256 加盐哈希，不存明文）
   · owner 可新增账户、重置口令、调整“可进入模块”范围；
-  · 该门禁只管“从总控台进入”这条路径；各模块内部若还有自己的登录，
-    仍按各模块账户登录（03 会自动带入总控台账户，其余模块按原样）。
+  · 该门禁是“从总控台进入”这条路径的唯一入口；登录后进入各模块
+    由 SSO 令牌自动完成，01/02/03/05/08 不再要求二次输入口令。
+  · 直接双击模块自己的 .bat/.py（不经过总控台）时，模块仍保留原有登录页。
 
 四、数据与审计
   · 登录/进入成功与失败都写  总控台审计.jsonl ；
@@ -678,12 +743,19 @@ class App(object):
 
     # ---------------------------------------------------------------- 账户管理
     def _account_admin(self):
-        dlg = LoginDialog(self, module_code=None, title="账户管理登录",
-                          require_owner=True)
-        res = dlg.show()
-        if not res:
+        if self.session is None:
+            self._startup_login()
+            if self.session is None:
+                return
+        rec = self.session["rec"]
+        if rec.get("role") != "owner":
+            messagebox.showwarning(
+                "需要所有者",
+                "账户管理仅允许「所有者」账户。\n当前账户：%s（%s）\n\n"
+                "请点右上角「切换账号」，用 owner 登录。"
+                % (rec.get("username"), auth.role_text(rec.get("role"))))
             return
-        self._open_account_manager(res["rec"])
+        self._open_account_manager(rec)
 
     def _open_account_manager(self, owner_rec):
         win = tk.Toplevel(self.root)

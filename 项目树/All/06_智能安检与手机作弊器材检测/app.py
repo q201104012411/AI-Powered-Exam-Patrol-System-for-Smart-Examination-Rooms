@@ -22,6 +22,11 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+try:
+    import ui_theme
+except Exception:                                            # noqa: BLE001
+    ui_theme = None
+
 import config
 import data_crypto
 import flow as flow_mod
@@ -72,12 +77,17 @@ class App(object):
         self._grid_locker = None
         self._log_lines = []
         self._stop = False
+        if ui_theme is not None:
+            ui_theme.apply(self.root)
 
         self._build_header()
         self._build_tabs()
         self._build_status()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.refresh_all()
+        if ui_theme is not None:
+            ui_theme.polish(self.root)
+            ui_theme.polish_later(self.root, 600)
         self.root.after(1000, self._tick)
 
     # ---------------- 事件与刷新 ----------------

@@ -1,7 +1,8 @@
-# 13 AI 火场识别与自动报警 —— 已融入 02 / 03（去向说明）
+# 13 AI 火场识别与自动报警 —— 已融入 08（去向说明）
 
 > ⚠ **本模块已于 2026-10-15 融入，不再是独立运行的专题。**
-> 请**不要**从此目录启动；运行入口在 `02_摄像头核查与视频质量诊断` 与 `03_智能终端操作`。
+> 2026-10-20 起火检从 02 移到 `08_试卷流转与保密室智能监控`；
+> 请**不要**从此目录启动，运行入口是 08 的实时画面页。
 >
 > 下面第二节起保留的是**融入前的原始说明**（作为历史记录）。
 > 融入后的真实接口与修复记录见本文件末尾第五节。
@@ -19,25 +20,25 @@
 
 | 原文件（本目录） | 现在的位置 | 说明 |
 | --- | --- | --- |
-| `detect.py`（五信号融合算法） | `02_摄像头核查与视频质量诊断/fire_detect.py` | 合并为同一文件，31 个阈值默认值内联 |
+| `detect.py`（五信号融合算法） | `08_试卷流转与保密室智能监控/fire_detect.py` | 合并为同一文件，31 个阈值默认值内联 |
 | `detector.py`（后端装配） | 同上 | 同上 |
-| `models.py` 的 `Detection` / `FireEvent` | 同上（内联同名类） | 去掉跨模块同名依赖（原 `config`/`models` 与 02 撞名） |
-| `config.py` 的 31 个阈值键 | 同上（`SETTINGS_DEFAULT` + `load_settings()`） | 可用 02 数据目录下的 `fire_settings.json` 覆盖 |
-| `ui_popup.py` / `tray.py` / `ui_main.py` | **未搬迁** | 03 终端与 02 界面已承担弹出/托盘/大屏职责 |
-| `video.py` / `storage.py` 的事件库与取证 | **未搬迁** | 02 有既有画质/工单/审计体系，证据与留痕由 02 记录 |
+| `models.py` 的 `Detection` / `FireEvent` | 同上（内联同名类） | 去掉跨模块同名依赖 |
+| `config.py` 的 31 个阈值键 | 同上（`SETTINGS_DEFAULT` + `load_settings()`） | 可用 08 数据目录下的 `fire_settings.json` 覆盖 |
+| `ui_popup.py` / `tray.py` / `ui_main.py` | **未搬迁** | 08 告警中心已承担弹出/处置职责 |
+| `video.py` / `storage.py` 的事件库与取证 | **未搬迁** | 08 有既有告警/审计体系，证据与留痕由 08 记录 |
 
 ### 融入后的调用方式
 
 ```python
-# 02 内已接好（gui._cam_fire_update -> fire_detect.FireWatch），无需手工调用
+# 08 内已接好（gui._fire_worker -> fire_detect.FireWatch），无需手工调用
 import fire_detect
 w = fire_detect.FireWatch()                  # 每路一个实例
-r = w.push_frame(frame, camera_name="CAM-A01-1")
+r = w.push_frame(frame, camera_name="LIVE1")
 if r["just_triggered"]:                      # 连续 confirm_frames 帧 + 冷却，只报一次
-    ...                                      # 02 经 linkage_bridge.report_fire 上报 03
+    ...                                      # 08 写入 AlarmHub（FIRE_ALARM / FIRE_SMOKE）
 ```
 
-告警码（**已在 03 的 `config.ALERT_CODE_LEVEL` / `ALERT_CODE_TEXT` 注册**）：
+告警码（**已在 08 的 `config.ALERT_CODE_LEVEL` / `ALERT_CODE_TEXT` 注册**）：
 
 | 码 | 级别 | 处置 |
 | --- | --- | --- |
@@ -58,7 +59,7 @@ if r["just_triggered"]:                      # 连续 confirm_frames 帧 + 冷�
 
 算法与两条安全设计**原样保留**：单帧永不算数（连续 4 帧）、静态火色封顶（红布/红衣/红灯不报火警）。
 
-融入后实测（合成画面，`02.../_冒烟_火检.py`，**17/17 通过**）：
+融入后实测（合成画面，`08.../_冒烟_火检.py`，**17/17 通过**）：
 
 ```
 空白/纯灰画面   -> 不报警（score 0.000）

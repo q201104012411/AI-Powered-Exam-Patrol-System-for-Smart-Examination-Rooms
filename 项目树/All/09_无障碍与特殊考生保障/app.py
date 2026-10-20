@@ -54,6 +54,11 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+try:
+    import ui_theme
+except Exception:                                            # noqa: BLE001
+    ui_theme = None
+
 import config
 import access
 import data_crypto
@@ -120,6 +125,8 @@ class App(object):
         root.title("无障碍与特殊考生保障 · 专题09（人工兜底不可取消）")
         root.geometry("1360x880")
         root.minsize(1120, 720)
+        if ui_theme is not None:
+            ui_theme.apply(self.root)
 
         self._build_header()
         self._build_tabs()
@@ -130,6 +137,9 @@ class App(object):
             self.refresh_all()
         except Exception as e:                                     # noqa: BLE001
             self._log("首次刷新异常：%s: %s" % (type(e).__name__, str(e)[:120]))
+        if ui_theme is not None:
+            ui_theme.polish(self.root)
+            ui_theme.polish_later(self.root, 600)
         try:
             self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         except Exception:                                          # noqa: BLE001

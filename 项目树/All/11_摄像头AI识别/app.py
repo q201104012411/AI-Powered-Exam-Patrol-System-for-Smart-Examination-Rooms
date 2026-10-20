@@ -21,6 +21,11 @@ from tkinter import ttk, filedialog, messagebox
 
 import config
 
+try:
+    import ui_theme
+except Exception:                                            # noqa: BLE001
+    ui_theme = None
+
 config.ensure_stdio("app_console.log")
 
 try:
@@ -108,8 +113,13 @@ class App:
         self._closing = False
         self._editing_id = None
         self._addr_options = []    # 下拉候选
+        if ui_theme is not None:
+            ui_theme.apply(self.root)
 
         self._build_ui()
+        if ui_theme is not None:
+            ui_theme.polish(self.root)
+            ui_theme.polish_later(self.root, 500)
         self._reload_table()
         self._refresh_ai_tab()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)

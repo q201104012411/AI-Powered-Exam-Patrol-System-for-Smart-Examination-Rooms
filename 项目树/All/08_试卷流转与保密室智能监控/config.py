@@ -198,6 +198,9 @@ ALERT_CODE_LEVEL = {
     "VIDEO_OFFLINE":        LEVEL_ORANGE,   # 机位离线
     "VIDEO_RECORD_BREAK":   LEVEL_ORANGE,   # 录像丢段
     "COVER_RATE_LOW":       LEVEL_ORANGE,   # 覆盖率不达标
+    # 火场识别（从 02 移入）
+    "FIRE_ALARM":           LEVEL_RED,      # 火焰确认
+    "FIRE_SMOKE":           LEVEL_ORANGE,   # 烟雾疑似
     # 流转
     "SEAL_BROKEN":          LEVEL_RED,      # 电子铅封异常开启
     "ESCORT_ROUTE_DEVIATE": LEVEL_RED,      # 押运路线偏离
@@ -233,6 +236,8 @@ ALERT_CODE_TEXT = {
     "VIDEO_OFFLINE": "监控机位离线",
     "VIDEO_RECORD_BREAK": "录像连续性问题",
     "COVER_RATE_LOW": "六面覆盖率不达标",
+    "FIRE_ALARM": "火焰确认（火场识别）",
+    "FIRE_SMOKE": "烟雾疑似（火场识别）",
     "SEAL_BROKEN": "电子铅封异常开启",
     "ESCORT_ROUTE_DEVIATE": "押运路线偏离",
     "ESCORT_VIDEO_LOST": "押运车内视频中断",

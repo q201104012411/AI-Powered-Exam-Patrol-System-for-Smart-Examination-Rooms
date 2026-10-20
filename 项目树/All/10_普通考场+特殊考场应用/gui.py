@@ -30,6 +30,11 @@ os.chdir(HERE)
 
 import config                                                  # noqa: E402
 
+try:
+    import ui_theme                                            # noqa: E402
+except Exception:                                              # noqa: BLE001
+    ui_theme = None
+
 config.ensure_stdio("gui_console.log")
 
 import admission                                                # noqa: E402
@@ -44,9 +49,9 @@ import rooms as rooms_mod                                       # noqa: E402
 import storage                                                  # noqa: E402
 
 TITLE = "普通考场 + 特殊考场应用 · 智能考场 AI 巡考系统"
-BG = "#f4f6f8"
-ACCENT = "#1c5f9e"
-SPECIAL_TAG = "#b45309"
+BG = ui_theme.BG if ui_theme else "#f4f6f8"
+ACCENT = ui_theme.PANEL if ui_theme else "#1c5f9e"
+SPECIAL_TAG = ui_theme.WARN if ui_theme else "#b45309"
 
 
 class App(object):
@@ -61,8 +66,14 @@ class App(object):
         self._alert_index = {}
         self._beh_map = {}
         self.kpi_detail_room = None         # 指标页当前展示的考场明细
+        if ui_theme is not None:
+            ui_theme.apply(self.root)
         self._build()
+        if ui_theme is not None:
+            ui_theme.polish(self.root)
         self.refresh_rooms()
+        if ui_theme is not None:
+            ui_theme.polish_later(self.root)
 
     # =====================================================================
     # 布局

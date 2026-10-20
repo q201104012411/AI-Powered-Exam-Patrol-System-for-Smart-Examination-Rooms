@@ -43,6 +43,15 @@ try:
 except Exception:
     HAS_PIL = False
 
+try:
+    import sso
+except Exception:                                            # noqa: BLE001
+    sso = None
+try:
+    import ui_theme
+except Exception:                                            # noqa: BLE001
+    ui_theme = None
+
 import config
 import camera_stream
 import diagnose
@@ -193,6 +202,8 @@ class App(object):
         self.root.title("摄像头核查与视频质量诊断")
         self.root.geometry("1280x820")
         self.root.minsize(1024, 700)
+        if ui_theme is not None:
+            ui_theme.apply(self.root)
         self.store = storage.Store()
         self.accounts = web_accounts.Accounts(self.store)
         self.user = None                     # web_accounts.Session
@@ -202,7 +213,40 @@ class App(object):
         self.reporter = report_mod.Reporter(self.store, runner=self.runner, orders=self.orders)
         # 关窗口 = 停止所有取流（否则后台读线程/网络连接会拖住进程退出）
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-        self._build_login()                  # 先登录，登录成功后原地切主界面
+        if not self._try_sso():
+            self._build_login()              # 直接启动时仍走原登录页
+
+    def _try_sso(self):
+        """总控台一次登录后直达 02：不再要求输入第二遍账户/口令。"""
+        if sso is None:
+            return False
+        info = sso.verify_launch("02")
+        if not info:
+            return False
+        role = sso.map_role(info["role"], {
+            "owner": web_accounts.ROLE_OWNER,
+            "admin": web_accounts.ROLE_ADMIN,
+            "patrol": web_accounts.ROLE_ADMIN,
+            "invigilator": web_accounts.ROLE_ADMIN,
+            "checker": web_accounts.ROLE_ADMIN,
+        }, web_accounts.ROLE_ADMIN)
+        self.user = web_accounts.Session(
+            info["username"], role, info.get("name") or info["username"])
+        try:
+            self.store.log("单点登录", "%s（%s，来自总控台）"
+                           % (self.user.username,
+                              web_accounts.role_text(self.user.role)),
+                           self.user.username)
+        except Exception:                                    # noqa: BLE001
+            pass
+        try:
+            self._build()
+            if ui_theme is not None:
+                ui_theme.polish_later(self.root)
+            return True
+        except Exception:                                    # noqa: BLE001
+            self.user = None
+            return False
 
     def _on_close(self):
         """退出前尽力收尾：停取流、取消定时任务，然后销毁窗口。
@@ -243,7 +287,7 @@ class App(object):
 
         ttk.Label(box, text="智能考场", font=("Microsoft YaHei", 20, "bold")).pack(pady=(24, 2))
         ttk.Label(box, text="摄像头核查与视频质量诊断", font=("Microsoft YaHei", 11),
-                  foreground="#555").pack(pady=(0, 20))
+                  foreground=(ui_theme.DIM if ui_theme else "#555")).pack(pady=(0, 20))
 
         card = ttk.LabelFrame(box, text="操作人员登录", padding=18)
         card.pack(fill="x", padx=16)
@@ -272,6 +316,8 @@ class App(object):
         ttk.Label(box, text="默认账户：owner（所有者）、teacher1（管理员）　口令由系统管理员掌握，不在界面显示",
                   foreground=GRAY_MUTED, font=FONT_SMALL).pack()
         self.root.bind("<Return>", lambda _e: self._do_login())
+        if ui_theme is not None:
+            ui_theme.polish(self.root)
         e_u.focus_set()
 
     def _do_login(self):
@@ -282,6 +328,8 @@ class App(object):
             return
         self.user = s
         self._build()                        # 原地切换成主界面
+        if ui_theme is not None:
+            ui_theme.polish_later(self.root)
         if self.login_user.get().strip() in web_accounts.DEFAULT_ACCOUNTS:
             self.status.config(text="提示：%s 正在使用默认口令，建议在「🔑 修改口令」里改掉"
                                      % s.username)
@@ -453,7 +501,10 @@ class App(object):
             self.dtree.heading(c, text=t)
             self.dtree.column(c, width=w, anchor="w")
         self.dtree.pack(fill="both", expand=True)
-        self.dtree.tag_configure("nobase", background="#fff6e0")
+        self.dtree.tag_configure(
+            "nobase",
+            background=("#3a2f14" if ui_theme else "#fff6e0"),
+            foreground=("#fbbf24" if ui_theme else "#000000"))
 
     def refresh_devices(self):
         for i in self.dtree.get_children():
@@ -599,8 +650,12 @@ class App(object):
             self.ctree.heading(c, text=t)
             self.ctree.column(c, width=w, anchor="w")
         self.ctree.pack(fill="both", expand=True)
-        self.ctree.tag_configure("bad", background="#ffe3e3", foreground="#a00000")
-        self.ctree.tag_configure("warn", background="#fff6e0", foreground="#8a5a00")
+        self.ctree.tag_configure(
+            "bad", background=("#3a1a1e" if ui_theme else "#ffe3e3"),
+            foreground=("#f87171" if ui_theme else "#a00000"))
+        self.ctree.tag_configure(
+            "warn", background=("#3a2f14" if ui_theme else "#fff6e0"),
+            foreground=("#fbbf24" if ui_theme else "#8a5a00"))
         self.ctree.bind("<<TreeviewSelect>>", lambda _e: self._show_check())
         self.detail = tk.Text(f, height=6, wrap="word", font=MONO)
         self.detail.pack(fill="x", pady=(PAD_BAR, 0))
@@ -1415,10 +1470,6 @@ class App(object):
         # 单帧瞬时动作会被时间维度抑制（正是"坐着没动却报偏转"那类误报的解药）
         self.mon_cheat = tk.BooleanVar(value=True)
         self._cheat_watches = {}
-        # 火场识别（13 融入本模块的 fire_detect）：火焰/烟雾，人身安全事件，
-        # 与作弊识别并行；单帧不算数（连续 confirm_frames 帧）且静态火色封顶
-        self.mon_fire = tk.BooleanVar(value=True)
-        self._fire_watches = {}
         self.mon_ai_chk = ttk.Checkbutton(
             mid, text="AI 辅助识别（逐人：绿=正常 橙=异常 红=越界，考场监控默认开启）",
             variable=self.mon_ai)
@@ -1427,10 +1478,6 @@ class App(object):
             mid, text="作弊识别（时序：动作持续才告警，单帧动作自动抑制）",
             variable=self.mon_cheat)
         self.mon_cheat_chk.pack(side="left", padx=(12, 0))
-        self.mon_fire_chk = ttk.Checkbutton(
-            mid, text="火场识别（火焰/烟雾，连续帧确认）",
-            variable=self.mon_fire)
-        self.mon_fire_chk.pack(side="left", padx=(12, 0))
 
         self.mon_status = ttk.Label(bar, text="就绪", foreground=GRAY_HINT)
         self.mon_status.pack(side="right")
@@ -1459,7 +1506,8 @@ class App(object):
 
     def _make_scroll_area(self, parent):
         """可滚动容器：Canvas + 竖向滚动条 + 滚轮绑定，返回 (canvas, 内容 Frame)"""
-        canvas = tk.Canvas(parent, highlightthickness=0, bg="#f4f4f4",
+        canvas = tk.Canvas(parent, highlightthickness=0,
+                           bg=(ui_theme.BG if ui_theme else "#f4f4f4"),
                            yscrollincrement=30)
         canvas.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
@@ -1536,7 +1584,9 @@ class App(object):
             code = dev.code
             # tk.LabelFrame 支持 highlightbackground，可做状态色边框
             frame = tk.LabelFrame(self.mon_grid, text=" %s · %s " % (room, name),
-                                  bg="#f9f9f9", fg="#333", font=FONT_SMALL,
+                                  bg=(ui_theme.PANEL if ui_theme else "#f9f9f9"),
+                                  fg=(ui_theme.FG if ui_theme else "#333"),
+                                  font=FONT_SMALL,
                                   highlightthickness=2, highlightbackground=CAM_COLORS["idle"])
             frame.grid(row=i // cols, column=i % cols, sticky="nsew", padx=6, pady=6)
             self.mon_grid.rowconfigure(i // cols, weight=1)
@@ -1883,9 +1933,6 @@ class App(object):
         # 显示平滑后的人数（避免读数在 15/16/17 之间乱跳）
         # —— 作弊识别要在这一行之前喂帧，否则面板上的作弊风险会慢一帧
         self._cam_cheat_update(code, panel, persons, ai_shape)
-        # 火场识别（13 已融入本模块的 fire_detect）：与作弊识别并列，同样只在
-        # 真正跑过分析的帧上执行；用原始分析帧（小图会丢远处小火点）
-        self._cam_fire_update(code, panel, frame)
         self._cam_set_ai(code, panel.get("ai_count", len(persons)), viol)
         # 顶部信息条与汇总限频刷新，避免每路每次分析都去改 Tk 控件
         now_ms = time.time() * 1000.0
@@ -2021,88 +2068,6 @@ class App(object):
         except Exception:
             pass
 
-    # ================= 火场识别（13 融入本模块） =================
-    def _fire_watch_for(self, code):
-        """每路一个 FireWatch；不可用时如实说明，不静默假装在跑"""
-        watch = getattr(self, "_fire_watches", {}).get(code)
-        if watch is None:
-            try:
-                import fire_detect
-            except Exception as e:
-                self._mon_log_line("火场识别不可用：%s" % e)
-                return None
-            try:
-                watch = fire_detect.FireWatch()
-                self._mon_log_line("火场识别已启用：%s" % watch.backend_name)
-                self._fire_watches[code] = watch
-            except Exception as e:
-                self._mon_log_line("火场识别初始化失败：%s" % e)
-                return None
-        return watch
-
-    def _cam_fire_update(self, code, panel, frame):
-        """把原始分析帧喂给火检；只有确认火警（连续帧 + 冷却）才上报 03。"""
-        if not (getattr(self, "mon_fire", None) and self.mon_fire.get()):
-            panel["fire"] = None
-            return
-        if frame is None:
-            return
-        watch = self._fire_watch_for(code)
-        if watch is None:
-            panel["fire"] = {"ok": False, "reason": "火场识别不可用"}
-            return
-        try:
-            r = watch.push_frame(frame, camera_name=code)
-        except Exception as e:
-            panel["fire"] = {"ok": False, "reason": "火检异常：%s" % e}
-            return
-        panel["fire"] = r
-        if not r.get("ok") or not r.get("just_triggered"):
-            return
-        level = r.get("level") or "warning"
-        alert_code = "FIRE_ALARM" if level == "alarm" else "FIRE_SMOKE"
-        dev = self._dev_by_code(code)
-        text = "火警 %s %s：%s" % (code, level, r.get("reason") or "")
-        ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        self._behavior_history.append({"ts": ts, "code": code, "text": text})
-        self._behavior_history = self._behavior_history[-50:]
-        panel["history"] = (panel.get("history", []) + [
-            {"ts": ts[-8:], "text": text}])[-10:]
-        self._mon_log_line("【%s】火场识别：%s（%s）"
-                           % (code, level, r.get("reason") or ""))
-        self._beep()
-        if level == "alarm":
-            self._cam_set_border(code, "error")
-        try:
-            import linkage_bridge
-            linkage_bridge.report_fire(
-                device_code=code, alert_code=alert_code,
-                score=float(r.get("score") or 0.0),
-                reason=r.get("reason") or "",
-                room_id=dev.room_id if dev else "",
-                operator=self.user.username if self.user else "02_ai")
-        except Exception:
-            pass
-
-    @staticmethod
-    def _fire_bar_text(panel):
-        """面板 AI 行里追加的火检状态文字（正常时不占地方）"""
-        r = (panel or {}).get("fire")
-        if not r:
-            return ""
-        if not r.get("ok"):
-            return "　｜　火检：%s" % (r.get("reason") or "不可用")
-        if r.get("level"):
-            return "　｜　火情：%s %.2f" % (r.get("level"), float(r.get("score") or 0))
-        return ""
-
-    def _fire_available(self):
-        try:
-            import fire_detect                     # noqa: F401
-            return True
-        except Exception:
-            return False
-
     def _cam_set_ai(self, code, n_person, n_cross):
         """逐路显示 AI 识别人数：正常绿、有越界橙红，未开 AI 时留空"""
         panel = self._mon_panels.get(code)
@@ -2116,7 +2081,6 @@ class App(object):
         else:
             text, color = "AI 识别中：%d 人" % n_person, CAM_COLORS["playing"]
         text += self._cheat_bar_text(panel)
-        text += self._fire_bar_text(panel)
         # 内容没变就不碰控件（Tk 的 config 会触发重绘，路数一多非常吃 CPU）
         if panel.get("ai_text") == text:
             return

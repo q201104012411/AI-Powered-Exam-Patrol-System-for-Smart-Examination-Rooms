@@ -10,6 +10,7 @@ OUT = os.path.join(ROOT, "_build", "payload.zip")
 
 INCLUDES = [
     "总控台.py", "launcher_auth.py", "模块清单.json", "icon",
+    "sso.py", "ui_theme.py",
     "runtime",
     "00_集成联动", "01_人脸识别与身份核对", "02_摄像头核查与视频质量诊断",
     "03_智能终端操作", "04_巡考机器人", "05_考生数据保护",
@@ -26,8 +27,11 @@ EXCLUDE_DIR_NAMES = {"__pycache__", "_build", ".git", ".idea",
 EXCLUDE_SUBSTR = (
     "/data/logs/", "/data/reports/", "/data/attachments/",
     "/data/captures/", "/runtime/Scripts/", "/runtime/Include/",
+    # 05 的密钥环用 Windows DPAPI 加密，换机器/换 Windows 账户就解不开；
+    # 不随包分发，首次运行时由模块自己生成当前用户可用的密钥。
+    "/05_考生数据保护/data/",
 )
-EXCLUDE_FILES = {"总控台账户.json", "总控台审计.jsonl",
+EXCLUDE_FILES = {"总控台账户.json", "总控台审计.jsonl", "sso.key",
                  "_融入火检到02.py"}
 EXCLUDE_EXT = (".pyc", ".pyo", ".log", ".tmp", ".pdb")
 
@@ -36,6 +40,9 @@ def skip(rel, is_dir):
     rel_u = rel.replace("\\", "/")
     parts = rel_u.split("/")
     if any(p in EXCLUDE_DIR_NAMES for p in parts):
+        return True
+    # 任何模块自建的数据备份目录都不入包（含密钥/历史数据）
+    if any(p.startswith("data_backup_") for p in parts):
         return True
     if is_dir:
         return False

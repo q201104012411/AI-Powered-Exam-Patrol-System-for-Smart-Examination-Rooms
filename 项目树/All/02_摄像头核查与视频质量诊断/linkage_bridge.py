@@ -56,36 +56,6 @@ def report_check(device, check_result, operator="02_patrol"):
     threading.Thread(target=_push, daemon=True).start()
 
 
-def report_fire(device_code, alert_code="FIRE_ALARM", score=0.0, reason="",
-                room_id="", seat_no="", operator="02_fire_detect"):
-    """
-    把 02 实时监控里火焰/烟雾识别（13 融入的火检）的结果上报到 03 智能终端。
-
-    火警是**人身安全事件**，按 03 的码表：
-      FIRE_ALARM（火焰确认）-> 红：强制确认 + 60s SLA
-      FIRE_SMOKE（烟雾疑似）-> 橙：待复核
-    """
-    code = alert_code if alert_code in ("FIRE_ALARM", "FIRE_SMOKE") else "FIRE_SMOKE"
-    level_txt = "火焰确认" if code == "FIRE_ALARM" else "烟雾疑似"
-    detail = ("实时监控火场识别（%s）：%s，判定分 %.2f；依据：%s。"
-              "火情属人身安全事件，请立即核实并按消防预案处置。"
-              % (level_txt, device_code, float(score), reason or "无"))
-
-    def _push():
-        try:
-            _linkage().raise_alert(
-                code=code,
-                device_code=device_code,
-                room_id=room_id,
-                seat_no=seat_no,
-                detail=detail,
-                operator=operator)
-        except Exception:
-            traceback.print_exc()
-
-    threading.Thread(target=_push, daemon=True).start()
-
-
 def report_behavior(device_code, behavior, pid=0, crosses=0,
                     room_id="", seat_no="", operator="02_ai_monitor"):
     """
@@ -103,11 +73,6 @@ def report_behavior(device_code, behavior, pid=0, crosses=0,
         "眼神游移": "GAZE_SHIFT",
         "闭眼/趴睡": "SLEEPY",
         "转脸偏头": "HEAD_TURN",
-        # 火场识别（13 融入）——这两个码已在 03 的 ALERT_CODE_LEVEL / ALERT_CODE_TEXT 注册
-        "火焰": "FIRE_ALARM",
-        "明火": "FIRE_ALARM",
-        "烟雾": "FIRE_SMOKE",
-        "浓烟": "FIRE_SMOKE",
     }
     alert_code = code_map.get(behavior, "PERSON_BEHAVIOR_ABNORMAL")
     detail = "AI 实时监控：#%d 号人员「%s」" % (pid, behavior)

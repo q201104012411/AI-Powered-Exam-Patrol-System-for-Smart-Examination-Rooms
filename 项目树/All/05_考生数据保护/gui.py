@@ -51,6 +51,11 @@ from dpp import (access, catalog, config, crypto, desensitize,   # noqa: E402
                  governance, integrity, lifecycle, models, report,
                  rights, secure_store, storage)
 
+try:
+    import sso
+except Exception:                                            # noqa: BLE001
+    sso = None
+
 APP_TITLE = "考生数据保护 · 管理后台"
 PORT_OR_NA = "桌面端"
 
@@ -114,7 +119,39 @@ class App(object):
         root.report_callback_exception = self._tk_error
         self._style()
         self._center()
-        self._build_login()
+        if not self._try_sso():
+            self._build_login()
+
+    def _try_sso(self):
+        """总控台一次登录后直达 05：不再要求输入第二遍账户/口令。"""
+        if sso is None:
+            return False
+        info = sso.verify_launch("05")
+        if not info:
+            return False
+        role = sso.map_role(info["role"], {
+            "owner": config.ROLE_OWNER,
+            "admin": config.ROLE_DPO,
+            "patrol": config.ROLE_OPERATOR,
+            "invigilator": config.ROLE_INVIGILATOR,
+            "checker": config.ROLE_AUDITOR,
+        }, config.ROLE_OPERATOR)
+        s = access.Session(info["username"], role,
+                           info.get("name") or info["username"],
+                           rooms=[], place="总控台", device="DESKTOP-GUI")
+        s.confirmed_risky = True
+        self.session = s
+        try:
+            self.store.log("登录", "总控台单点登录 %s（角色 %s）"
+                           % (s.username, s.role), s.username)
+        except Exception:                                    # noqa: BLE001
+            pass
+        try:
+            self._build_main()
+            return True
+        except Exception:                                    # noqa: BLE001
+            self.session = None
+            return False
 
     # ------------------------------------------------------------ 错误提示
     def _tk_error(self, exc_type, exc_value, tb):

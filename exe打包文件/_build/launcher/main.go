@@ -95,8 +95,12 @@ func main() {
 	if base == "" {
 		base = os.TempDir()
 	}
-	root := filepath.Join(base, appTitle)
-	target := filepath.Join(root, "app-"+version)
+	target := filepath.Join(base, appTitle, "app-"+version)
+	// 上一次可能已回退到 %TEMP% 或 exe 所在目录：优先复用已解压好的那份，
+	// 避免每次启动都重新解压 800+ MB。
+	if ready := existingTarget(base, version, exePath); ready != "" {
+		target = ready
+	}
 
 	if !isReady(target) {
 		sec := io.NewSectionReader(f, payloadOff, payloadSize)
@@ -110,8 +114,7 @@ func main() {
 		}
 		fmt.Printf("首次运行：正在解压运行环境到\n  %s\n（压缩包 %d MB，解压后约 %d MB；只需这一次，以后直接启动）\n\n",
 			target, payloadSize>>20, unpacked>>20)
-		if err := extract(zr, target); err != nil {
-			os.RemoveAll(target + ".tmp")
+		if err := extractWithFallback(zr, base, version, exePath, &target); err != nil {
 			fatal("解压失败：" + err.Error())
 		}
 		fmt.Println("\n解压完成。")
@@ -138,6 +141,55 @@ func main() {
 
 	fmt.Println("总控台已启动。")
 	time.Sleep(600 * time.Millisecond)
+}
+
+// 解压候选目录：%LOCALAPPDATA% -> %TEMP% -> exe 所在目录。
+// 受限账户/沙箱/组策略可能连 %TEMP% 都写不了，此时用 exe 同目录兜底。
+func targetCandidates(base, version, exePath string) []string {
+	raw := []string{
+		base,
+		os.TempDir(),
+		filepath.Dir(exePath),
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(raw))
+	for _, b := range raw {
+		if b == "" || seen[b] {
+			continue
+		}
+		seen[b] = true
+		out = append(out, filepath.Join(b, appTitle, "app-"+version))
+	}
+	return out
+}
+
+func existingTarget(base, version, exePath string) string {
+	for _, t := range targetCandidates(base, version, exePath) {
+		if isReady(t) {
+			return t
+		}
+	}
+	return ""
+}
+
+// extractWithFallback 依次尝试候选目录，成功时把实际使用的 target 带回。
+func extractWithFallback(zr *zip.Reader, base, version, exePath string, target *string) error {
+	cands := targetCandidates(base, version, exePath)
+	var lastErr error
+	for i, t := range cands {
+		if i == 0 {
+			lastErr = extract(zr, t)
+		} else {
+			fmt.Printf("\n上一目录不可写（%v），改试：\n  %s\n", lastErr, t)
+			lastErr = extract(zr, t)
+		}
+		if lastErr == nil {
+			*target = t
+			return nil
+		}
+		os.RemoveAll(t + ".tmp")
+	}
+	return lastErr
 }
 
 func isReady(dir string) bool {

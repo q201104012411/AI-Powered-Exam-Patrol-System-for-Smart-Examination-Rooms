@@ -19,9 +19,23 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+try:
+    import sso
+except Exception:                                            # noqa: BLE001
+    sso = None
+try:
+    import ui_theme
+except Exception:                                            # noqa: BLE001
+    ui_theme = None
+
 import config
 import cv2
 import models
+
+try:
+    import fire_detect          # 从 02 移入：火焰/烟雾识别（自包含，不依赖 onnx）
+except Exception:                                            # noqa: BLE001
+    fire_detect = None
 import report as report_mod
 import web_accounts
 from alarm_hub import AlarmHub
@@ -83,7 +97,8 @@ class LoginFrame(ttk.Frame):
                   font=("Microsoft YaHei", 16, "bold")).grid(
             row=0, column=0, columnspan=2, pady=(0, 4))
         ttk.Label(box, text="专题 08 · 智能化装备与考生数据保护",
-                  foreground="#666").grid(row=1, column=0, columnspan=2, pady=(0, 18))
+                  foreground=(ui_theme.DIM if ui_theme else "#666")).grid(
+            row=1, column=0, columnspan=2, pady=(0, 18))
 
         ttk.Label(box, text="用户名").grid(row=2, column=0, sticky="e", padx=6, pady=6)
         self.u = ttk.Entry(box, width=22)
@@ -94,14 +109,16 @@ class LoginFrame(ttk.Frame):
         self.p = ttk.Entry(box, width=22, show="*")
         self.p.grid(row=3, column=1, pady=6)
 
-        self.hint = ttk.Label(box, text="", foreground="#c00000")
+        self.hint = ttk.Label(box, text="",
+                              foreground=(ui_theme.ALARM if ui_theme else "#c00000"))
         self.hint.grid(row=4, column=0, columnspan=2, pady=(0, 6))
 
         ttk.Button(box, text="登 录", command=self._login).grid(
             row=5, column=0, columnspan=2, sticky="ew", pady=6)
         ttk.Label(box, text="首次运行默认账户：owner / EDY_POWERQ（所有者）\n"
                             "teacher1 / teacher1（管理员）——登录后请尽快改口令",
-                  foreground="#888", justify="center").grid(
+                  foreground=(ui_theme.DIM if ui_theme else "#888"),
+                  justify="center").grid(
             row=6, column=0, columnspan=2, pady=(12, 0))
         self.p.bind("<Return>", lambda e: self._login())
 
@@ -136,6 +153,12 @@ class MainFrame(ttk.Frame):
         self.status = tk.StringVar(value="就绪")
         self._photos = {}
         self._live_after = None
+        # 火场识别（从 02 移入）：每路一个 FireWatch，后台线程分析，UI 队列回填
+        self.fire_on = tk.BooleanVar(value=True)
+        self._fire_watches = {}
+        self._fire_last = {}
+        self._fire_busy = set()
+        self._fire_state = {}
         self._tile_w, self._tile_h = 320, 200
         self._ui_queue = queue.Queue()
 
@@ -160,8 +183,9 @@ class MainFrame(ttk.Frame):
         ttk.Label(top, text="  当前用户：%s（%s）"
                   % (self.session.username,
                      web_accounts.role_text(self.session.role)),
-                  foreground="#666").pack(side="left")
-        self.red_lbl = ttk.Label(top, text="", foreground="#c00000",
+                  foreground=(ui_theme.DIM if ui_theme else "#666")).pack(side="left")
+        self.red_lbl = ttk.Label(top, text="",
+                                 foreground=(ui_theme.ALARM if ui_theme else "#c00000"),
                                  font=("Microsoft YaHei", 11, "bold"))
         self.red_lbl.pack(side="right", padx=8)
 
@@ -192,7 +216,8 @@ class MainFrame(ttk.Frame):
         bar = ttk.Frame(self)
         bar.pack(fill="x", side="bottom")
         ttk.Separator(bar).pack(fill="x")
-        ttk.Label(bar, textvariable=self.status, foreground="#444").pack(
+        ttk.Label(bar, textvariable=self.status,
+                  foreground=(ui_theme.DIM if ui_theme else "#444")).pack(
             side="left", padx=8, pady=3)
 
     # ================= 页签 1：实时画面 =================
@@ -228,7 +253,8 @@ class MainFrame(ttk.Frame):
         self.src_url.grid(row=0, column=4, padx=2)
         ttk.Label(self.src_box, text="（RTSP 例：rtsp://user:pwd@ip:554/stream1；"
                                      "本地文件：rtsp.mp4）",
-                  foreground="#888").grid(row=0, column=5, padx=4)
+                  foreground=(ui_theme.DIM if ui_theme else "#888")).grid(
+            row=0, column=5, padx=4)
         ttk.Button(self.src_box, text="浏览…", command=self._pick_file).grid(
             row=0, column=6, padx=4)
 
@@ -245,8 +271,15 @@ class MainFrame(ttk.Frame):
             side="left", padx=4)
         ttk.Button(acts, text="⟳ 刷新画面", command=self._tick_live_once).pack(
             side="left", padx=4)
+        self.fire_chk = ttk.Checkbutton(
+            acts, text="🔥 火场识别（火焰/烟雾）", variable=self.fire_on)
+        self.fire_chk.pack(side="left", padx=(12, 4))
+        ttk.Label(acts, text="火警进入下方「告警中心」",
+                  foreground=(ui_theme.DIM if ui_theme else "#888")).pack(
+            side="left", padx=2)
 
-        self.live_hint = ttk.Label(ctl, text="", foreground="#666")
+        self.live_hint = ttk.Label(
+            ctl, text="", foreground=(ui_theme.DIM if ui_theme else "#666"))
         self.live_hint.grid(row=3, column=0, columnspan=8, sticky="w", padx=6)
 
         # 画面网格
@@ -401,6 +434,8 @@ class MainFrame(ttk.Frame):
             if st.get("reconnects"):
                 extra += "  重连 %d 次" % st["reconnects"]
             if frame is not None and st.get("seq") != w["last_seq"]:
+                if self.fire_on.get():
+                    self._fire_dispatch(cam_id, frame)
                 ph = bgr_to_photo(frame, self._tile_w, self._tile_h)
                 if ph is not None:
                     w["label"].configure(image=ph, text="", width=ph.width(),
@@ -410,14 +445,92 @@ class MainFrame(ttk.Frame):
                     w["last_seq"] = st.get("seq")
             elif frame is None and st.get("state") != "live":
                 w["label"].configure(image="", text=txt_state, width=44, height=13)
-            w["info"].configure(text="%s  [%s]%s  %s"
-                                     % (cam_id, txt_state, extra, st.get("status") or ""))
+            w["info"].configure(text="%s  [%s]%s  %s%s"
+                                     % (cam_id, txt_state, extra,
+                                        st.get("status") or "",
+                                        self._fire_bar(cam_id)))
         if self._live_after:
             try:
                 self.after_cancel(self._live_after)
             except Exception:
                 pass
         self._live_after = self.after(config.LIVE_POLL_MS, self._tick_live_once)
+
+    # ---------------- 火场识别（从 02 移入） ----------------
+    def _fire_watch_for(self, cam_id):
+        w = self._fire_watches.get(cam_id)
+        if w is None:
+            if fire_detect is None:
+                raise RuntimeError("fire_detect 不可用")
+            w = fire_detect.FireWatch()
+            self._fire_watches[cam_id] = w
+        return w
+
+    def _fire_dispatch(self, cam_id, frame):
+        """限制频率 + 每路单飞，后台线程分析，绝不阻塞取流/渲染。"""
+        if fire_detect is None:
+            return
+        now = time.time()
+        if now - self._fire_last.get(cam_id, 0.0) < 0.8:
+            return
+        if cam_id in self._fire_busy:
+            return
+        self._fire_last[cam_id] = now
+        self._fire_busy.add(cam_id)
+        try:
+            frm = frame.copy()
+        except Exception:
+            self._fire_busy.discard(cam_id)
+            return
+        threading.Thread(target=self._fire_worker,
+                         args=(cam_id, frm), daemon=True).start()
+
+    def _fire_worker(self, cam_id, frame):
+        try:
+            w = self._fire_watch_for(cam_id)
+            r = w.push_frame(frame, camera_name=cam_id)
+        except Exception as exc:                             # noqa: BLE001
+            r = {"ok": False, "reason": "火检异常：%s" % str(exc)[:80]}
+        finally:
+            self._fire_busy.discard(cam_id)
+        self._ui_queue.put(("fire", (cam_id, r)))
+
+    def _fire_bar(self, cam_id):
+        r = self._fire_state.get(cam_id)
+        if not r:
+            return ""
+        if not r.get("ok"):
+            return "  ｜ 火检：%s" % (r.get("reason") or "不可用")
+        lv = r.get("level")
+        if lv:
+            return "  ｜ 火情：%s %.2f" % (lv, float(r.get("score") or 0.0))
+        return ""
+
+    def _on_fire_result(self, cam_id, r):
+        self._fire_state[cam_id] = r
+        if not r.get("ok") or not r.get("just_triggered"):
+            return
+        level = r.get("level") or "warning"
+        code = "FIRE_ALARM" if level == "alarm" else "FIRE_SMOKE"
+        cam = self.store.get_camera(cam_id)
+        scope = getattr(cam, "room_id", "") if cam else ""
+        name = getattr(cam, "name", "") if cam else ""
+        detail = ("实时监控火场识别：%s（%s），判定分 %.2f；依据：%s。"
+                  "火情属人身安全事件，请立即核实并按消防预案处置。"
+                  % (name or cam_id, cam_id, float(r.get("score") or 0.0),
+                     r.get("reason") or "无"))
+        try:
+            self.hub.raise_alarm(code, detail=detail, source_kind="fire",
+                                 source_id=cam_id, scope=scope,
+                                 event_epoch=time.time(), evidence_cam=cam_id)
+        except Exception:                                    # noqa: BLE001
+            pass
+        self.status.set("火警：%s · %s" % (code, detail))
+        try:
+            self.refresh_alarms()
+            self._update_red_badge()
+        except Exception:                                    # noqa: BLE001
+            pass
 
     # ================= 页签 2：保密室监控 =================
     def _build_vault(self):
@@ -1215,7 +1328,8 @@ class MainFrame(ttk.Frame):
             text="六面覆盖率：%.0f%%（要求 100%%）%s"
                  % (rate * 100,
                     "   ⚠ 盲区：%s" % "、".join(blind) if blind else "   ✔ 无盲区"),
-            foreground="#c00000" if blind else "#1b7f1b")
+            foreground=((ui_theme.ALARM if ui_theme else "#c00000") if blind
+                        else (ui_theme.OK if ui_theme else "#1b7f1b")))
         self.cov_tree.delete(*self.cov_tree.get_children())
         for f in config.COVER_FACES:
             d = detail[f]
@@ -1250,7 +1364,9 @@ class MainFrame(ttk.Frame):
         try:
             while True:
                 kind, payload = self._ui_queue.get_nowait()
-                if kind == "probe":
+                if kind == "fire":
+                    self._on_fire_result(payload[0], payload[1])
+                elif kind == "probe":
                     if payload:
                         self.cam_index.configure(values=[str(i) for i in payload])
                         self.cam_index.set(str(payload[0]))
@@ -1554,15 +1670,52 @@ class App(object):
         self.root = tk.Tk()
         self.root.title("试卷流转与保密室智能监控 · 专题 08")
         self.root.geometry("1280x860")
+        if ui_theme is not None:
+            ui_theme.apply(self.root)
         self.main = None
-        self._show_login()
+        if not self._try_sso():
+            self._show_login()
+
+    def _try_sso(self):
+        """总控台一次登录后直达 08：不再要求输入第二遍账户/口令。"""
+        if sso is None:
+            return False
+        info = sso.verify_launch("08")
+        if not info:
+            return False
+        role = sso.map_role(info["role"], {
+            "owner": config.ROLE_OWNER,
+            "admin": config.ROLE_ADMIN,
+            "patrol": config.ROLE_GUARD,
+            "invigilator": config.ROLE_GUARD,
+            "checker": config.ROLE_AUDITOR,
+        }, config.ROLE_GUARD)
+        sess = web_accounts.Session(info["username"], role)
+        try:
+            self.store.log("单点登录", "%s（%s，来自总控台）"
+                           % (sess.username, web_accounts.role_text(sess.role)),
+                           sess.username)
+        except Exception:                                    # noqa: BLE001
+            pass
+        try:
+            self._on_login(sess)
+            if ui_theme is not None:
+                ui_theme.polish_later(self.root)
+            return True
+        except Exception:                                    # noqa: BLE001
+            self.main = None
+            return False
 
     def _show_login(self):
         self.login = LoginFrame(self, self._on_login)
         self.login.pack(fill="both", expand=True)
+        if ui_theme is not None:
+            ui_theme.polish(self.root)
 
     def _on_login(self, session):
-        self.login.destroy()
+        if getattr(self, "login", None) is not None:
+            self.login.destroy()
+            self.login = None
         self.main = MainFrame(self, session)
         self.main.pack(fill="both", expand=True)
         self.main.refresh_accounts()

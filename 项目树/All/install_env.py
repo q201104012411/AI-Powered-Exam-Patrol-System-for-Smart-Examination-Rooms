@@ -167,8 +167,8 @@ def check_all(py):
     log("模块自检（能跑就跑，个别模块缺依赖时如实跳过）")
     log("-" * 50)
     module_checks = [
-        ("02 火检模块（13 融入）", "02_摄像头核查与视频质量诊断",
-         ["-c", "import sys; sys.path.insert(0, r'02_摄像头核查与视频质量诊断'); "
+        ("08 火检模块（13 融入）", "08_试卷流转与保密室智能监控",
+         ["-c", "import sys; sys.path.insert(0, r'08_试卷流转与保密室智能监控'); "
                 "import fire_detect; d=fire_detect.load_settings(); "
                 "assert fire_detect.FireWatch and fire_detect.build_detector; "
                 "print('后端:', fire_detect.describe_backend("
