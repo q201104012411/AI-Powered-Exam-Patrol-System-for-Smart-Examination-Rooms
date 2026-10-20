@@ -397,10 +397,13 @@ def cover():
         doc.add_paragraph()
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    add_rich(p, "智能考场 AI 巡考系统", 28, NAVY, True)
+    add_rich(p, "智能考场与 AI 结合的先进化终端", 24, NAVY, True)
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    add_rich(p, "面向教育考试与日常教学场景的端-边-云智能巡考终端", 15, BLUE, True)
+    add_rich(p, "——面向教育考试与日常教学场景的端-边-云智能巡考系统", 13.5, BLUE, True)
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    add_rich(p, "产品名：智能考场 AI 巡考系统", 11, GRAY)
     doc.add_paragraph()
     p = doc.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
