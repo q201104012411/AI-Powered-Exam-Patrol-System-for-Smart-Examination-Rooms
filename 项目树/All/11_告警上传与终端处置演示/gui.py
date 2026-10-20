@@ -507,7 +507,7 @@ class UploadApp(object):
                       if has_token else "")
         return """<!doctype html><html lang="zh-CN"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>12 告警上传 · 智能考场</title>
+<title>11 告警上传 · 智能考场</title>
 <style>
 body{font-family:system-ui,'Microsoft YaHei',sans-serif;background:#070d1a;color:#e8f1ff;margin:0;padding:18px}
 .card{max-width:760px;margin:0 auto;background:#0d1a2e;border:1px solid #1b3457;border-radius:12px;padding:18px}
@@ -518,7 +518,7 @@ textarea{height:70px} button{margin-top:12px;background:#1d4ed8;color:#fff;borde
 pre{white-space:pre-wrap;background:#122542;border-radius:6px;padding:10px;color:#a7f3d0;min-height:20px}
 table{width:100%;border-collapse:collapse;font-size:12px;margin-top:10px} td,th{border-bottom:1px solid #1b3457;padding:5px;text-align:left}
 </style>
-<div class="card"><h1>12 告警上传</h1>
+<div class="card"><h1>11 告警上传</h1>
 <div class="sub">同一局域网内任意电脑/手机都可提交；提交后写入 03 智能终端，待终端确认/复核。</div>
 <label>告警码 *</label><input id="code" value="REPEATED_TOUCH_LINE">
 <label>设备编号</label><input id="device_id" value="CAM-A-101-1">
