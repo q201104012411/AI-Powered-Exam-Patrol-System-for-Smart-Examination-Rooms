@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 r"""
-12 告警上传与终端处置演示 · 桌面界面
+11 告警上传与终端处置演示 · 桌面界面
 
 两个入口：
   ① 本机上传：填一条告警 -> 12 用 03 的 integration_api.py 真正写入 03；
@@ -42,7 +42,7 @@ except Exception:                                            # noqa: BLE001
 
 import upload_client
 
-APP_TITLE = "12 告警上传与终端处置演示"
+APP_TITLE = "11 告警上传与终端处置演示"
 DEFAULT_PORT = 5030
 
 
@@ -120,7 +120,7 @@ class UploadApp(object):
 
         head = ttk.Frame(self.root, padding=(14, 10))
         head.pack(fill="x")
-        ttk.Label(head, text="12 告警上传与终端处置",
+        ttk.Label(head, text="11 告警上传与终端处置",
                   font=("Microsoft YaHei", 16, "bold")).pack(side="left")
         ttk.Label(head, text="本机上传 / 多设备局域网 HTTP 上传 / 03 最近告警",
                   foreground=(ui_theme.DIM if ui_theme else "#8ba3c7")
@@ -276,7 +276,7 @@ class UploadApp(object):
             "candidate_id": self.v_cand.get().strip(),
             "detail": self.txt_detail.get("1.0", "end").strip(),
             "operator": self.v_oper.get().strip() or "12/局域网",
-            "source": "12_告警上传与终端处置演示",
+            "source": "11_告警上传与终端处置演示",
         }
         level = self.v_level.get().strip()
         if level and level != "auto":
@@ -309,7 +309,7 @@ class UploadApp(object):
                     candidate_name=p.get("candidate_name", ""),
                     credibility=p.get("credibility"), level=p.get("level"),
                     operator=p.get("operator") or "12/局域网",
-                    source=p.get("source") or "12_告警上传与终端处置演示")
+                    source=p.get("source") or "11_告警上传与终端处置演示")
                 self.ui_queue.put(("upload", (p, r, from_lan, on_done)))
             except Exception as exc:                          # noqa: BLE001
                 self.ui_queue.put(("upload_fail", (p, exc, from_lan, on_done)))
@@ -454,7 +454,7 @@ class UploadApp(object):
                             credibility=cred,
                             level=data.get("level") or None,
                             operator=str(data.get("operator") or "lan"),
-                            source=str(data.get("source") or "12_局域网"))
+                            source=str(data.get("source") or "11_局域网"))
                     except Exception as exc:                  # noqa: BLE001
                         r = {"ok": False, "reason": str(exc)}
                     app.ui_queue.put(("lan", (self.client_address[0], data, r)))
@@ -537,7 +537,7 @@ __TOKEN__
 async function send(){
   const body={code:v('code'),device_id:v('device_id'),room_id:v('room_id'),seat_no:v('seat_no'),
     candidate_id:v('candidate_id'),credibility:v('credibility'),operator:v('operator'),
-    detail:v('detail'),source:'12_局域网网页'};
+    detail:v('detail'),source:'11_局域网网页'};
   const t=document.querySelector("input[name=token]"); if(t) body.token=t.value;
   const r=await fetch('/api/alert',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const j=await r.json(); document.getElementById('out').textContent=JSON.stringify(j,null,2);
