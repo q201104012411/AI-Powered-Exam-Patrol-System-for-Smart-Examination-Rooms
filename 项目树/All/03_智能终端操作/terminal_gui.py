@@ -49,6 +49,14 @@ try:
     import theme as theme_mod             # 统一主题（颜色单一真源，取不到时用下面的兜底色）
 except Exception:
     theme_mod = None
+# 独立运行：把包根加入 sys.path，才能 import 包根的 sso
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _p in (_HERE, os.path.dirname(_HERE)):
+    if os.path.isfile(os.path.join(_p, "sso.py")):
+        if _p not in sys.path:
+            sys.path.append(_p)
+        break
+
 try:
     import sso                            # 总控台单点登录令牌
 except Exception:                                            # noqa: BLE001
@@ -550,25 +558,37 @@ class TerminalApp(object):
         # 说明：「生成演示告警」是演练用入口，已收敛到「运行状态与管控 → 权限控制台」，
         #       仅所有者可见可点（见 _build_ops_tab）。
         ttk.Button(bar, text="☁ 立即补传", command=self._flush).pack(side="right")
-        self.alerts_hint = ttk.Label(bar, text="", foreground="#c07000")
+        self.alerts_hint = ttk.Label(bar, text="", foreground=UI_WARN)
         self.alerts_hint.pack(side="right", padx=10)
+        self.alerts_summary = ttk.Label(bar, text="", foreground=UI_FG, font=FONT_B)
+        self.alerts_summary.pack(side="left", padx=(14, 0))
 
         cols = ("id", "level", "time", "code", "room", "seat", "candidate", "status", "review")
         self.tree = ttk.Treeview(f, columns=cols, show="headings", height=16)
-        for c, t, w in (("id", "编号", 70), ("level", "级别", 80), ("time", "时间", 140),
-                        ("code", "告警码", 130), ("room", "考场", 70), ("seat", "座位", 60),
-                        ("candidate", "考生(默认脱敏)", 150), ("status", "状态", 80),
-                        ("review", "复核结论", 100)):
+        for c, t, w in (("id", "编号", 90), ("level", "级别", 80), ("time", "时间", 145),
+                        ("code", "告警类型", 210), ("room", "考场", 80), ("seat", "座位", 62),
+                        ("candidate", "考生（默认脱敏）", 145), ("status", "处置状态", 90),
+                        ("review", "复核结论", 110)):
             self.tree.heading(c, text=t)
             self.tree.column(c, width=w, anchor="w")
+        # 不再给整行铺红/黄底（一大片色块反而看不清）；只把"级别"文字上色，
+        # 红色/超时行加粗，背景保持深色表格底色。
+        self.tree.tag_configure("red", background=UI_PANEL, foreground=UI_ALARM,
+                                font=("Microsoft YaHei", 10, "bold"))
+        self.tree.tag_configure("orange", background=UI_PANEL, foreground=UI_WARN)
+        self.tree.tag_configure("overdue", background=UI_PANEL, foreground=UI_ALARM,
+                                font=("Microsoft YaHei", 10, "bold"))
         self.tree.pack(fill="both", expand=True)
-        self.tree.tag_configure("red", background="#ffe3e3", foreground="#a00000")
-        self.tree.tag_configure("orange", background="#fff6e0", foreground="#8a5a00")
-        self.tree.tag_configure("overdue", background="#ffd6d6")
 
-        self.detail = tk.Text(f, height=5, wrap="word", font=MONO)
-        self.detail.pack(fill="x", pady=(6, 0))
+        ttk.Label(f, text="选中告警详情（双击行也可确认）", foreground=UI_DIM,
+                  font=("Microsoft YaHei", 9)).pack(anchor="w", pady=(6, 0))
+        self.detail = tk.Text(f, height=5, wrap="word", font=MONO,
+                              bg=UI_PANEL, fg=UI_FG, insertbackground=UI_FG,
+                              relief="flat", highlightthickness=1,
+                              highlightbackground=UI_BORDER)
+        self.detail.pack(fill="x", pady=(2, 0))
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self._show_detail())
+        self.tree.bind("<Double-1>", lambda _e: self._ack())
 
     # ---------- 复核留痕 ----------
     def _build_review_tab(self):
@@ -3939,7 +3959,14 @@ class TerminalApp(object):
         alerts = access.visible_alerts(self.store, self.session, limit=400)
         alerts = self.hub.display_order(alerts)
         red_pending = 0
+        n_red = n_orange = n_done = 0
         for a in alerts:
+            if a.level == config.LEVEL_RED:
+                n_red += 1
+            else:
+                n_orange += 1
+            if a.status != models.ST_PENDING:
+                n_done += 1
             if a.needs_force_confirm():
                 red_pending += 1
             tag = "red" if a.level == config.LEVEL_RED else "orange"
@@ -3955,9 +3982,11 @@ class TerminalApp(object):
                                      a.room_id or "—", a.seat_no or "—", cid,
                                      self._st_text(a.status),
                                      config.REVIEW_CONCLUSIONS.get(a.review_conclusion, "—")))
-        hint = "共 %d 条" % len(alerts)
-        if red_pending:
-            hint += "　⚠ 红色待确认 %d 条" % red_pending
+        summary = "共 %d ｜ 红 %d ｜ 橙 %d ｜ 已处置 %d" % (
+            len(alerts), n_red, n_orange, n_done)
+        self.alerts_summary.config(text=summary)
+        hint = ("⚠ 待确认 %d" % red_pending) if red_pending else "无红色待确认"
+        self.alerts_hint.config(foreground=UI_ALARM if red_pending else UI_DIM)
         try:
             import runmode
             if runmode.is_teach(self.store):

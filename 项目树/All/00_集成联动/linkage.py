@@ -38,7 +38,13 @@ PROJECTS = {
     "01": os.path.join(ALL_DIR, "01_人脸识别与身份核对", "01_人脸识别与身份核对"),
     "02": os.path.join(ALL_DIR, "02_摄像头核查与视频质量诊断"),
     "03": os.path.join(ALL_DIR, "03_智能终端操作"),
+    "05": os.path.join(ALL_DIR, "05_考生数据保护"),
     "06": os.path.join(ALL_DIR, "06_智能安检与手机作弊器材检测"),
+    "07": os.path.join(ALL_DIR, "07_无线信号监测与屏蔽管控"),
+    "08": os.path.join(ALL_DIR, "08_试卷流转与保密室智能监控"),
+    "09": os.path.join(ALL_DIR, "09_无障碍与特殊考生保障"),
+    "10": os.path.join(ALL_DIR, "10_普通考场+特殊考场应用"),
+    "13": os.path.join(ALL_DIR, "13_AI火场识别与自动报警"),
 }
 
 
@@ -99,7 +105,9 @@ class Project(object):
 
     # 各套的数据目录重定向环境变量（用于"沙箱自检"，不污染真实数据）
     HOME_ENV = {"01": "EXAM_HOME", "02": "EXAM_CAMERA_HOME", "03": "EXAM_TERMINAL_HOME",
-                "06": "EXAM_SEC_HOME"}
+                "05": "EXAM_DPP_HOME", "06": "EXAM_SEC_HOME", "07": "EXAM_RF_HOME",
+                "08": "EXAM_SECURE_HOME", "09": "EXAM_ACCESS_HOME",
+                "10": "EXAM_ROOM_HOME", "13": "EXAM_FIRE_HOME"}
 
     # 单次子进程调用的默认上限：旧版 180 秒，只要对端卡在取流/网络等待上，
     # 调用方（界面/巡检）就会跟着"沉默"三分钟，看起来就是卡死。
@@ -295,9 +303,9 @@ class Linkage(object):
 
         # 沙箱重定向环境变量要**整套传给每个子进程**（嵌套调用才不会漏回真实目录）
         redirects = {}
-        for key in ("01", "02", "03", "06"):
+        for key in ("01", "02", "03", "05", "06", "07", "08", "09", "10", "13"):
             h = home(key)
-            if h:
+            if h and key in Project.HOME_ENV:
                 redirects[Project.HOME_ENV[key]] = h
 
         self.p01 = Project("01", python=python, timeout=timeout, home=home("01"),
@@ -316,12 +324,38 @@ class Linkage(object):
             self.remote_terminal = False
         self.p06 = Project("06", python=python, timeout=timeout, home=home("06"),
                            env_extra=redirects)
+        # 其余专题也接进总线：它们都有 integration_api.py 的 status 等 op，
+        # 这样 00 的“全部链接”不是只连 01/02/03/06 四套。
+        self.p05 = Project("05", python=python, timeout=timeout, home=home("05"),
+                           env_extra=redirects)
+        self.p07 = Project("07", python=python, timeout=timeout, home=home("07"),
+                           env_extra=redirects)
+        self.p08 = Project("08", python=python, timeout=timeout, home=home("08"),
+                           env_extra=redirects)
+        self.p09 = Project("09", python=python, timeout=timeout, home=home("09"),
+                           env_extra=redirects)
+        self.p10 = Project("10", python=python, timeout=timeout, home=home("10"),
+                           env_extra=redirects)
+        self.p13 = Project("13", python=python, timeout=timeout, home=home("13"),
+                           env_extra=redirects)
+        self.projects = {
+            "01": self.p01, "02": self.p02, "03": self.p03, "05": self.p05,
+            "06": self.p06, "07": self.p07, "08": self.p08, "09": self.p09,
+            "10": self.p10, "13": self.p13,
+        }
 
-    # ---------- 各自状态 ----------
+    # ---------- 通用调用 / 各自状态 ----------
+    def call(self, key, op, args=None):
+        """按专题号通用调用：Linkage().call("08", "status", {})。"""
+        proj = self.projects.get(str(key))
+        if proj is None:
+            raise LinkageError("未接入的专题：%s（可用：%s）"
+                               % (key, "、".join(sorted(self.projects))))
+        return proj.call(op, args or {})
+
     def status(self):
         out = {}
-        for key, proj in (("01", self.p01), ("02", self.p02), ("03", self.p03),
-                          ("06", self.p06)):
+        for key, proj in self.projects.items():
             ok, why = proj.available()
             if not ok:
                 out[key] = {"ok": False, "reason": why}

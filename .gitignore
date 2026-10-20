@@ -128,3 +128,8 @@ data_backup_*/
 # 成品 exe 超过 GitHub 普通仓库单文件 100MB 限制，走 GitHub Release / 本地分发；
 # 源码入口是 项目树/All/总控台.py，构建脚本在本地 exe打包文件/_build（不入库）
 exe打包文件/
+
+# --- 18. 总控台运行期账户/审计与 SSO 密钥（含本机账户哈希/操作日志，不入库）---
+总控台账户.json
+总控台审计.jsonl
+sso.key

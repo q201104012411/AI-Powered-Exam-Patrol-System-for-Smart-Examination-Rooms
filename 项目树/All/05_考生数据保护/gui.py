@@ -28,6 +28,12 @@ import traceback
 BASE = os.path.dirname(os.path.abspath(__file__))
 if BASE not in sys.path:
     sys.path.insert(0, BASE)
+# 独立运行：把包根加入 sys.path，才能 import 包根的 sso
+for _p in (BASE, os.path.dirname(BASE)):
+    if os.path.isfile(os.path.join(_p, "sso.py")):
+        if _p not in sys.path:
+            sys.path.append(_p)
+        break
 
 
 # ---- 隐藏窗口启动时 stdout/stderr 可能是 None：先兜住再 print ----

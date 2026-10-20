@@ -43,6 +43,14 @@ try:
 except Exception:
     HAS_PIL = False
 
+# 独立运行：把包根加入 sys.path，才能 import 包根的 sso / ui_theme
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _p in (_HERE, os.path.dirname(_HERE), os.path.dirname(os.path.dirname(_HERE))):
+    if os.path.isfile(os.path.join(_p, "ui_theme.py")):
+        if _p not in sys.path:
+            sys.path.append(_p)
+        break
+
 try:
     import sso
 except Exception:                                            # noqa: BLE001
@@ -481,6 +489,9 @@ class App(object):
         bar.pack(fill="x", pady=(0, PAD_BAR))
         ttk.Button(bar, text="＋ 新增机位",
                    command=self._guard("device_add", self._add_device)).pack(side="left")
+        ttk.Button(bar, text="✏ 编辑机位",
+                   command=self._guard("device_add", self._edit_device)
+                   ).pack(side="left", padx=PAD_BTN)
         ttk.Button(bar, text="📷 采集基准图",
                    command=self._guard("baseline_capture", self._capture)
                    ).pack(side="left", padx=PAD_BTN)
@@ -505,6 +516,7 @@ class App(object):
             "nobase",
             background=("#3a2f14" if ui_theme else "#fff6e0"),
             foreground=("#fbbf24" if ui_theme else "#000000"))
+        self.dtree.bind("<Double-1>", lambda _e: self._edit_device())
 
     def refresh_devices(self):
         for i in self.dtree.get_children():
@@ -521,37 +533,80 @@ class App(object):
                                       why if ok else "✗ " + why))
 
     def _add_device(self):
+        self._device_dialog(None)
+
+    def _edit_device(self):
+        d = self._selected_device()
+        if d is not None:
+            self._device_dialog(d)
+
+    def _device_dialog(self, existing=None):
+        """新增/编辑机位。按钮固定在底部，避免老窗口高度不够把“保存”裁掉。"""
         win = tk.Toplevel(self.root)
-        win.title("新增机位")
-        win.geometry("460x400")
+        win.title("编辑机位" if existing else "新增机位")
+        win.geometry("600x700")
+        win.minsize(540, 620)
         win.transient(self.root)
         win.grab_set()
-        f = ttk.Frame(win, padding=14)
-        f.pack(fill="both", expand=True)
+        win.update_idletasks()
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry("600x700+%d+%d" % (max(0, (sw - 600) // 2),
+                                       max(0, (sh - 700) // 2 - 30)))
+
+        outer = ttk.Frame(win, padding=14)
+        outer.pack(fill="both", expand=True)
+
+        foot = ttk.Frame(outer)
+        foot.pack(side="bottom", fill="x", pady=(8, 0))
+        msg = ttk.Label(foot, text="", foreground=("#f43f5e" if ui_theme else "#c00"))
+        msg.pack(anchor="w")
+        btns = ttk.Frame(foot)
+        btns.pack(anchor="e", pady=(6, 0))
+
+        body = ttk.Frame(outer)
+        body.pack(fill="both", expand=True)
+
         fields = [("code", "设备编码*"), ("name", "设备名称"), ("room_id", "考场*"),
-                  ("site", "考点"), ("url", "取流地址"),
+                  ("site", "考点"), ("position", "安装位置"), ("url", "取流地址"),
                   ("resolution", "分辨率"), ("fov_deg", "视场角(度)"),
                   ("pan_deg", "水平角(度)"), ("tilt_deg", "俯仰角(度)"),
                   ("session", "场次")]
+        defaults = {"resolution": "1920x1080", "fov_deg": "90"}
         vars_ = {}
         for i, (k, label) in enumerate(fields):
-            ttk.Label(f, text=label + "：").grid(row=i, column=0, sticky="e", pady=3)
-            v = tk.StringVar(value="90" if k == "fov_deg" else
-                             ("1920x1080" if k == "resolution" else ""))
+            ttk.Label(body, text=label + "：").grid(row=i, column=0, sticky="e",
+                                                   pady=3, padx=(0, 6))
+            v = tk.StringVar(value=defaults.get(k, ""))
+            if existing is not None:
+                raw = getattr(existing, k, "")
+                if k == "fov_deg":
+                    raw = "%.1f" % float(raw or 90)
+                v.set("" if raw is None else str(raw))
             vars_[k] = v
-            ttk.Entry(f, textvariable=v, width=30).grid(row=i, column=1, pady=3)
+            ttk.Entry(body, textvariable=v, width=36).grid(row=i, column=1,
+                                                           pady=3, sticky="ew")
+        body.columnconfigure(1, weight=1)
+
         r = len(fields)
-        audio = tk.BooleanVar(value=False)
-        ttk.Checkbutton(f, text="配拾音器（音频链路核查）", variable=audio
-                        ).grid(row=r, column=1, sticky="w", pady=4)
-        msg = ttk.Label(f, text="", foreground="#c00")
-        msg.grid(row=r + 1, column=0, columnspan=2)
+        audio = tk.BooleanVar(value=bool(existing.has_audio) if existing else False)
+        ttk.Checkbutton(body, text="配拾音器（音频链路核查）", variable=audio
+                        ).grid(row=r, column=1, sticky="w", pady=(4, 2))
+        ttk.Label(body, text="取流地址可填：0/1/2（本机摄像头）、rtsp://…、"
+                             "http://… 或本地视频文件路径；留空表示暂不取流。",
+                  foreground=(ui_theme.DIM if ui_theme else "#666"),
+                  font=FONT_SMALL, wraplength=420).grid(
+            row=r + 1, column=0, columnspan=2, sticky="w", pady=(2, 8))
 
         def save():
             if not self._need("device_add"):
                 return
-            if not vars_["code"].get().strip():
+            code = vars_["code"].get().strip()
+            room = vars_["room_id"].get().strip()
+            if not code:
                 msg.config(text="设备编码必填")
+                return
+            if not room:
+                msg.config(text="考场必填（例如 A-101）")
                 return
             try:
                 fov = float(vars_["fov_deg"].get() or 90)
@@ -560,23 +615,40 @@ class App(object):
             except ValueError:
                 msg.config(text="角度必须是数字")
                 return
-            d = models.Device(code=vars_["code"].get().strip(), name=vars_["name"].get().strip(),
-                              room_id=vars_["room_id"].get().strip(),
-                              site=vars_["site"].get().strip(),
-                              url=vars_["url"].get().strip(),
-                              resolution=vars_["resolution"].get().strip() or "1920x1080",
-                              fov_deg=fov, pan_deg=pan, tilt_deg=tilt,
-                              has_audio=audio.get(),
-                              session=vars_["session"].get().strip())
-            self.store.save_device(d)
-            self.store.log("台账登记机位", d.code, self.user.username)
+            if fov <= 0:
+                msg.config(text="视场角必须大于 0")
+                return
+            d = models.Device(
+                code=code, name=vars_["name"].get().strip(), room_id=room,
+                site=vars_["site"].get().strip(),
+                position=vars_["position"].get().strip(),
+                url=vars_["url"].get().strip(),
+                resolution=vars_["resolution"].get().strip() or "1920x1080",
+                fov_deg=fov, pan_deg=pan, tilt_deg=tilt,
+                has_audio=audio.get(), session=vars_["session"].get().strip(),
+                device_id=existing.device_id if existing else None)
+            if existing is not None:
+                # 编辑时保留基准图 / 心跳 / 启用状态，别被表单覆盖
+                d.baseline_at = existing.baseline_at
+                d.last_heartbeat = existing.last_heartbeat
+                d.enabled = existing.enabled
+                d.expected_segments = existing.expected_segments
+                d.extra = dict(existing.extra or {})
+            try:
+                self.store.save_device(d)
+            except Exception as exc:                         # noqa: BLE001
+                msg.config(text="保存失败：%s" % str(exc)[:160])
+                return
+            self.store.log("台账修改机位" if existing else "台账登记机位",
+                           d.code, self.user.username)
             win.destroy()
             self.refresh_all()
 
-        bar = ttk.Frame(f)
-        bar.grid(row=r + 2, column=0, columnspan=2, pady=10)
-        ttk.Button(bar, text="保存", command=save).pack(side="left", padx=6)
-        ttk.Button(bar, text="取消", command=win.destroy).pack(side="left", padx=6)
+        ttk.Button(btns, text="保存", style="Accent.TButton",
+                   command=save).pack(side="left", padx=6)
+        ttk.Button(btns, text="取消", command=win.destroy).pack(side="left", padx=6)
+        win.bind("<Return>", lambda _e: save())
+        win.bind("<Escape>", lambda _e: win.destroy())
 
     def _selected_device(self):
         sel = self.dtree.selection()

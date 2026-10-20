@@ -30,6 +30,14 @@ os.chdir(HERE)
 
 import config                                                  # noqa: E402
 
+# 独立运行：把包根加入 sys.path，才能 import 包根的 ui_theme
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _p in (_HERE, os.path.dirname(_HERE)):
+    if os.path.isfile(os.path.join(_p, "ui_theme.py")):
+        if _p not in sys.path:
+            sys.path.append(_p)
+        break
+
 try:
     import ui_theme                                            # noqa: E402
 except Exception:                                              # noqa: BLE001

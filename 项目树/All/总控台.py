@@ -69,12 +69,27 @@ else:
 
 
 def _runtime_paths():
-    """自带运行时的 python.exe / pythonw.exe（兼容 runtime 根目录与 venv 布局）。"""
+    """自带运行时的 python.exe / pythonw.exe（兼容 runtime 根目录与 venv 布局）。
+
+    源码树（项目树\\All）里没有 runtime\\ 时，退回当前解释器，
+    这样每个模块/总控台都能单独用系统 Python 跑，不依赖 exe 打包目录。
+    """
     pyw = os.path.join(PKG, "runtime", "pythonw.exe")
     py = os.path.join(PKG, "runtime", "python.exe")
     if not os.path.isfile(pyw):
         pyw = os.path.join(PKG, "runtime", "Scripts", "pythonw.exe")
         py = os.path.join(PKG, "runtime", "Scripts", "python.exe")
+    if not (os.path.isfile(py) and os.path.isfile(pyw)):
+        exe = sys.executable or ""
+        d = os.path.dirname(exe)
+        cand_py = os.path.join(d, "python.exe")
+        cand_pyw = os.path.join(d, "pythonw.exe")
+        if os.path.isfile(cand_py):
+            py = cand_py
+        if os.path.isfile(cand_pyw):
+            pyw = cand_pyw
+        elif os.path.isfile(cand_py):
+            pyw = cand_py
     return py, pyw
 
 
