@@ -1,6 +1,6 @@
 # 智能考场 AI 巡考系统 · 单文件总控台
 
-> **仓库说明**：成品 `智能考场AI巡考系统.exe` 525MB、`runtime\` 508MB，均**不入库**
+> **仓库说明**：成品 `智能考场AI巡考系统.exe` 511MB、`runtime\` 508MB，均**不入库**
 > （超过 GitHub 普通仓库单文件 100MB 限制）。本目录只保留启动器源码
 > `总控台.py` / `launcher_auth.py` / `模块清单.json`；构建时把本目录（含各模块）
 > 复制到发布包目录，再放入 `runtime\` 后打包。没有 `runtime\` 时，总控台会自动
@@ -19,9 +19,9 @@ python 总控台.py
 
 ## 一、双击什么
 
-`智能考场AI巡考系统.exe`（发布包目录下，约 525 MB）
+`智能考场AI巡考系统.exe`（发布包目录下，约 511 MB）
 
-- SHA256：`E5BA4E2EBF25BE56D55839FBEA49CFAAEF77A78C46C0C2FAB71FA7C16ACF4DB3`
+- SHA256：`8392CD037C20C6F0C81D9FAD4F9069CBF7886BDFE581CA9F51B50D11A2BAA8B4`
 - 第一次运行：会先把运行环境解压到
   `%LOCALAPPDATA%\智能考场AI巡考系统\app-<hash>`，控制台窗口显示解压进度；
   解压完成后自动打开「总控台」。
