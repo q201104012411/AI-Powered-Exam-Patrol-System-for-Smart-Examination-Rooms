@@ -39,7 +39,7 @@ const (
 	markerName   = ".payload_ready"
 	appTitle     = "智能考场AI巡考系统"
 	installSalt  = "EDY_POWERQ-2026-install"
-	installHash  = "925292b03bd1097dc03dde9b36e146a7a5ac276fe9622e4e3fce7de3ba205b65"
+	installHash  = "a797785ced94240c008b5352f7362ae15be1336377ea478a274242b58cb72a0d"
 	entryName    = "总控台.py"
 )
 
@@ -206,7 +206,7 @@ func ensureInstallAuth(exePath string) error {
 	auth := installAuthPath(exePath)
 	if data, err := os.ReadFile(auth); err == nil {
 		lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
-		if len(lines) >= 4 && strings.TrimSpace(lines[0]) == "v2" {
+		if len(lines) >= 4 && strings.TrimSpace(lines[0]) == "v3" {
 			salt, e1 := hex.DecodeString(strings.TrimSpace(lines[1]))
 			hash, e2 := hex.DecodeString(strings.TrimSpace(lines[2]))
 			sig, e3 := hex.DecodeString(strings.TrimSpace(lines[3]))
@@ -237,7 +237,7 @@ func ensureInstallAuth(exePath string) error {
 		}
 		hash := pbkdf2SHA256([]byte(pw), salt, 120000, 32)
 		sig := authSig(salt, hash)
-		body := "v2\n" + hex.EncodeToString(salt) + "\n" + hex.EncodeToString(hash) + "\n" +
+		body := "v3\n" + hex.EncodeToString(salt) + "\n" + hex.EncodeToString(hash) + "\n" +
 			hex.EncodeToString(sig) + "\n"
 		if err := os.WriteFile(auth, []byte(body), 0o600); err != nil {
 			return fmt.Errorf("无法保存安装密码：%w", err)

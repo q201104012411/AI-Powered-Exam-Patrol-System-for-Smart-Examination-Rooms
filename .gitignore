@@ -133,3 +133,7 @@ exe打包文件/
 总控台账户.json
 总控台审计.jsonl
 sso.key
+
+# 打包测试临时目录
+_pkgtest/
+项目树/All/_pkgtest/
