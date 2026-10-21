@@ -402,6 +402,29 @@ func createShortcut(installDir, appDir string) error {
 	os.Remove(ps1)
 	return err
 }
+func hardenApp(appDir string) {
+	py := filepath.Join(appDir, "runtime", "python.exe")
+	if _, err := os.Stat(py); err != nil {
+		py = filepath.Join(appDir, "runtime", "Scripts", "python.exe")
+	}
+	script := filepath.Join(appDir, "_harden.py")
+	if _, err := os.Stat(py); err != nil {
+		return
+	}
+	if _, err := os.Stat(script); err != nil {
+		return
+	}
+	fmt.Print("正在硬化源码（pyc + loader）... ")
+	cmd := exec.Command(py, script, appDir)
+	cmd.Dir = appDir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Println("提示：源码硬化未完成（不影响运行）：", err)
+		return
+	}
+	fmt.Println("完成")
+}
 func install(exePath string, env *envelope, installDir string) error {
 	appDir := filepath.Join(installDir, "app")
 	if err := os.MkdirAll(appDir, 0755); err != nil {
@@ -418,6 +441,7 @@ func install(exePath string, env *envelope, installDir string) error {
 		return err
 	}
 	fmt.Println("\r正在解压程序文件 ... 100%")
+	hardenApp(appDir)
 	if err := writeLauncher(installDir, appDir); err != nil {
 		return err
 	}

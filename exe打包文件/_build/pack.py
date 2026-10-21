@@ -9,7 +9,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "_build", "payload.zip")
 
 INCLUDES = [
-    "总控台.py", "launcher_auth.py", "模块清单.json", "icon",
+    "总控台.py", "launcher_auth.py", "_harden.py", "模块清单.json", "icon",
     "sso.py", "ui_theme.py",
     "runtime",
     "00_集成联动", "01_人脸识别与身份核对", "02_摄像头核查与视频质量诊断",
