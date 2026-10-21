@@ -7,6 +7,7 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha256"
@@ -154,31 +155,42 @@ func main() {
 			var tmpErr error
 			for _, d := range []string{filepath.Join(base, appTitle), os.TempDir(), filepath.Dir(exePath)} {
 				_ = os.MkdirAll(d, 0o755)
-				tmp, tmpErr = os.CreateTemp(d, "zk_payload_*.zip")
+				tmp, tmpErr = os.CreateTemp(d, "zk_payload_*.tmp")
 				if tmpErr == nil {
 					break
 				}
 			}
 			if tmpErr != nil {
-				fatal("无法创建解密临时文件：" + tmpErr.Error())
+				// 临时目录不可写（常见于桌面/受限目录/杀软拦截）：改用内存解密。
+				// 只在首次运行发生，不影响后续启动速度。
+				fmt.Printf("临时目录不可写，改用内存解密（约 %d MB）...\n", payloadSize>>20)
+				mem, err := decryptToMemory(f, payloadOff, payloadSize, key)
+				if err != nil {
+					fatal("内存解密失败：" + err.Error())
+				}
+				zr, err = zip.NewReader(bytes.NewReader(mem), int64(len(mem)))
+				if err != nil {
+					fatal("解密后的 payload 无法读取：" + err.Error())
+				}
+			} else {
+				tmpZip = tmp.Name()
+				tmp.Close()
+				fmt.Printf("首次运行：正在解密并解压运行环境到\n  %s\n（加密载荷 %d MB；只需这一次，以后直接启动）\n\n",
+					target, payloadSize>>20)
+				if err := decryptToFile(f, payloadOff, payloadSize, key, tmpZip); err != nil {
+					os.Remove(tmpZip)
+					fatal("解密失败：" + err.Error())
+				}
+				rc, err := zip.OpenReader(tmpZip)
+				if err != nil {
+					os.Remove(tmpZip)
+					fatal("解密后的 payload 无法读取：" + err.Error())
+				}
+				zr = &rc.Reader
+				zrc = rc
+				defer os.Remove(tmpZip)
+				defer zrc.Close()
 			}
-			tmpZip = tmp.Name()
-			tmp.Close()
-			fmt.Printf("首次运行：正在解密并解压运行环境到\n  %s\n（加密载荷 %d MB；只需这一次，以后直接启动）\n\n",
-				target, payloadSize>>20)
-			if err := decryptToFile(f, payloadOff, payloadSize, key, tmpZip); err != nil {
-				os.Remove(tmpZip)
-				fatal("解密失败：" + err.Error())
-			}
-			rc, err := zip.OpenReader(tmpZip)
-			if err != nil {
-				os.Remove(tmpZip)
-				fatal("解密后的 payload 无法读取：" + err.Error())
-			}
-			zr = &rc.Reader
-			zrc = rc
-			defer os.Remove(tmpZip)
-			defer zrc.Close()
 		} else {
 			sec := io.NewSectionReader(f, payloadOff, payloadSize)
 			var err error
@@ -323,6 +335,66 @@ func decryptToFile(f *os.File, offset, size int64, key []byte, outPath string) e
 	}
 	fmt.Println("\r正在解密 ... 100%")
 	return out.Sync()
+}
+
+func decryptToMemory(f *os.File, offset, size int64, key []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return nil, err
+	}
+	head := make([]byte, 20)
+	if _, err := io.ReadFull(f, head); err != nil {
+		return nil, err
+	}
+	if string(head[:8]) != encMagic {
+		return nil, errors.New("加密数据标识不正确")
+	}
+	chunkSize := binary.LittleEndian.Uint32(head[8:12])
+	if chunkSize == 0 || chunkSize > maxChunk {
+		return nil, fmt.Errorf("分块大小异常：%d", chunkSize)
+	}
+	noncePrefix := head[12:20]
+	var buf bytes.Buffer
+	remaining := size - 20
+	var counter uint32
+	for remaining > 0 {
+		if remaining < 4 {
+			return nil, errors.New("密文块长度不完整")
+		}
+		var lb [4]byte
+		if _, err := io.ReadFull(f, lb[:]); err != nil {
+			return nil, err
+		}
+		n := int64(binary.LittleEndian.Uint32(lb[:]))
+		remaining -= 4
+		if n <= 16 || n > int64(chunkSize)+16 || n > remaining {
+			return nil, fmt.Errorf("密文块长度异常：%d", n)
+		}
+		ct := make([]byte, n)
+		if _, err := io.ReadFull(f, ct); err != nil {
+			return nil, err
+		}
+		remaining -= n
+		nonce := make([]byte, 12)
+		copy(nonce, noncePrefix)
+		binary.BigEndian.PutUint32(nonce[8:], counter)
+		plain, err := gcm.Open(nil, nonce, ct, nil)
+		if err != nil {
+			return nil, errors.New("解密校验失败：安装包被修改或密钥不匹配")
+		}
+		if _, err := buf.Write(plain); err != nil {
+			return nil, err
+		}
+		counter++
+	}
+	return buf.Bytes(), nil
 }
 
 func hideDir(dir string) {
