@@ -19,9 +19,9 @@ python 总控台.py
 
 ## 一、双击什么
 
-`智能考场AI巡考系统.exe`（发布包目录下，约 512 MB）
+`智能考场AI巡考系统.exe`（发布包目录下，约 512.6 MB）
 
-- SHA256：`5B8740A5276D561440EB9A14BB6CDCDBECC4BD85DADAC56F6D204176E0F1CBFF`
+- SHA256：`9C2EA395F2523D96B3BAC771846890A6FAF8147A9A4987FC70118194949BDFC9`
 - 第一次运行：会先把运行环境解压到
   `%LOCALAPPDATA%\智能考场AI巡考系统\app-<hash>`，控制台窗口显示解压进度；
   解压完成后自动打开「总控台」。
@@ -93,7 +93,7 @@ bash 一键打包.sh --check   # 只检查环境 + 试转图标，不生成大�
 ```
 
 脚本会自动完成：PNG → 多尺寸 ico → rsrc 资源 → `go build`（把图标编进启动器）
-→ `pack.py` → 组装（启动器 + payload + 24 字节尾部索引）→ 校验图标/索引/SHA256。
+→ `pack.py` → 组装（启动器 + payload.enc + 40 字节尾部索引（AES-256-GCM））→ 校验图标/索引/SHA256。
 依赖 Git Bash、Python 3.8+（Pillow）、Go 1.20+；`rsrc.exe` 缺失时会自动获取。
 
 ### 手工分步
