@@ -20,8 +20,8 @@
       "codes": ["00"]
     },
     {
-      "name": "未就绪",
-      "desc": "方案文档已就位，暂未提供可运行入口",
+      "name": "方案与扩展",
+      "desc": "巡考机器人代码/文档/真车记录；Ubuntu ROS 环境运行",
       "codes": ["04"]
     }
   ],
@@ -69,12 +69,12 @@
     "04": {
       "name": "04 巡考机器人",
       "short": "巡考机器人",
-      "desc": "方案文档已就位，本包暂未提供可运行入口。",
+      "desc": "Ubuntu/ROS1/ROS2 巡考小车：Python 代码、网页遥控、路线、真车测试记录。",
       "dir": "04_巡考机器人",
-      "entry": "",
-      "kind": "docs",
-      "roles": [],
-      "hint": "未就绪：按需求排除，不提供启动。"
+      "entry": "gui.py",
+      "kind": "gui",
+      "roles": ["owner", "admin", "patrol"],
+      "hint": "Windows 端浏览/复制路径；真车运动需在 Ubuntu 小车按 README 运行。"
     },
     "05": {
       "name": "05 考生数据保护",

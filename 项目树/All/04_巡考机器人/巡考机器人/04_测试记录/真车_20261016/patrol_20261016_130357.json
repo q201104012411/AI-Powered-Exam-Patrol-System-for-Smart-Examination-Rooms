@@ -1,0 +1,36 @@
+{
+  "steps_ok": 0, 
+  "odom_topic": "/odom", 
+  "robot": "Wheeltec ROS1 Melodic", 
+  "loops_done": 1, 
+  "result": "aborted", 
+  "car_mode_source": "由 launch 检测：car_mode=senior_akm（阿克曼）", 
+  "dry_run": false, 
+  "abort_reason": "避障策略=abort：前方障碍未清除", 
+  "loops_requested": 1, 
+  "cmd_topic": "/cmd_vel", 
+  "total_distance_m": 0.0, 
+  "duration_s": 0.6, 
+  "events": [
+    {
+      "type": "obstacle", 
+      "detail": "前方 0.36m 处检测到障碍/行人，已停车等待", 
+      "time": "2026-10-16 13:03:56"
+    }, 
+    {
+      "type": "abort", 
+      "detail": "避障策略=abort：前方障碍未清除", 
+      "time": "2026-10-16 13:03:56"
+    }
+  ], 
+  "start_time": "2026-10-16 13:03:56", 
+  "battery_voltage_start": 22.95599937438965, 
+  "checkpoints": [], 
+  "steps_total": 1, 
+  "route_name": "快速单步移动", 
+  "car_mode": "akm", 
+  "task_completion_rate": 0.0, 
+  "steps": [], 
+  "end_time": "2026-10-16 13:03:57", 
+  "battery_voltage_end": 22.95599937438965
+}

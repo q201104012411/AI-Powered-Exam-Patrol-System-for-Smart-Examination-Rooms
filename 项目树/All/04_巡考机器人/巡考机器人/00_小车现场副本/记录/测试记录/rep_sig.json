@@ -1,0 +1,31 @@
+{
+  "steps_ok": 0, 
+  "odom_topic": "/odom", 
+  "robot": "Wheeltec ROS1 Melodic", 
+  "loops_done": 1, 
+  "result": "aborted", 
+  "car_mode_source": "由 launch 检测：car_mode=senior_akm（阿克曼）", 
+  "dry_run": false, 
+  "abort_reason": "收到终止信号（SIGINT/SIGTERM），已停车退出", 
+  "loops_requested": 1, 
+  "cmd_topic": "/cmd_vel", 
+  "total_distance_m": 0.797, 
+  "duration_s": 4.64, 
+  "events": [
+    {
+      "type": "abort", 
+      "detail": "收到终止信号（SIGINT/SIGTERM），已停车退出", 
+      "time": "2026-10-15 20:26:14"
+    }
+  ], 
+  "start_time": "2026-10-15 20:26:09", 
+  "battery_voltage_start": 11.858400344848633, 
+  "checkpoints": [], 
+  "steps_total": 1, 
+  "route_name": "快速单步移动", 
+  "car_mode": "akm", 
+  "task_completion_rate": 0.0, 
+  "steps": [], 
+  "end_time": "2026-10-15 20:26:14", 
+  "battery_voltage_end": 11.812600135803223
+}

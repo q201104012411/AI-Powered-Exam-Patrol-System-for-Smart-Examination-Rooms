@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=重新挂载小车
+Comment=重新挂载 小车文件 与 共享文件夹
+Exec=/home/wheeltec/挂载.sh
+Icon=folder-remote
+Terminal=true
+Categories=Utility;

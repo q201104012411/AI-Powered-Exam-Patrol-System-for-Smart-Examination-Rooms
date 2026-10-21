@@ -1,0 +1,12 @@
+# 实验室空地巡逻一圈（2026-10-19 实测：前 4.17m / 左 2.29m / 右 1.99m / 后 0.52m）
+route_name: "实验室空地巡更 · 去-调头-回"
+default_speed: 0.10
+akm_turn_speed: 0.07
+steps:
+  - {forward: 2.00, name: "走到空地另一端"}
+  - {checkpoint: 4.0, name: "打卡点A · 远端（环境巡检）"}
+  - {turn: -60, name: "调头1/3 前进右弧"}
+  - {turn_rev: -60, name: "调头2/3 倒车右弧"}
+  - {turn: -60, name: "调头3/3 前进右弧"}
+  - {forward: 2.00, name: "返回起点侧"}
+  - {checkpoint: 2.0, name: "打卡点B · 起点"}

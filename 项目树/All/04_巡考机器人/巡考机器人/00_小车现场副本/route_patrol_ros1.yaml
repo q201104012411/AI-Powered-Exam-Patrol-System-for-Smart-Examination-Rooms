@@ -1,0 +1,51 @@
+# route_patrol_ros1.yaml —— 真车（Wheeltec ROS1 Melodic / senior_akm 阿克曼）巡更路线示例
+#
+# 阿克曼车型要点：
+#   · 不能原地转圈、不能横移（删掉 strafe 之类动作）
+#   · turn / turn_rev 是"边走边转"的圆弧：需要前方（或后方）留出转弯空间
+#   · 走道尽头调头请用三点调头：turn（前进转弯） + turn_rev（倒车转弯）组合
+#   · akm_turn_speed 越小圆弧越紧凑越安全，现场先用 0.08~0.12 m/s
+#
+# 字段：
+#   forward/back : 米（+前进/-后退）
+#   turn         : 度（+左/-右），阿克曼=前进圆弧，差速/全向=原地旋转
+#   turn_rev     : 度（+左/-右），阿克曼=倒车圆弧
+#   checkpoint   : 停留秒数 -> 打卡留痕（写入巡更记录）
+#   wait         : 原地等待秒数
+#   speed        : 可选，单独指定该步速度
+#   reverse      : 可选，等价于 turn_rev（turn 加 reverse: true）
+#
+# 下面数值全是"示例"，必须按你现场走道实测距离重新标定！建议先用
+#   python patrol_move_ros1.py --route route_patrol_ros1.yaml --dry-run
+# 预演，再用 --speed 0.12 慢速实跑。
+
+route_name: "考点夜间巡更 A 线（阿克曼版）"
+default_speed: 0.18         # m/s   直行速度
+default_turn_speed: 0.60    # rad/s 仅差速/全向车型的原地转向速度
+akm_turn_speed: 0.10        # m/s   阿克曼转弯时的前进/倒车速度
+
+steps:
+  # --- 待机点出发，沿一楼楼道直行 ---
+  - {forward: 2.00, name: "一楼楼道直行"}
+
+  # --- 东端右转进连廊（阿克曼前进圆弧，前方需留 1m 左右净空）---
+  - {turn: -90, name: "东端右转进连廊"}
+
+  # --- 连廊直行到保密室门口，停留 8s 打卡（云台巡航/环境检测）---
+  - {forward: 1.50, name: "连廊直行"}
+  - {checkpoint: 8.0, name: "试卷保密室门口"}
+
+  # --- 慢速靠近机房门口并巡检 ---
+  - {forward: 1.00, speed: 0.10, name: "慢速靠近机房门口"}
+  - {checkpoint: 5.0, name: "机房门口环境巡检"}
+
+  # --- 连廊尽头三点调头（先倒车右转，再前进右转）---
+  - {turn_rev: -60, name: "调头第1步：倒车右转"}
+  - {turn: -120, name: "调头第2步：前进右转"}
+
+  # --- 原路返回待机点 ---
+  - {forward: 1.00, speed: 0.10, name: "返程（机房段）"}
+  - {forward: 1.50, name: "返程（连廊）"}
+  - {turn: 90, name: "回到一楼楼道"}
+  - {forward: 2.00, name: "返回待机点"}
+  - {wait: 2.0, name: "待机点整备"}

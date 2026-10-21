@@ -1,0 +1,10 @@
+route_name: "地面短路线验证（0.2m 级）"
+default_speed: 0.10
+akm_turn_speed: 0.06
+steps:
+  - {forward: 0.20, name: "直行段"}
+  - {turn: 15, name: "左转 15°"}
+  - {checkpoint: 3.0, name: "打卡点 A"}
+  - {turn_rev: -15, name: "倒车右转 15°（回正）"}
+  - {back: 0.20, name: "退回起点"}
+  - {wait: 2.0, name: "待机点整备"}

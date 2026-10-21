@@ -1,0 +1,78 @@
+{
+  "steps_ok": 2, 
+  "odom_topic": "/odom", 
+  "robot": "Wheeltec ROS1 Melodic", 
+  "loops_done": 1, 
+  "result": "aborted", 
+  "car_mode_source": "由 launch 检测：car_mode=senior_akm（阿克曼）", 
+  "dry_run": false, 
+  "abort_reason": "转向受阻：8.0s 只转了 -5.7° / 目标 60.0°（可能顶住障碍），已停车", 
+  "loops_requested": 1, 
+  "cmd_topic": "/cmd_vel", 
+  "total_distance_m": 2.553, 
+  "duration_s": 33.49, 
+  "events": [
+    {
+      "type": "no_scan", 
+      "detail": "/scan 无数据，避障未启用", 
+      "time": "2026-10-19 17:55:35"
+    }, 
+    {
+      "type": "blocked", 
+      "detail": "转向受阻：8.0s 只转了 -5.7° / 目标 60.0°（可能顶住障碍），已停车", 
+      "time": "2026-10-19 17:56:08"
+    }, 
+    {
+      "type": "abort", 
+      "detail": "转向受阻：8.0s 只转了 -5.7° / 目标 60.0°（可能顶住障碍），已停车", 
+      "time": "2026-10-19 17:56:08"
+    }
+  ], 
+  "start_time": "2026-10-19 17:55:34", 
+  "battery_voltage_start": 22.954999923706055, 
+  "checkpoints": [
+    {
+      "name": "打卡点A · 远端（环境巡检）", 
+      "voltage": 22.954999923706055, 
+      "time": "2026-10-19 17:55:55", 
+      "odom_x": -3.625, 
+      "odom_y": 11.415, 
+      "dwell_s": 4.0
+    }
+  ], 
+  "steps_total": 7, 
+  "route_name": "实验室空地巡更 · 去-调头-回", 
+  "car_mode": "akm", 
+  "task_completion_rate": 28.6, 
+  "steps": [
+    {
+      "index": 1, 
+      "actual": 1.984, 
+      "target": 2.0, 
+      "end": "2026-10-19 17:55:55", 
+      "note": "", 
+      "start": "2026-10-19 17:55:35", 
+      "duration_s": 20.77, 
+      "error": -0.016, 
+      "ok": true, 
+      "type": "forward", 
+      "unit": "m", 
+      "name": "走到空地另一端"
+    }, 
+    {
+      "index": 2, 
+      "actual": 4.0, 
+      "target": 0.0, 
+      "end": "2026-10-19 17:55:59", 
+      "note": "", 
+      "start": "2026-10-19 17:55:55", 
+      "duration_s": 4.05, 
+      "ok": true, 
+      "type": "dwell", 
+      "unit": "m", 
+      "name": "打卡点A · 远端（环境巡检）"
+    }
+  ], 
+  "end_time": "2026-10-19 17:56:08", 
+  "battery_voltage_end": 22.954999923706055
+}

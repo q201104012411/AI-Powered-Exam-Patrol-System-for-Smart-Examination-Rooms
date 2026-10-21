@@ -1,0 +1,103 @@
+{
+  "steps_ok": 4, 
+  "odom_topic": "/odom", 
+  "robot": "Wheeltec ROS1 Melodic", 
+  "loops_done": 1, 
+  "result": "completed", 
+  "car_mode_source": "由 launch 检测：car_mode=senior_akm（阿克曼）", 
+  "dry_run": false, 
+  "abort_reason": null, 
+  "loops_requested": 1, 
+  "cmd_topic": "/cmd_vel", 
+  "total_distance_m": 2.021, 
+  "duration_s": 27.76, 
+  "events": [
+    {
+      "type": "scan_sector_empty", 
+      "detail": "避障扇区 (车体 -35°~+35°) 仅 2 个有效点（补偿角 0°）", 
+      "time": "2026-10-19 17:25:10"
+    }
+  ], 
+  "start_time": "2026-10-19 17:25:10", 
+  "battery_voltage_start": 22.954999923706055, 
+  "checkpoints": [
+    {
+      "name": "打卡点A · 教室前部（云台/环境巡检）", 
+      "voltage": 22.954999923706055, 
+      "time": "2026-10-19 17:25:21", 
+      "odom_x": 2.289, 
+      "odom_y": 2.547, 
+      "dwell_s": 4.0
+    }, 
+    {
+      "name": "打卡点B · 起点（待机架）", 
+      "voltage": 22.954999923706055, 
+      "time": "2026-10-19 17:25:36", 
+      "odom_x": 1.784, 
+      "odom_y": 1.728, 
+      "dwell_s": 2.0
+    }
+  ], 
+  "steps_total": 4, 
+  "route_name": "教室现场巡更 · 往返一圈", 
+  "car_mode": "akm", 
+  "task_completion_rate": 100.0, 
+  "steps": [
+    {
+      "index": 1, 
+      "actual": 0.984, 
+      "target": 1.0, 
+      "end": "2026-10-19 17:25:21", 
+      "note": "", 
+      "start": "2026-10-19 17:25:10", 
+      "duration_s": 10.6, 
+      "error": -0.016, 
+      "ok": true, 
+      "type": "forward", 
+      "unit": "m", 
+      "name": "走到教室前部"
+    }, 
+    {
+      "index": 2, 
+      "actual": 4.0, 
+      "target": 0.0, 
+      "end": "2026-10-19 17:25:25", 
+      "note": "", 
+      "start": "2026-10-19 17:25:21", 
+      "duration_s": 4.03, 
+      "ok": true, 
+      "type": "dwell", 
+      "unit": "m", 
+      "name": "打卡点A · 教室前部（云台/环境巡检）"
+    }, 
+    {
+      "index": 3, 
+      "actual": 0.98, 
+      "target": 1.0, 
+      "end": "2026-10-19 17:25:36", 
+      "note": "", 
+      "start": "2026-10-19 17:25:25", 
+      "duration_s": 10.59, 
+      "error": -0.02, 
+      "ok": true, 
+      "type": "back", 
+      "unit": "m", 
+      "name": "退回起点侧"
+    }, 
+    {
+      "index": 4, 
+      "actual": 2.0, 
+      "target": 0.0, 
+      "end": "2026-10-19 17:25:38", 
+      "note": "", 
+      "start": "2026-10-19 17:25:36", 
+      "duration_s": 2.03, 
+      "ok": true, 
+      "type": "dwell", 
+      "unit": "m", 
+      "name": "打卡点B · 起点（待机架）"
+    }
+  ], 
+  "end_time": "2026-10-19 17:25:38", 
+  "battery_voltage_end": 22.954999923706055
+}

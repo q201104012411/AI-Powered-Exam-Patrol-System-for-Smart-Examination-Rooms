@@ -1,0 +1,718 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>小车遥控面板</title>
+<style>
+  :root{
+    --bg:#0e1116; --panel:#161b22; --panel2:#1c232d; --line:#2a3240;
+    --fg:#e6edf3; --dim:#8b949e; --ok:#3fb950; --warn:#d29922; --err:#f85149; --acc:#388bfd;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  body{margin:0; background:var(--bg); color:var(--fg);
+       font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans SC",sans-serif;}
+  header{display:flex; align-items:center; gap:10px; padding:10px 14px;
+         background:var(--panel); border-bottom:1px solid var(--line); flex-wrap:wrap;}
+  header h1{font-size:16px; margin:0; font-weight:600; letter-spacing:.5px;}
+  .pills{display:flex; gap:8px; flex-wrap:wrap; margin-left:auto;}
+  .pill{font-size:12px; padding:4px 9px; border-radius:999px; background:var(--panel2);
+        border:1px solid var(--line); color:var(--dim); white-space:nowrap;}
+  .pill b{color:var(--fg); font-weight:600;}
+  .pill.ok{border-color:#1f6f3f; color:var(--ok);}
+  .pill.bad{border-color:#7d2b26; color:var(--err);}
+  .pill.warn{border-color:#7a5a12; color:var(--warn);}
+
+  .banner{display:none; padding:10px 14px; font-size:14px; font-weight:600; text-align:center;}
+  .banner.show{display:block;}
+  .banner.err{background:#3d1414; color:#ffb3ae; border-bottom:1px solid #7d2b26;}
+  .banner.warn{background:#3a2c0a; color:#ffd48a; border-bottom:1px solid #7a5a12;}
+
+  main{display:grid; grid-template-columns:minmax(300px,420px) 1fr; gap:12px; padding:12px;}
+  @media (max-width:860px){ main{grid-template-columns:1fr;} }
+
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:12px;}
+  .card h2{font-size:13px; margin:0 0 10px; color:var(--dim); font-weight:600; letter-spacing:.6px;}
+
+  /* 方向键盘 */
+  .pad{display:grid; grid-template-columns:repeat(3,1fr); grid-template-rows:repeat(3,1fr);
+       gap:8px; aspect-ratio:1/1; max-height:340px;}
+  .pad button{border:1px solid var(--line); background:var(--panel2); color:var(--fg);
+              border-radius:12px; font-size:22px; font-weight:700; cursor:pointer;
+              display:flex; align-items:center; justify-content:center; user-select:none;
+              transition:background .06s, transform .06s;}
+  .pad button small{display:block; font-size:10px; color:var(--dim); font-weight:400; margin-top:2px;}
+  .pad button.active{background:#1f4f8f; border-color:var(--acc); transform:scale(.97);}
+  .pad button.stop{background:#4a1b18; border-color:#7d2b26; color:#ffb3ae; font-size:15px;}
+  .pad button.stop.active{background:#7d2b26;}
+  .pad .lbl{display:flex; flex-direction:column; align-items:center; justify-content:center;
+            color:var(--dim); font-size:11px;}
+
+  .row{display:flex; align-items:center; gap:10px; margin:10px 0; font-size:13px; color:var(--dim);}
+  input[type=range]{flex:1; accent-color:var(--acc);}
+  .val{color:var(--fg); font-variant-numeric:tabular-nums; min-width:74px; text-align:right;}
+
+  .pbox{ margin-top:12px; border-top:1px dashed #cbd5e1; padding-top:10px; }
+  .prow{ display:grid; grid-template-columns:110px 1fr 46px; gap:8px; align-items:center; margin:6px 0; }
+  .prow label{ font-size:12px; color:#475569; }
+  .pv{ font-size:12px; font-weight:700; color:#2f6fed; text-align:right; }
+  #codeBox{ width:100%; height:260px; margin-top:10px; font-family:ui-monospace,Consolas,monospace;
+            font-size:12px; line-height:1.45; border:1px solid #cbd5e1; border-radius:8px;
+            padding:10px; background:#0f172a; color:#e2e8f0; resize:vertical; }
+  .mini.shoot{ background:#b45309; color:#fff; border-color:#92400e; }
+  .shotlist{ display:flex; gap:8px; flex-wrap:wrap; margin-top:6px; }
+  .shotlist a{ display:block; width:84px; }
+  .shotlist img{ width:84px; height:63px; object-fit:cover; border-radius:6px; border:1px solid #cbd5e1; }
+  .shotlist span{ display:block; font-size:9.5px; color:#64748b; text-align:center; }
+  .mini{ background:#eef2f7; color:#1f2937; border:1px solid #cbd5e1; border-radius:8px;
+         padding:7px 12px; font-size:12.5px; font-weight:600; cursor:pointer; }
+  .mini:hover{ background:#e2e8f7; }
+  .line-run{ background:#1a7f37; color:#fff; border:0; border-radius:10px;
+             padding:12px 18px; font-size:15px; font-weight:700; cursor:pointer; }
+  .line-run.stop{ background:#b91c1c; }
+  .line-run:disabled{ opacity:.45; cursor:not-allowed; }
+  .estop{width:100%; margin-top:10px; padding:14px; border-radius:12px; cursor:pointer;
+         background:#5a1a16; border:1px solid #9c2c25; color:#ffd7d3;
+         font-size:16px; font-weight:800; letter-spacing:1px;}
+  .estop.on{background:#1f2a1f; border-color:#2f6b3a; color:#9ee7ac;}
+  .hint{font-size:12px; color:var(--dim); line-height:1.7; margin-top:10px;}
+
+  /* 遥测 */
+  .grid2{display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px;}
+  .stat{background:var(--panel2); border:1px solid var(--line); border-radius:10px; padding:9px 11px;}
+  .stat .k{font-size:11px; color:var(--dim);}
+  .stat .v{font-size:19px; font-weight:700; font-variant-numeric:tabular-nums; margin-top:3px;}
+  .stat .u{font-size:11px; color:var(--dim); font-weight:400; margin-left:2px;}
+
+  .bars{margin-top:10px; display:grid; gap:7px;}
+  .bar{display:grid; grid-template-columns:56px 1fr 64px; align-items:center; gap:8px; font-size:12px; color:var(--dim);}
+  .track{height:9px; background:#0b0f14; border:1px solid var(--line); border-radius:99px; overflow:hidden;}
+  .fill{height:100%; width:0%; background:var(--ok); transition:width .12s;}
+  .fill.warn{background:var(--warn);} .fill.bad{background:var(--err);}
+  .bar .num{text-align:right; font-variant-numeric:tabular-nums; color:var(--fg);}
+
+  /* 摄像头 */
+  .camgrid{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .campane{ background:#0b0f14; border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .campane.wide{ grid-column:1 / -1; }
+  .campane.off{ opacity:0.28; filter:grayscale(1); }
+  .campane.off .camtitle::after{ content:"（未启用，与另一路 USB 带宽冲突）"; color:#94a3b8; font-weight:400; }
+  .campane img{ width:100%; height:auto; display:block; aspect-ratio:4/3; object-fit:cover; background:#0b0f14; }
+  .campane.wide img{ aspect-ratio:5/3; }
+  .camtitle{ font-size:12px; font-weight:700; color:#cbd5e1; padding:6px 8px; background:#111827; }
+  .badge{ font-size:10px; padding:1px 7px; border-radius:99px; background:#1a7f37; color:#fff; margin-left:6px; }
+  .badge.grey{ background:#475569; }
+  .camsub{ font-size:10.5px; color:#64748b; padding:4px 8px 6px; }
+  .cam{position:relative; background:#05070a; border:1px solid var(--line); border-radius:10px;
+       overflow:hidden; aspect-ratio:4/3; display:flex; align-items:center; justify-content:center;}
+  .cam img{width:100%; height:100%; object-fit:contain; display:none;}
+  .cam .ph{color:var(--dim); font-size:12px; text-align:center; padding:16px; line-height:1.8;}
+  .camrow{display:flex; gap:8px; margin-top:8px;}
+  .camrow input{flex:1; background:var(--panel2); border:1px solid var(--line); color:var(--fg);
+                border-radius:8px; padding:7px 9px; font-size:12px;}
+  .camrow button{background:var(--panel2); border:1px solid var(--line); color:var(--fg);
+                 border-radius:8px; padding:7px 12px; font-size:12px; cursor:pointer;}
+  footer{padding:10px 14px 22px; color:var(--dim); font-size:12px; text-align:center; line-height:1.8;}
+  code{background:#0b0f14; border:1px solid var(--line); border-radius:5px; padding:1px 5px; font-size:11px;}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🤖 小车遥控面板</h1>
+  <div class="pills">
+    <span class="pill" id="pillLink">连接中…</span>
+    <span class="pill" id="pillBat">电池 --</span>
+    <span class="pill" id="pillMode">模式 --</span>
+    <span class="pill" id="pillSafe">安全 --</span>
+  </div>
+</header>
+
+<div class="banner err" id="banner"></div>
+
+<main>
+  <!-- 左：控制 -->
+  <section class="card">
+    <h2>控制（按住才动，松开立即停）</h2>
+    <div class="pad">
+      <div class="lbl"></div>
+      <button data-dir="fwd">↑<small>前进 W</small></button>
+      <div class="lbl"></div>
+
+      <button data-dir="left">←<small>左转(弧) A</small></button>
+      <button class="stop" data-dir="stop">停车<small>空格</small></button>
+      <button data-dir="right">→<small>右转(弧) D</small></button>
+
+      <div class="lbl"></div>
+      <button data-dir="back">↓<small>后退 S</small></button>
+      <div class="hint" style="grid-column:1/-1; margin-top:6px">
+        方向盘：<b id="steerState">直</b>　油门：<b id="throttleState">停</b>
+        <br><label style="cursor:pointer"><input type="checkbox" id="steerCreep">
+        可选：左右键单独按时也"边走边打方向"（0.15m/s 慢弧）。默认不勾＝只发方向、电机不转</label>
+        <br>左右 + 前进/后退 → 正常弧线行驶
+      </div>
+      <div class="lbl"></div>
+    </div>
+
+    <div class="row"><span>速度</span>
+      <input type="range" id="speed" min="5" max="20" step="1" value="10">
+      <span class="val" id="speedVal">0.10 m/s</span></div>
+
+    <div class="row"><span>转向</span>
+      <input type="range" id="turn" min="10" max="60" step="5" value="30">
+      <span class="val" id="turnVal">0.30 rad/s</span></div>
+
+    <div class="card" style="margin-top:12px">
+      <h2>跟随黑绳（一键）</h2>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+        <button id="lineBtn" class="line-run">▶ 一键跟随黑绳</button>
+        <span id="lineState" class="pill">未运行</span>
+        <button id="paramBtn" class="mini">参数/代码</button>
+      </div>
+
+      <div id="paramBox" class="pbox" style="display:none">
+        <div class="prow"><label>直线速度 v (m/s)</label>
+          <input type="range" id="pSpeed" min="0.04" max="0.25" step="0.01">
+          <span class="pv" id="pSpeedV">--</span></div>
+        <div class="prow"><label>比例 Kp</label>
+          <input type="range" id="pKp" min="0.2" max="2.0" step="0.05">
+          <span class="pv" id="pKpV">--</span></div>
+        <div class="prow"><label>微分 Kd</label>
+          <input type="range" id="pKd" min="0" max="1.0" step="0.05">
+          <span class="pv" id="pKdV">--</span></div>
+        <div class="prow"><label>死区 deadband</label>
+          <input type="range" id="pDb" min="0" max="0.25" step="0.01">
+          <span class="pv" id="pDbV">--</span></div>
+        <div class="prow"><label>最大角速度</label>
+          <input type="range" id="pW" min="0.1" max="1.0" step="0.05">
+          <span class="pv" id="pWV">--</span></div>
+        <div class="prow"><label>黑线阈值 V &lt;</label>
+          <input type="range" id="pVt" min="40" max="160" step="5">
+          <span class="pv" id="pVtV">--</span></div>
+        <div class="prow"><label>方向权重</label>
+          <input type="range" id="pDir" min="0" max="1" step="0.05">
+          <span class="pv" id="pDirV">--</span></div>
+        <div class="prow"><label>满舵距离 (m)</label>
+          <input type="range" id="pLock" min="0.3" max="2.0" step="0.1">
+          <span class="pv" id="pLockV">--</span></div>
+        <div class="prow"><label>提前靠距离 (m)</label>
+          <input type="range" id="pAppr" min="1.0" max="4.0" step="0.1">
+          <span class="pv" id="pApprV">--</span></div>
+        <div class="prow"><label>盲走时间 (s)</label>
+          <input type="range" id="pCoast" min="1" max="8" step="0.5">
+          <span class="pv" id="pCoastV">--</span></div>
+        <div style="display:flex; gap:8px; margin-top:8px; flex-wrap:wrap">
+          <button id="paramSave" class="mini">保存参数</button>
+          <button id="fileRefresh" class="mini">刷新文件列表</button>
+          <button id="fileSave" class="mini">保存文件（校验）</button>
+          <button id="codeRestore" class="mini">恢复备份</button>
+        </div>
+        <div class="hint" style="margin-top:6px">
+          文件快捷方式（点一下就能编辑；路径：<code id="fileRoot">~/patrol_robot</code>）
+        </div>
+        <select id="fileList" size="8" style="width:100%; font-family:ui-monospace,monospace; font-size:12px;
+                border:1px solid #cbd5e1; border-radius:8px; padding:6px; background:#f8fafc"></select>
+        <textarea id="codeBox" spellcheck="false" placeholder="从上面选一个文件，内容会显示在这里"></textarea>
+        <div class="hint" id="codeMsg"></div>
+      </div>
+      <div class="grid2" style="margin-top:10px">
+        <div class="stat"><div class="k">偏差 err</div><div class="v" id="lineErr" style="font-size:15px">--</div></div>
+        <div class="stat"><div class="k">已过弯道</div><div class="v" id="lineCorners" style="font-size:15px">--</div></div>
+      </div>
+      <div class="hint">
+        ・巡线期间**手动控制自动锁定**（两边都会发 /cmd_vel，不能同时用）<br>
+        ・巡线需要相机，**相机会和雷达抢 USB**，所以绕圈时避障是关的<br>
+        ・点"急停"会立即停掉巡线并锁定
+      </div>
+    </div>
+
+    <button class="estop" id="estop">⛔ 急停（点击锁定）</button>
+    <div class="hint">
+      ・鼠标/手指按住方向键才发送速度，松开或页面失焦自动停车<br>
+      ・左右转是**边走边转的弧线**（阿克曼底盘不能原地打转）<br>
+      ・服务器另有 0.6s 看门狗：断网、关标签都会自动停<br>
+      ・前方 &lt;0.35m 有障碍时前进会被拒绝（后退不受限）
+    </div>
+  </section>
+
+  <!-- 右：遥测 + 摄像头 -->
+  <section style="display:grid; gap:12px;">
+    <div class="card">
+      <h2>遥测</h2>
+      <div class="grid2">
+        <div class="stat"><div class="k">位置 X</div><div class="v" id="posX">--<span class="u">m</span></div></div>
+        <div class="stat"><div class="k">位置 Y</div><div class="v" id="posY">--<span class="u">m</span></div></div>
+        <div class="stat"><div class="k">航向 (odom)</div><div class="v" id="yaw">--<span class="u">°</span></div></div>
+        <div class="stat"><div class="k">电池电量</div>
+          <div class="v" id="bat">--<span class="u">V</span></div>
+          <div class="track" style="margin-top:6px"><div class="fill" id="batBar"></div></div>
+          <div class="hint" id="batHint" style="margin-top:4px">--</div>
+        </div>
+        <div class="stat"><div class="k">姿态 pitch / roll</div><div class="v" id="tilt" style="font-size:15px">--</div></div>
+        <div class="stat"><div class="k">当前指令 v / w</div><div class="v" id="cmd" style="font-size:15px">--</div></div>
+      </div>
+      <div class="bars">
+        <div class="bar"><span>前</span><div class="track"><div class="fill" id="barF"></div></div><span class="num" id="numF">--</span></div>
+        <div class="bar"><span>左</span><div class="track"><div class="fill" id="barL"></div></div><span class="num" id="numL">--</span></div>
+        <div class="bar"><span>右</span><div class="track"><div class="fill" id="barR"></div></div><span class="num" id="numR">--</span></div>
+        <div class="bar"><span>后</span><div class="track"><div class="fill" id="barB"></div></div><span class="num" id="numB">--</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>摄像头（三路实时）</h2>
+      <div class="camgrid">
+        <div class="campane">
+          <div class="camtitle">Astra S · RGB <span class="badge">寻路 / 巡线</span></div>
+          <img id="camAstra" alt="Astra RGB">
+          <div class="camsub">/camera/rgb/image_raw</div>
+        </div>
+        <div class="campane">
+          <div class="camtitle">Astra S · 深度</div>
+          <img id="camDepth" alt="Astra Depth">
+          <div class="camsub">/camera/depth/image_raw</div>
+        </div>
+        <div class="campane wide">
+          <div class="camtitle">USB 广角 · 800×480 <span class="badge grey">拍摄 / 巡检</span></div>
+          <img id="camUsb" alt="USB camera">
+          <div class="camsub">/usb_cam/image_raw</div>
+        </div>
+      </div>
+      <div class="camrow">
+        <span style="font-size:12px;color:#475569">相机源：</span>
+        <button id="camSrcBoth" class="mini">两路全开</button>
+        <button id="camSrcAstra" class="mini">仅 Astra</button>
+        <button id="camSrcUsb" class="mini">USB 广角</button>
+        <span id="camMsg" style="font-size:11.5px;color:#0f766e"></span>
+        <button id="camReload" class="mini">重连画面</button>
+        <button id="shootBtn" class="mini shoot">📷 拍照</button>
+        <input id="shotNote" placeholder="备注（可选）" style="width:130px">
+      </div>
+      <div id="shotMsg" style="font-size:11.5px;color:#0f766e;margin-top:4px"></div>
+      <div id="shotList" class="shotlist"></div>
+      <div class="camrow" style="display:none">
+        <span class="hint" style="margin:0">画面走 8081 的 MJPEG；没画面说明相机或 web_video_server 没起</span>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  由 <code>robot_web.py</code> 提供 · 目标 <span id="footHost">--</span> ·
+  安全策略由服务器强制执行，网页只是遥控器
+</footer>
+
+<script>
+(function(){
+  "use strict";
+  const $ = id => document.getElementById(id);
+  const state = { estop:false, blocked:"", dir:null, timer:null, lastOk:0 };
+
+  // ---------- 速度 ----------
+  const speedEl = $("speed"), turnEl = $("turn");
+  function limits(){
+    return {
+      v: parseInt(speedEl.value,10)/100,          // 0.05 ~ 0.20 m/s
+      w: parseInt(turnEl.value,10)/100             // 0.10 ~ 0.60 rad/s
+    };
+  }
+  function syncLabels(){
+    $("speedVal").textContent = (parseInt(speedEl.value,10)/100).toFixed(2)+" m/s";
+    $("turnVal").textContent  = (parseInt(turnEl.value,10)/100).toFixed(2)+" rad/s";
+  }
+  speedEl.addEventListener("input", syncLabels);
+  turnEl.addEventListener("input", syncLabels);
+  syncLabels();
+
+  // ---------- 指令 ----------
+  function cmd(v,w){
+    fetch("/api/cmd?v="+encodeURIComponent(v.toFixed(3))+"&w="+encodeURIComponent(w.toFixed(3)))
+      .then(r=>r.json()).catch(()=>{});
+  }
+  function stop(){ fetch("/api/stop").catch(()=>{}); }
+
+  // 方向盘 + 油门 分开：
+  //   左右 = 打方向盘（只记方向，不驱动）；前后 = 油门；两者可组合
+  //   注意：这台底盘的固件按 (v,w) 实时算舵机角度，v=0 时不会偏转，
+  //         所以"只按左右"不会让车动（物理限制），一旦按前进就是朝那个方向的弧
+  const ctl = { throttle: 0, steer: 0 };
+  function pushCmd(){
+    const l = limits();
+    let v, w;
+    if (ctl.throttle !== 0){
+      v = ctl.throttle * l.v;
+      w = ctl.steer * l.w;            // 左=+w（阿克曼正角速度=左转）
+    } else if (ctl.steer !== 0){
+      const creep = $("steerCreep") ? $("steerCreep").checked : false;
+      v = creep ? 0.15 : 0.0;         // 默认 0：只按方向不动电机
+      w = ctl.steer * l.w * 0.9;
+    } else {
+      v = 0; w = 0;
+    }
+    cmd(v, w);
+    const st = $("steerState"), th = $("throttleState");
+    if (st) st.textContent = ctl.steer > 0 ? "左" : (ctl.steer < 0 ? "右" : "直");
+    if (th) th.textContent = ctl.throttle > 0 ? "前进" : (ctl.throttle < 0 ? "后退" : "停");
+  }
+
+  function begin(dir, btn){
+    if (state.estop) return;
+    state.dir = dir;
+    btn.classList.add("active");
+    if (dir === "fwd")  ctl.throttle = 1;
+    if (dir === "back") ctl.throttle = -1;
+    if (dir === "left")  ctl.steer = 1;
+    if (dir === "right") ctl.steer = -1;
+    pushCmd();
+    clearInterval(state.timer);
+    state.timer = setInterval(pushCmd, 120);
+  }
+  function end(btn){
+    // 松开哪个键就复位哪个（方向盘松手回正，油门松手归零）
+    if (state.dir === "fwd" || state.dir === "back") ctl.throttle = 0;
+    if (state.dir === "left" || state.dir === "right") ctl.steer = 0;
+    pushCmd();
+    state.dir = null;
+    clearInterval(state.timer); state.timer = null;
+    if (btn) btn.classList.remove("active");
+    stop();
+  }
+
+  document.querySelectorAll(".pad button[data-dir]").forEach(btn=>{
+    const dir = btn.dataset.dir;
+    if (dir === "stop"){
+      const h = e => { e.preventDefault(); end(null); btn.classList.add("active"); setTimeout(()=>btn.classList.remove("active"),120); };
+      btn.addEventListener("pointerdown", h);
+      btn.addEventListener("click", e=>{ e.preventDefault(); stop(); });
+      return;
+    }
+    btn.addEventListener("pointerdown", e=>{ e.preventDefault(); btn.setPointerCapture(e.pointerId); begin(dir, btn); });
+    btn.addEventListener("pointerup",   e=>{ e.preventDefault(); end(btn); });
+    btn.addEventListener("pointercancel", ()=> end(btn));
+    btn.addEventListener("pointerleave", ()=> end(btn));
+    btn.addEventListener("contextmenu", e=> e.preventDefault());
+  });
+
+  // ---------- 键盘 ----------
+  const keyMap = { KeyW:"fwd", ArrowUp:"fwd", KeyS:"back", ArrowDown:"back",
+                   KeyA:"left", ArrowLeft:"left", KeyD:"right", ArrowRight:"right" };
+  function btnOf(dir){ return document.querySelector('.pad button[data-dir="'+dir+'"]'); }
+  document.addEventListener("keydown", e=>{
+    if (e.code === "Space"){ e.preventDefault(); stop(); return; }
+    if (e.code === "Escape"){ e.preventDefault(); toggleEstop(); return; }
+    const dir = keyMap[e.code];
+    if (!dir) return;
+    e.preventDefault();
+    if (state.dir === dir) return;
+    if (state.dir) end(btnOf(state.dir));
+    begin(dir, btnOf(dir));
+  });
+  document.addEventListener("keyup", e=>{
+    const dir = keyMap[e.code];
+    if (dir && state.dir === dir) end(btnOf(dir));
+  });
+
+  // ---------- 急停 ----------
+  function toggleEstop(){
+    const on = !state.estop;
+    fetch("/api/estop?on="+(on?1:0)).then(()=>{ state.estop = on; paintEstop(); }).catch(()=>{});
+    if (on){ end(null); }
+  }
+  function paintEstop(){
+    const b = $("estop");
+    b.classList.toggle("on", state.estop);
+    b.textContent = state.estop ? "✅ 已急停 —— 点击解除" : "⛔ 急停（点击锁定）";
+  }
+  $("estop").addEventListener("click", toggleEstop);
+
+  // ---------- 遥测 ----------
+  function fmt(v, n){ return (v===null||v===undefined||isNaN(v)) ? "--" : Number(v).toFixed(n); }
+  function setBar(id, numId, dist){
+    const el = $(id), num = $(numId);
+    if (dist === null || dist === undefined || isNaN(dist)){
+      el.style.width = "0%"; num.textContent = "--"; return;
+    }
+    const max = 3.0, pct = Math.max(0, Math.min(1, dist/max)) * 100;
+    el.style.width = pct.toFixed(0)+"%";
+    el.className = "fill" + (dist < 0.4 ? " bad" : (dist < 1.0 ? " warn" : ""));
+    num.textContent = dist.toFixed(2)+" m";
+  }
+
+  let lineRunning = false;
+  const PARAM_KEYS = ["speed","kp","kd","deadband","max_angular","v_thresh","s_thresh"];
+  const PARAM_UI = { speed:"pSpeed", kp:"pKp", kd:"pKd", deadband:"pDb", max_angular:"pW",
+                     v_thresh:"pVt", dir_weight:"pDir", lock_dist:"pLock",
+                     approach_dist:"pAppr", coast_time:"pCoast" };
+
+  $("paramBtn").addEventListener("click", () => {
+    const b = $("paramBox");
+    b.style.display = (b.style.display === "none") ? "block" : "none";
+    if (b.style.display === "block") { loadParams(); if (typeof loadFileList === "function") loadFileList(); }
+  });
+
+  function loadParams(){
+    fetch("/api/params",{cache:"no-store"}).then(r=>r.json()).then(j=>{
+      const p = j.params || {};
+      Object.keys(PARAM_UI).forEach(k => {
+        const el = $(PARAM_UI[k]);
+        if (el && p[k] !== undefined) { el.value = p[k]; $(PARAM_UI[k]+"V").textContent = p[k]; }
+      });
+      Object.values(PARAM_UI).forEach((id, i) => {
+        const el = $(id);
+        el.oninput = () => { $(id+"V").textContent = el.value; };
+      });
+    });
+  }
+
+  $("paramSave").addEventListener("click", () => {
+    const p = {};
+    Object.keys(PARAM_UI).forEach(k => { p[k] = parseFloat($(PARAM_UI[k]).value); });
+    p.line_color = "black";
+    fetch("/api/params", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({params:p})})
+      .then(r=>r.json()).then(j=>{
+        $("codeMsg").textContent = j.ok ? "参数已保存：" + JSON.stringify(j.params) : ("保存失败：" + j.err);
+      });
+  });
+
+  let curFile = null;
+  function loadFileList(){
+    fetch("/api/files",{cache:"no-store"}).then(r=>r.json()).then(j=>{
+      if (!j.ok) return;
+      $("fileRoot").textContent = j.root;
+      const sel = $("fileList"); sel.innerHTML = "";
+      j.files.forEach(f=>{
+        const o = document.createElement("option");
+        o.value = f.rel;
+        o.textContent = f.rel + "   (" + Math.round(f.size/1024) + "K, " + f.mtime + ")";
+        sel.appendChild(o);
+      });
+    });
+  }
+  function openFile(rel){
+    fetch("/api/file?path=" + encodeURIComponent(rel), {cache:"no-store"})
+      .then(r=>r.json()).then(j=>{
+        if (!j.ok){ $("codeMsg").textContent = "读取失败：" + j.err; return; }
+        curFile = rel;
+        $("codeBox").value = j.code;
+        $("codeMsg").textContent = "已打开 " + rel + "（改完点「保存文件」，会先做语法校验）";
+      });
+  }
+  if ($("fileList")) $("fileList").addEventListener("change", e => openFile(e.target.value));
+  if ($("fileRefresh")) $("fileRefresh").addEventListener("click", loadFileList);
+  if ($("fileSave")) $("fileSave").addEventListener("click", () => {
+    if (!curFile){ $("codeMsg").textContent = "先从列表选一个文件"; return; }
+    const code = $("codeBox").value;
+    fetch("/api/file", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({path: curFile, code})})
+      .then(r=>r.json()).then(j=>{
+        $("codeMsg").textContent = j.ok ? ("已保存 " + j.saved + "（备份 " + j.backup + "）")
+                                        : ("未保存：" + (j.err||"") + " " + (j.detail||""));
+      });
+  });
+  loadFileList();
+
+  $("codeRestore").addEventListener("click", () => {
+    if (!confirm("用上一版备份覆盖当前巡线代码？")) return;
+    fetch("/api/code/restore", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({})})
+      .then(r=>r.json()).then(j=>{
+        $("codeMsg").textContent = j.ok ? "已恢复备份（" + j.bytes + " 字节），记得「读取代码」刷新文本框"
+                                        : ("恢复失败：" + (j.err||""));
+      });
+  });
+  function paintLine(){
+    const b = $("lineBtn");
+    b.textContent = lineRunning ? "■ 停止跟随" : "▶ 一键跟随黑绳";
+    b.className = "line-run" + (lineRunning ? " stop" : "");
+    // 巡线时禁用方向键，避免误操作
+    document.querySelectorAll("[data-dir]").forEach(el => { el.disabled = lineRunning; });
+  }
+  $("lineBtn").addEventListener("click", () => {
+    if (lineRunning) {
+      fetch("/api/line?on=0", {cache:"no-store"}).then(r=>r.json()).then(()=>{ lineRunning=false; paintLine(); poll(); });
+      return;
+    }
+    if (!confirm("开始后小车会自己沿黑绳行走，请确认：\n1) 车已摆在地胶上、车身压线\n2) 周围没人和杂物\n3) 你手边能按急停")) return;
+    fetch("/api/line?on=1&color=black", {cache:"no-store"}).then(r=>r.json()).then(j=>{
+      if (!j.ok) alert("启动失败：" + (j.err||"未知"));
+      lineRunning = !!j.ok; paintLine(); poll();
+    });
+  });
+
+  function batPct(v){
+    if (v === null || v === undefined) return null;
+    return Math.max(0, Math.min(100, (v - 21.0) / (25.2 - 21.0) * 100));
+  }
+
+  function poll(){
+    fetch("/api/state", {cache:"no-store"}).then(r=>r.json()).then(s=>{
+      state.lastOk = Date.now();
+      const link = $("pillLink");
+      link.textContent = "已连接"; link.className = "pill ok";
+
+      const bat = s.battery;
+      const pct = batPct(bat);
+      const bp = $("pillBat");
+      bp.innerHTML = "电池 <b>" + (bat ? bat.toFixed(2) : "--") + " V</b>" +
+                     (pct === null ? "" : " <b>" + pct.toFixed(0) + "%</b>");
+      bp.className = "pill " + (!bat ? "" : (pct < 20 ? "bad" : (pct < 50 ? "warn" : "ok")));
+
+      const mp = $("pillMode");
+      mp.textContent = s.dry_run ? "DRY-RUN" : "实车";
+      mp.className = "pill " + (s.dry_run ? "warn" : "ok");
+
+      const sp = $("pillSafe");
+      if (s.estop){ sp.textContent = "急停"; sp.className = "pill bad"; }
+      else if (s.blocked){ sp.textContent = s.blocked; sp.className = "pill warn"; }
+      else { sp.textContent = "安全"; sp.className = "pill ok"; }
+
+      const banner = $("banner");
+      const msg = s.estop ? "⛔ 已急停 —— 点击下方按钮解除后才能继续操作"
+                 : (s.blocked ? "⚠ " + s.blocked + " —— 已阻止移动" : "");
+      banner.textContent = msg;
+      banner.className = "banner " + (msg ? (s.estop ? "err" : "warn") : "");
+      if (msg) banner.classList.add("show");
+
+      if (s.odom){ $("posX").innerHTML = fmt(s.odom.x,2)+'<span class="u">m</span>';
+                   $("posY").innerHTML = fmt(s.odom.y,2)+'<span class="u">m</span>';
+                   $("yaw").innerHTML   = fmt(s.odom.yaw,1)+'<span class="u">°</span>'; }
+      $("bat").innerHTML = (bat?bat.toFixed(2):"--")+'<span class="u">V</span>';
+      const bb = $("batBar"), bh = $("batHint");
+      if (bat && pct !== null){
+        bb.style.width = pct.toFixed(0)+"%";
+        bb.className = "fill" + (pct < 20 ? " bad" : (pct < 50 ? " warn" : ""));
+        bh.textContent = "约 " + pct.toFixed(0) + "%  ·  " +
+          (pct < 20 ? "亏电，请充电（低于 21V 会掉电重启）"
+                    : (pct < 50 ? "偏低，建议充电" : "电量正常"));
+      } else {
+        bb.style.width = "0%"; bh.textContent = "读不到电压（底盘驱动未运行？）";
+      }
+      $("tilt").textContent = s.imu ? (fmt(s.imu.pitch,1)+"° / "+fmt(s.imu.roll,1)+"°") : "--";
+      $("cmd").textContent  = fmt(s.cmd.v,2)+" / "+fmt(s.cmd.w,2);
+
+      setBar("barF","numF", s.clear.front);
+      setBar("barL","numL", s.clear.left);
+      setBar("barR","numR", s.clear.right);
+      setBar("barB","numB", s.clear.rear);
+
+      const L = s.line || {};
+      if (L.running !== undefined) {
+        const wasRunning = lineRunning;
+        lineRunning = !!L.running;
+        if (wasRunning !== lineRunning) paintLine();
+        const ls = L.status || {};
+        $("lineErr").textContent = (ls.err !== undefined) ? (ls.err>=0?"+":"")+ls.err.toFixed(2) : "--";
+        $("lineCorners").textContent = (ls.corners !== undefined) ? ls.corners + " 个" : "--";
+        const st = $("lineState");
+        if (!L.running){ st.textContent = "未运行"; st.className = "pill"; }
+        else if (ls.state === "FOLLOW"){ st.textContent = "巡线中"; st.className = "pill ok"; }
+        else if (ls.state === "REACQUIRE"){ st.textContent = "拐角后找线"; st.className = "pill warn"; }
+        else { st.textContent = ls.state || "运行中"; st.className = "pill warn"; }
+      }
+
+      state.estop = !!s.estop;
+      paintEstop();
+    }).catch(()=>{
+      const link = $("pillLink");
+      link.textContent = "连接断开"; link.className = "pill bad";
+      const banner = $("banner");
+      banner.textContent = "⚠ 与小车失去连接（检查 WiFi / 服务是否在跑）";
+      banner.className = "banner err show";
+    });
+  }
+
+  // 用 /api/snap 快照轮询（比 MJPEG 稳，且深度图能做伪彩色）
+  const CAM = { camAstra:"astra", camDepth:"depth", camUsb:"usb" };
+  let camTimer = null, camOn = true, camSrc = "both";
+  const OFF_SVG = "data:image/svg+xml;utf8," + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="480">' +
+    '<rect width="100%" height="100%" fill="#0b0f14"/>' +
+    '<text x="50%" y="46%" fill="#64748b" font-size="30" font-family="sans-serif" text-anchor="middle">未启用</text>' +
+    '<text x="50%" y="56%" fill="#475569" font-size="18" font-family="sans-serif" text-anchor="middle">与另一路相机共用 USB，只能二选一</text></svg>');
+  function setPane(id, cam, t){
+    const el = $(id); if (!el) return;
+    if (cam) el.src = "/api/snap?cam=" + cam + "&_=" + t;
+    else el.src = OFF_SVG;
+  }
+  function tickCams(){
+    if (!camOn) return;
+    const t = Date.now();
+    if (camSrc === "both"){
+      setPane("camAstra","astra",t); setPane("camDepth","depth",t); setPane("camUsb","usb",t);
+    } else if (camSrc === "astra"){
+      setPane("camAstra","astra",t); setPane("camDepth","depth",t); setPane("camUsb",null,t);
+    } else {
+      setPane("camUsb","usb",t); setPane("camAstra",null,t); setPane("camDepth",null,t);
+    }
+  }
+  function startCams(){ tickCams(); clearInterval(camTimer); camTimer = setInterval(tickCams, 250); }
+  if ($("camReload")) $("camReload").addEventListener("click", () => { camOn = true; startCams(); });
+  function paintSrc(){
+    const astraPanes = [$("camAstra").closest(".campane"), $("camDepth").closest(".campane")];
+    const usbPane = $("camUsb").closest(".campane");
+    const astraOn = (camSrc === "astra" || camSrc === "both");
+    const usbOn = (camSrc === "usb" || camSrc === "both");
+    astraPanes.forEach(p => p && p.classList.toggle("off", !astraOn));
+    if (usbPane) usbPane.classList.toggle("off", !usbOn);
+  }
+  function switchCam(src){
+    camSrc = src; paintSrc();
+    $("camMsg").textContent = "切换中…";
+    fetch("/api/camsource?src=" + src, {cache:"no-store"}).then(r=>r.json()).then(j=>{
+      $("camMsg").textContent = j.ok ? j.detail : ("失败：" + j.err);
+      setTimeout(startCams, 3000);
+    });
+  }
+  function shoot(){
+    const cam = (camSrc === "usb") ? "usb" : "astra";
+    const note = ($("shotNote") && $("shotNote").value || "").trim();
+    $("shotMsg").textContent = "拍摄中…";
+    fetch("/api/photo?cam=" + cam + "&note=" + encodeURIComponent(note), {cache:"no-store"})
+      .then(r=>r.json()).then(j=>{
+        $("shotMsg").textContent = j.ok ? ("已保存：" + j.name + "（" + Math.round(j.bytes/1024) + " KB）")
+                                        : ("拍摄失败：" + j.err);
+        loadShots();
+      }).catch(e => { $("shotMsg").textContent = "拍摄失败：" + e; });
+  }
+  function loadShots(){
+    fetch("/api/photos", {cache:"no-store"}).then(r=>r.json()).then(j=>{
+      const box = $("shotList"); if (!box) return;
+      box.innerHTML = "";
+      (j.photos || []).slice(0, 6).forEach(p => {
+        const a = document.createElement("a");
+        a.href = "/api/photo/get?name=" + encodeURIComponent(p.name);
+        a.target = "_blank";
+        const img = document.createElement("img");
+        img.src = a.href; img.alt = p.name;
+        const sp = document.createElement("span");
+        sp.textContent = p.mtime;
+        a.appendChild(img); a.appendChild(sp); box.appendChild(a);
+      });
+    });
+  }
+  if ($("shootBtn")) $("shootBtn").addEventListener("click", shoot);
+  loadShots();
+  if ($("camSrcBoth")) $("camSrcBoth").addEventListener("click", () => switchCam("both"));
+  if ($("camSrcAstra")) $("camSrcAstra").addEventListener("click", () => switchCam("astra"));
+  if ($("camSrcUsb")) $("camSrcUsb").addEventListener("click", () => switchCam("usb"));
+  paintSrc();
+  startCams();
+  // 页面隐藏时暂停拉流，省带宽
+  document.addEventListener("visibilitychange", () => {
+    camOn = !document.hidden;
+    if (camOn) startCams(); else clearInterval(camTimer);
+  });
+
+  $("footHost").textContent = location.host;
+  poll();
+  setInterval(poll, 300);
+
+  // 页面隐藏 / 失焦 / 关闭 → 立刻停车
+  document.addEventListener("visibilitychange", ()=>{ if (document.hidden){ end(null); } });
+  window.addEventListener("blur", ()=> end(null));
+  window.addEventListener("beforeunload", ()=> stop());
+})();
+</script>
+</body>
+</html>

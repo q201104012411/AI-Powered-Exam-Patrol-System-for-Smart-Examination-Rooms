@@ -1,0 +1,40 @@
+{
+  "steps_ok": 1, 
+  "odom_topic": "/odom", 
+  "robot": "Wheeltec ROS1 Melodic", 
+  "loops_done": 1, 
+  "result": "completed", 
+  "car_mode_source": "由 launch 检测：car_mode=senior_akm（阿克曼）", 
+  "dry_run": false, 
+  "abort_reason": null, 
+  "loops_requested": 1, 
+  "cmd_topic": "/cmd_vel", 
+  "total_distance_m": 0.198, 
+  "duration_s": 4.56, 
+  "events": [], 
+  "start_time": "2026-10-16 13:11:38", 
+  "battery_voltage_start": 22.909000396728516, 
+  "checkpoints": [], 
+  "steps_total": 1, 
+  "route_name": "快速单步移动", 
+  "car_mode": "akm", 
+  "task_completion_rate": 100.0, 
+  "steps": [
+    {
+      "index": 1, 
+      "actual": 0.182, 
+      "target": 0.2, 
+      "end": "2026-10-16 13:11:42", 
+      "note": "", 
+      "start": "2026-10-16 13:11:38", 
+      "duration_s": 4.0, 
+      "error": -0.018, 
+      "ok": true, 
+      "type": "forward", 
+      "unit": "m", 
+      "name": "前进"
+    }
+  ], 
+  "end_time": "2026-10-16 13:11:42", 
+  "battery_voltage_end": 22.832000732421875
+}

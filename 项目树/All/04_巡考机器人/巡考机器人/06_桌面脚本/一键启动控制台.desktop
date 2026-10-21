@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=一键启动控制台
+Comment=启动小车所有服务并打开控制台网页
+Exec=/home/wheeltec/一键启动控制台.sh
+Icon=web-browser
+Terminal=true
+Categories=Utility;
