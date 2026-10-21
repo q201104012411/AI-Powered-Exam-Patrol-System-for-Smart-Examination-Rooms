@@ -925,8 +925,8 @@ class RobotApp(object):
             self._link_buttons.append(rb)
         tk.Label(toolbar, text="帧率", bg=PANEL, fg=DIM,
                  font=FONT_SMALL).pack(side="left", padx=(12, 2))
-        self.fps_var = tk.IntVar(value=int(self.cfg.get("fps", 4)))
-        fps = ttk.Spinbox(toolbar, from_=1, to=10, width=4,
+        self.fps_var = tk.IntVar(value=int(self.cfg.get("fps", 10)))
+        fps = ttk.Spinbox(toolbar, from_=1, to=20, width=4,
                           textvariable=self.fps_var, command=self._fps_changed)
         fps.pack(side="left")
         fps.bind("<FocusOut>", lambda e: self._fps_changed())
@@ -1693,7 +1693,7 @@ class RobotApp(object):
             fps = int(self.fps_var.get())
         except (TypeError, ValueError):
             fps = 4
-        fps = min(10, max(1, fps))
+        fps = min(20, max(1, fps))
         if self.cam_worker is not None:
             self.cam_worker.set_fps(fps)
         cfg = robot_link.load_config()

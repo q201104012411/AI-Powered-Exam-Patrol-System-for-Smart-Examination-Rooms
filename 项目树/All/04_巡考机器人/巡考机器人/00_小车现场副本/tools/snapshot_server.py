@@ -75,7 +75,7 @@ class Snapshoter(object):
                 img[bad] = (0, 0, 0)
             else:
                 img = self.bridge.imgmsg_to_cv2(m, "bgr8")
-            ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+            ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
             if ok:
                 path = os.path.join(OUT, FILES[key])
                 with open(path + ".tmp", "wb") as f:
@@ -92,7 +92,7 @@ def main():
     ap.add_argument("--astra-topic", default="/camera/rgb/image_raw")
     ap.add_argument("--usb-topic", default="/usb_cam/image_raw")
     ap.add_argument("--depth-topic", default="/camera/depth/image_raw")
-    ap.add_argument("--fps", type=int, default=10)
+    ap.add_argument("--fps", type=int, default=15)
     ap.add_argument("--no-depth", dest="with_depth", action="store_false", default=True)
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
