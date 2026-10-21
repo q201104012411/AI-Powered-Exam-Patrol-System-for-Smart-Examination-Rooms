@@ -7,7 +7,12 @@ package main
 
 import (
 	"archive/zip"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -20,12 +25,19 @@ import (
 )
 
 const (
-	trailerMagic = "ZKSFX001" // 8 字节
-	trailerSize  = 24         // magic(8) + offset(8) + size(8)
+	trailerMagic = "ZKSFX001" // 旧版：明文 zip 尾部 24 字节
+	trailerSize  = 24
+	insMagic     = "ZKINS002" // 新版：加密 payload 尾部 40 字节
+	insTrailer   = 40
+	encMagic     = "ZKENC003"
+	maxChunk     = 64 << 20
 	markerName   = ".payload_ready"
 	appTitle     = "智能考场AI巡考系统"
 	entryName    = "总控台.py"
 )
+
+// 加密版构建时通过 -ldflags "-X main.keyBlob=..." 注入（已异或 0x5A 的密钥材料）。
+var keyBlob = ""
 
 var (
 	kernel32 = syscall.NewLazyDLL("kernel32.dll")
@@ -33,6 +45,7 @@ var (
 
 	procSetConsoleOutputCP = kernel32.NewProc("SetConsoleOutputCP")
 	procSetConsoleTitleW   = kernel32.NewProc("SetConsoleTitleW")
+	procSetFileAttributesW = kernel32.NewProc("SetFileAttributesW")
 	procMessageBoxW        = user32.NewProc("MessageBoxW")
 )
 
@@ -76,20 +89,46 @@ func main() {
 	}
 	fileSize := st.Size()
 
-	tr := make([]byte, trailerSize)
-	if _, err := f.ReadAt(tr, fileSize-trailerSize); err != nil {
-		fatal("读取尾部索引失败：" + err.Error())
+	var payloadOff, payloadSize int64
+	var encrypted bool
+	var salt, stubHash []byte
+	// 新版：40 字节尾部（加密 payload）；旧版：24 字节尾部（明文 zip）。
+	tr40 := make([]byte, insTrailer)
+	if fileSize >= insTrailer {
+		_, _ = f.ReadAt(tr40, fileSize-insTrailer)
 	}
-	if string(tr[:8]) != trailerMagic {
-		fatal("这不是有效的单文件安装包（缺少 payload 索引）。")
-	}
-	payloadOff := int64(binary.LittleEndian.Uint64(tr[8:16]))
-	payloadSize := int64(binary.LittleEndian.Uint64(tr[16:24]))
-	if payloadOff <= 0 || payloadSize <= 0 || payloadOff+payloadSize > fileSize-trailerSize {
-		fatal("payload 索引损坏，请重新下载。")
+	if string(tr40[:8]) == insMagic {
+		encrypted = true
+		payloadOff = int64(binary.LittleEndian.Uint64(tr40[8:16]))
+		payloadSize = int64(binary.LittleEndian.Uint64(tr40[16:24]))
+		salt = append([]byte(nil), tr40[24:40]...)
+		if payloadOff <= 0 || payloadSize <= 0 || payloadOff+payloadSize+insTrailer != fileSize {
+			fatal("加密 payload 索引损坏，请重新下载。")
+		}
+		h := sha256.New()
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			fatal("读取安装包失败：" + err.Error())
+		}
+		if _, err := io.CopyN(h, f, payloadOff); err != nil {
+			fatal("校验安装包失败：" + err.Error())
+		}
+		stubHash = h.Sum(nil)
+	} else {
+		tr := make([]byte, trailerSize)
+		if _, err := f.ReadAt(tr, fileSize-trailerSize); err != nil {
+			fatal("读取尾部索引失败：" + err.Error())
+		}
+		if string(tr[:8]) != trailerMagic {
+			fatal("这不是有效的单文件安装包（缺少 payload 索引）。")
+		}
+		payloadOff = int64(binary.LittleEndian.Uint64(tr[8:16]))
+		payloadSize = int64(binary.LittleEndian.Uint64(tr[16:24]))
+		if payloadOff <= 0 || payloadSize <= 0 || payloadOff+payloadSize > fileSize-trailerSize {
+			fatal("payload 索引损坏，请重新下载。")
+		}
 	}
 
-	version := fmt.Sprintf("%x", payloadSize)
+	version := fmt.Sprintf("%x", fileSize)
 
 	base := os.Getenv("LOCALAPPDATA")
 	if base == "" {
@@ -97,26 +136,68 @@ func main() {
 	}
 	target := filepath.Join(base, appTitle, "app-"+version)
 	// 上一次可能已回退到 %TEMP% 或 exe 所在目录：优先复用已解压好的那份，
-	// 避免每次启动都重新解压 800+ MB。
+	// 避免每次启动都重新解密/解压 800+ MB。
 	if ready := existingTarget(base, version, exePath); ready != "" {
 		target = ready
 	}
 
 	if !isReady(target) {
-		sec := io.NewSectionReader(f, payloadOff, payloadSize)
-		zr, err := zip.NewReader(sec, payloadSize)
-		if err != nil {
-			fatal("payload 压缩包无法读取：" + err.Error())
+		var zr *zip.Reader
+		var zrc io.Closer
+		tmpZip := ""
+		if encrypted {
+			key, err := deriveKey(salt, stubHash)
+			if err != nil {
+				fatal("安装包密钥校验失败：" + err.Error())
+			}
+			var tmp *os.File
+			var tmpErr error
+			for _, d := range []string{filepath.Join(base, appTitle), os.TempDir(), filepath.Dir(exePath)} {
+				_ = os.MkdirAll(d, 0o755)
+				tmp, tmpErr = os.CreateTemp(d, "zk_payload_*.zip")
+				if tmpErr == nil {
+					break
+				}
+			}
+			if tmpErr != nil {
+				fatal("无法创建解密临时文件：" + tmpErr.Error())
+			}
+			tmpZip = tmp.Name()
+			tmp.Close()
+			fmt.Printf("首次运行：正在解密并解压运行环境到\n  %s\n（加密载荷 %d MB；只需这一次，以后直接启动）\n\n",
+				target, payloadSize>>20)
+			if err := decryptToFile(f, payloadOff, payloadSize, key, tmpZip); err != nil {
+				os.Remove(tmpZip)
+				fatal("解密失败：" + err.Error())
+			}
+			rc, err := zip.OpenReader(tmpZip)
+			if err != nil {
+				os.Remove(tmpZip)
+				fatal("解密后的 payload 无法读取：" + err.Error())
+			}
+			zr = &rc.Reader
+			zrc = rc
+			defer os.Remove(tmpZip)
+			defer zrc.Close()
+		} else {
+			sec := io.NewSectionReader(f, payloadOff, payloadSize)
+			var err error
+			zr, err = zip.NewReader(sec, payloadSize)
+			if err != nil {
+				fatal("payload 压缩包无法读取：" + err.Error())
+			}
+			fmt.Printf("首次运行：正在解压运行环境到\n  %s\n（压缩包 %d MB；只需这一次，以后直接启动）\n\n",
+				target, payloadSize>>20)
 		}
 		var unpacked uint64
 		for _, zf := range zr.File {
 			unpacked += zf.UncompressedSize64
 		}
-		fmt.Printf("首次运行：正在解压运行环境到\n  %s\n（压缩包 %d MB，解压后约 %d MB；只需这一次，以后直接启动）\n\n",
-			target, payloadSize>>20, unpacked>>20)
+		fmt.Printf("解压后约 %d MB ...\n", unpacked>>20)
 		if err := extractWithFallback(zr, base, version, exePath, &target); err != nil {
 			fatal("解压失败：" + err.Error())
 		}
+		hideDir(target)
 		fmt.Println("\n解压完成。")
 	}
 
@@ -141,6 +222,114 @@ func main() {
 
 	fmt.Println("总控台已启动。")
 	time.Sleep(600 * time.Millisecond)
+}
+
+func secret() ([]byte, error) {
+	if keyBlob == "" {
+		return nil, errors.New("加密安装包密钥材料缺失")
+	}
+	b, err := hex.DecodeString(keyBlob)
+	if err != nil {
+		return nil, err
+	}
+	for i := range b {
+		b[i] ^= 0x5A
+	}
+	if len(b) != 32 {
+		return nil, fmt.Errorf("密钥长度错误：%d", len(b))
+	}
+	return b, nil
+}
+
+func deriveKey(salt, stubHash []byte) ([]byte, error) {
+	sec, err := secret()
+	if err != nil {
+		return nil, err
+	}
+	h := sha256.New()
+	h.Write(sec)
+	h.Write(salt)
+	h.Write(stubHash)
+	return h.Sum(nil), nil
+}
+
+func decryptToFile(f *os.File, offset, size int64, key []byte, outPath string) error {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return err
+	}
+	head := make([]byte, 20)
+	if _, err := io.ReadFull(f, head); err != nil {
+		return err
+	}
+	if string(head[:8]) != encMagic {
+		return errors.New("加密数据标识不正确")
+	}
+	chunkSize := binary.LittleEndian.Uint32(head[8:12])
+	if chunkSize == 0 || chunkSize > maxChunk {
+		return fmt.Errorf("分块大小异常：%d", chunkSize)
+	}
+	noncePrefix := head[12:20]
+	out, err := os.OpenFile(outPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	remaining := size - 20
+	var counter uint32
+	var done int64
+	fmt.Print("正在解密 ... ")
+	for remaining > 0 {
+		if remaining < 4 {
+			return errors.New("密文块长度不完整")
+		}
+		var lb [4]byte
+		if _, err := io.ReadFull(f, lb[:]); err != nil {
+			return err
+		}
+		n := int64(binary.LittleEndian.Uint32(lb[:]))
+		remaining -= 4
+		if n <= 16 || n > int64(chunkSize)+16 || n > remaining {
+			return fmt.Errorf("密文块长度异常：%d", n)
+		}
+		ct := make([]byte, n)
+		if _, err := io.ReadFull(f, ct); err != nil {
+			return err
+		}
+		remaining -= n
+		nonce := make([]byte, 12)
+		copy(nonce, noncePrefix)
+		binary.BigEndian.PutUint32(nonce[8:], counter)
+		plain, err := gcm.Open(nil, nonce, ct, nil)
+		if err != nil {
+			return errors.New("解密校验失败：安装包被修改或密钥不匹配")
+		}
+		if _, err := out.Write(plain); err != nil {
+			return err
+		}
+		counter++
+		done += n + 4
+		if done*100/(size-20) != (done-int64(n)-4)*100/(size-20) {
+			fmt.Printf("\r正在解密 ... %d%%", done*100/(size-20))
+		}
+	}
+	fmt.Println("\r正在解密 ... 100%")
+	return out.Sync()
+}
+
+func hideDir(dir string) {
+	if p, err := syscall.UTF16PtrFromString(dir); err == nil {
+		// FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM
+		procSetFileAttributesW.Call(uintptr(unsafe.Pointer(p)), 0x2|0x4)
+	}
 }
 
 // 解压候选目录：%LOCALAPPDATA% -> %TEMP% -> exe 所在目录。
