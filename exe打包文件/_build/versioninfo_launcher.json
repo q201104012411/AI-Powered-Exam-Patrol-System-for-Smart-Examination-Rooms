@@ -9,12 +9,12 @@
     "FileSubType": "00"
   },
   "StringFileInfo": {
-    "Comments": "智能考场 AI 巡考系统",
+    "Comments": "智能考场 AI 巡考系统 · 智慧考场 AI 巡考终端 · 免安装加密版；首次启动需安装密码",
     "CompanyName": "EDY_POWERQ",
-    "FileDescription": "智能考场 AI 巡考系统 · 加密免安装版",
+    "FileDescription": "智能考场 AI 巡考系统（免安装加密版）",
     "FileVersion": "2.0.0.0",
     "InternalName": "SmartExamPatrol",
-    "LegalCopyright": "© 2026 EDY_POWERQ. All rights reserved.",
+    "LegalCopyright": "© 2026 EDY_POWERQ. All rights reserved. 应用说明：智能考场 AI 巡考终端",
     "LegalTrademarks": "EDY_POWERQ",
     "OriginalFilename": "智能考场AI巡考系统.exe",
     "PrivateBuild": "",

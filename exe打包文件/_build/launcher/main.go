@@ -7,10 +7,14 @@ package main
 
 import (
 	"archive/zip"
+	"bufio"
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -34,6 +38,8 @@ const (
 	maxChunk     = 64 << 20
 	markerName   = ".payload_ready"
 	appTitle     = "智能考场AI巡考系统"
+	installSalt  = "EDY_POWERQ-2026-install"
+	installHash  = "a797785ced94240c008b5352f7362ae15be1336377ea478a274242b58cb72a0d"
 	entryName    = "总控台.py"
 )
 
@@ -71,6 +77,176 @@ func fatal(text string) {
 	os.Exit(1)
 }
 
+func pbkdf2SHA256(password, salt []byte, iter, keyLen int) []byte {
+	const hLen = 32
+	blocks := (keyLen + hLen - 1) / hLen
+	out := make([]byte, 0, blocks*hLen)
+	for block := 1; block <= blocks; block++ {
+		mac := hmac.New(sha256.New, password)
+		mac.Write(salt)
+		var idx [4]byte
+		binary.BigEndian.PutUint32(idx[:], uint32(block))
+		mac.Write(idx[:])
+		u := mac.Sum(nil)
+		t := append([]byte(nil), u...)
+		for i := 1; i < iter; i++ {
+			mac = hmac.New(sha256.New, password)
+			mac.Write(u)
+			u = mac.Sum(nil)
+			for j := range t {
+				t[j] ^= u[j]
+			}
+		}
+		out = append(out, t...)
+	}
+	return out[:keyLen]
+}
+
+func verifyInstallPassword(pw string, salt []byte, hashHex string) bool {
+	want, err := hex.DecodeString(hashHex)
+	if err != nil {
+		return false
+	}
+	got := pbkdf2SHA256([]byte(pw), salt, 120000, len(want))
+	return subtle.ConstantTimeCompare(got, want) == 1
+}
+
+func canWriteDir(dir string) bool {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return false
+	}
+	f, err := os.CreateTemp(dir, ".zk_auth_test_*")
+	if err != nil {
+		return false
+	}
+	name := f.Name()
+	f.Close()
+	os.Remove(name)
+	return true
+}
+
+func installAuthPath(exePath string) string {
+	base := os.Getenv("LOCALAPPDATA")
+	if base == "" {
+		base = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local")
+	}
+	cands := []string{
+		filepath.Join(base, appTitle),
+		filepath.Dir(exePath),
+		os.TempDir(),
+	}
+	for _, d := range cands {
+		if canWriteDir(d) {
+			return filepath.Join(d, ".install_auth")
+		}
+	}
+	return filepath.Join(os.TempDir(), ".install_auth")
+}
+func hideFile(path string) {
+	if p, err := syscall.UTF16PtrFromString(path); err == nil {
+		procSetFileAttributesW.Call(uintptr(unsafe.Pointer(p)), 0x2|0x4)
+	}
+}
+
+func promptInstallPassword() (string, error) {
+	form := `
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$form = New-Object System.Windows.Forms.Form
+$form.Text = '智能考场 AI 巡考系统 · 安装密码'
+$form.ClientSize = New-Object System.Drawing.Size(430, 155)
+$form.StartPosition = 'CenterScreen'
+$form.FormBorderStyle = 'FixedDialog'
+$form.MaximizeBox = $false
+$form.MinimizeBox = $false
+$label = New-Object System.Windows.Forms.Label
+$label.Text = '首次启动，请输入安装密码：'
+$label.AutoSize = $true
+$label.Location = New-Object System.Drawing.Point(18, 18)
+$tb = New-Object System.Windows.Forms.TextBox
+$tb.UseSystemPasswordChar = $true
+$tb.Width = 390
+$tb.Location = New-Object System.Drawing.Point(18, 46)
+$ok = New-Object System.Windows.Forms.Button
+$ok.Text = '确定'
+$ok.DialogResult = 'OK'
+$ok.Location = New-Object System.Drawing.Point(228, 92)
+$cancel = New-Object System.Windows.Forms.Button
+$cancel.Text = '取消'
+$cancel.DialogResult = 'Cancel'
+$cancel.Location = New-Object System.Drawing.Point(318, 92)
+$form.Controls.AddRange(@($label, $tb, $ok, $cancel))
+$form.AcceptButton = $ok
+$form.CancelButton = $cancel
+$r = $form.ShowDialog()
+if ($r -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $tb.Text }
+`
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-STA", "-WindowStyle", "Hidden", "-Command", form)
+	out, err := cmd.Output()
+	if err == nil {
+		return strings.TrimSpace(string(out)), nil
+	}
+	// PowerShell 不可用时的控制台兜底
+	fmt.Print("请输入安装密码：")
+	line, rerr := bufio.NewReader(os.Stdin).ReadString('\n')
+	if rerr != nil && strings.TrimSpace(line) == "" {
+		return "", errors.New("已取消")
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func authSig(salt, hash []byte) []byte {
+	mac := hmac.New(sha256.New, []byte("EDY_POWERQ-2026-auth-sign"))
+	mac.Write(salt)
+	mac.Write(hash)
+	return mac.Sum(nil)
+}
+
+func ensureInstallAuth(exePath string) error {
+	auth := installAuthPath(exePath)
+	if data, err := os.ReadFile(auth); err == nil {
+		lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
+		if len(lines) >= 3 {
+			salt, e1 := hex.DecodeString(strings.TrimSpace(lines[0]))
+			hash, e2 := hex.DecodeString(strings.TrimSpace(lines[1]))
+			sig, e3 := hex.DecodeString(strings.TrimSpace(lines[2]))
+			if e1 == nil && e2 == nil && e3 == nil &&
+				subtle.ConstantTimeCompare(authSig(salt, hash), sig) == 1 {
+				return nil // 首次已录入，后续不再重复输入
+			}
+		}
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		pw := os.Getenv("EXAM_INSTALL_PASSWORD")
+		if pw == "" {
+			var err error
+			pw, err = promptInstallPassword()
+			if err != nil {
+				return err
+			}
+		}
+		if !verifyInstallPassword(pw, []byte(installSalt), installHash) {
+			if attempt < 2 {
+				msgBox(appTitle+" · 安装密码错误", "安装密码不正确，请重试。", 0x10)
+			}
+			continue
+		}
+		salt := make([]byte, 16)
+		if _, err := rand.Read(salt); err != nil {
+			return err
+		}
+		hash := pbkdf2SHA256([]byte(pw), salt, 120000, 32)
+		sig := authSig(salt, hash)
+		body := hex.EncodeToString(salt) + "\n" + hex.EncodeToString(hash) + "\n" +
+			hex.EncodeToString(sig) + "\n"
+		if err := os.WriteFile(auth, []byte(body), 0o600); err != nil {
+			return fmt.Errorf("无法保存安装密码：%w", err)
+		}
+		hideFile(auth)
+		return nil
+	}
+	return errors.New("安装密码不正确")
+}
 func main() {
 	setConsoleUTF8()
 	fmt.Println("智能考场 AI 巡考系统 · 版权 © 2026 EDY_POWERQ")
@@ -78,6 +254,9 @@ func main() {
 	exePath, err := os.Executable()
 	if err != nil {
 		fatal("无法定位自身路径：" + err.Error())
+	}
+	if err := ensureInstallAuth(exePath); err != nil {
+		fatal("安装密码：" + err.Error())
 	}
 	f, err := os.Open(exePath)
 	if err != nil {
