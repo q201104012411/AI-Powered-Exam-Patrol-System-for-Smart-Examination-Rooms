@@ -471,6 +471,7 @@ func main() {
 	} else {
 		fmt.Println("============================================================")
 		fmt.Println("  " + appTitle + " · 安装程序")
+		fmt.Println("  版权 © 2026 EDY_POWERQ · 公司：EDY_POWERQ")
 		fmt.Println("============================================================")
 		fmt.Println("请选择安装位置（建议安装到非系统盘或当前用户目录）。")
 		var ok bool
@@ -501,7 +502,8 @@ func main() {
 	}
 	if !silent {
 		msgBox(appTitle+" · 安装完成", "安装完成！\r\n\r\n安装目录：\r\n"+dir+
-			"\r\n\r\n已生成“启动智能考场.lnk”和“启动智能考场.bat”。\r\n点击“确定”后启动总控台。", 0x40)
+			"\r\n\r\n已生成“启动智能考场.lnk”和“启动智能考场.bat”。"+
+			"\r\n版权 © 2026 EDY_POWERQ · EDY_POWERQ\r\n点击“确定”后启动总控台。", 0x40)
 	}
 	if noLaunch {
 		fmt.Println("安装完成（未启动）：", dir)

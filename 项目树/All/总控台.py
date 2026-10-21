@@ -452,6 +452,8 @@ class App(object):
         self.status = tk.Label(foot, text="就绪", bg=BG, fg=DIM, font=FONT_SMALL,
                                anchor="w")
         self.status.pack(side="left")
+        tk.Label(foot, text="© 2026 EDY_POWERQ", bg=BG, fg=MUTE,
+                 font=FONT_SMALL).pack(side="left", padx=14)
         self.runtime_label = tk.Label(
             foot, text="运行时：%s" % (PYW if os.path.isfile(PYW) else "缺失"),
             bg=BG, fg=MUTE, font=FONT_SMALL, anchor="e")

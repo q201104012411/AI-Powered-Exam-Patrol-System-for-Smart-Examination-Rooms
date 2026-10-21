@@ -1,0 +1,28 @@
+{
+  "FixedFileInfo": {
+    "FileVersion": {"Major": 2, "Minor": 0, "Patch": 0, "Build": 0},
+    "ProductVersion": {"Major": 2, "Minor": 0, "Patch": 0, "Build": 0},
+    "FileFlagsMask": "3f",
+    "FileFlags ": "00",
+    "FileOS": "040004",
+    "FileType": "01",
+    "FileSubType": "00"
+  },
+  "StringFileInfo": {
+    "Comments": "智能考场 AI 巡考系统 · 安装程序",
+    "CompanyName": "EDY_POWERQ",
+    "FileDescription": "智能考场 AI 巡考系统 · 加密安装包",
+    "FileVersion": "2.0.0.0",
+    "InternalName": "SmartExamSetup",
+    "LegalCopyright": "© 2026 EDY_POWERQ. All rights reserved.",
+    "LegalTrademarks": "EDY_POWERQ",
+    "OriginalFilename": "SmartExam-Setup.exe",
+    "PrivateBuild": "",
+    "ProductName": "智能考场 AI 巡考系统",
+    "ProductVersion": "2.0.0",
+    "SpecialBuild": ""
+  },
+  "VarFileInfo": {
+    "Translation": {"LangID": "0804", "CharsetID": "04B0"}
+  }
+}

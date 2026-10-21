@@ -73,6 +73,7 @@ func fatal(text string) {
 
 func main() {
 	setConsoleUTF8()
+	fmt.Println("智能考场 AI 巡考系统 · 版权 © 2026 EDY_POWERQ")
 
 	exePath, err := os.Executable()
 	if err != nil {

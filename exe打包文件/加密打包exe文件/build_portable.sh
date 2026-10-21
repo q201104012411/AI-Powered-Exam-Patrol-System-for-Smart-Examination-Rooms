@@ -23,7 +23,8 @@ rm -rf "$WORK"
 mkdir -p "$WORK/src"
 cp "$LAUNCHER_SRC" "$WORK/src/main.go"
 printf 'module examlauncher\n\ngo 1.20\n' > "$WORK/src/go.mod"
-"$RSRC" -ico "$ICON" -o "$WORK/src/rsrc.syso" -arch amd64
+# goversioninfo 生成的 .syso 已包含图标与版本资源；再叠加 rsrc.syso 会报 too many .rsrc sections
+cp -f "$BASE/_build/version_launcher.syso" "$WORK/src/version.syso"
 
 SECRET="$("$PY" -c 'import secrets; print(secrets.token_hex(32))')"
 KEYBLOB="$("$PY" -c 'import sys; s=bytes.fromhex(sys.argv[1]); print(bytes(b ^ 0x5A for b in s).hex())' "$SECRET")"

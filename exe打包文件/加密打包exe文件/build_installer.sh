@@ -30,7 +30,8 @@ cp "$HERE/installer.go" "$WORK/src/main.go"
 printf 'module examinstaller\n\ngo 1.20\n' > "$WORK/src/go.mod"
 
 echo "[1/4] 嵌入图标并编译安装器 stub ..."
-"$RSRC" -ico "$ICON" -o "$WORK/src/rsrc.syso" -arch amd64
+# goversioninfo 生成的 .syso 已包含图标与版本资源；再叠加 rsrc.syso 会报 too many .rsrc sections
+cp -f "$BASE/_build/version_installer.syso" "$WORK/src/version.syso"
 (
     cd "$WORK/src"
     CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
