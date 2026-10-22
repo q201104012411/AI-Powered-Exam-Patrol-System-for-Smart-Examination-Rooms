@@ -1086,7 +1086,7 @@ class CockpitTab(object):
         try:
             if panel is not None:
                 if visible:
-                    kw = {"fill": "x", "padx": 10, "pady": (0, 6)}
+                    kw = {"side": "bottom", "fill": "x", "padx": 10, "pady": (0, 6)}
                     if status is not None:
                         panel.pack(before=status, **kw)
                     else:

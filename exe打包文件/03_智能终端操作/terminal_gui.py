@@ -455,6 +455,10 @@ class TerminalApp(object):
         ttk.Button(top, text="🔄 切换账号", command=self._build_login).pack(side="right")
         ttk.Button(top, text="退出", command=self.root.destroy).pack(side="right", padx=6)
 
+        self.status = ttk.Label(self.root, text="就绪", foreground="#666")
+        self.status.pack(side="bottom", fill="x", padx=12, pady=(0, 6))
+        self._build_ai_panel(self.root)
+
         nb = ttk.Notebook(self.root)
         nb.pack(fill="both", expand=True, padx=10, pady=(0, 6))
         self.nb = nb
@@ -512,11 +516,7 @@ class TerminalApp(object):
             except Exception:
                 pass
 
-        # 常驻 AI 对话面板：放在 4 个标签页下方，切换界面始终可见
-        self._build_ai_panel(self.root)
-
-        self.status = ttk.Label(self.root, text="就绪", foreground="#666")
-        self.status.pack(fill="x", padx=12, pady=(0, 6))
+        # AI 入口/状态栏已在 Notebook 之前 pack，保证底部条可见
         # 收尾：把原生 tk 控件（复核理由/复核记录等 tk.Text）刷成深色 ——
         # 否则深色界面上会突然出现几块"白板"（ttk 样式管不到它们）。
         try:
@@ -3290,15 +3290,23 @@ class TerminalApp(object):
         except Exception as e:
             messagebox.showerror("AI 对话框", "打开失败：\n%s" % e)
     def _build_ai_panel(self, parent):
+        """底部常驻条：只放入口，完整聊天在独立「AI 对话框」里。
+
+        旧版把 6 行聊天记录+输入框塞在底部，窗口 1180×820 时会被挤出可视区，
+        用户就以为 AI 对话消失了。
+        """
         import ai_assistant
 
         self.ai_chat = ai_assistant.AIChat()
         self.ai_free_var = tk.BooleanVar(value=False)
         self.ai_busy = False
+        self.ai_out = None
+        self.ai_input = None
+        self.ai_send_btn = None
+        self.ai_model_var = tk.StringVar(value=ai_assistant.DEFAULT_MODEL)
 
-        frame = ttk.LabelFrame(parent, text="🤖 AI 助手（本地 ollama）", padding=6)
-        frame.pack(fill="x", padx=10, pady=(0, 6))
-        # 驾驶舱进大屏时一并收起（大屏只留态势），退出时再放回状态栏之前
+        frame = ttk.LabelFrame(parent, text="🤖 AI 助手 · 实时分析", padding=4)
+        frame.pack(side="bottom", fill="x", padx=10, pady=(0, 4))
         self.ai_panel = frame
 
         allowed = console.can_ai_chat(self.session.role)
@@ -3309,55 +3317,21 @@ class TerminalApp(object):
 
         top = ttk.Frame(frame)
         top.pack(fill="x")
-        ttk.Label(top, text="模型：").pack(side="left")
-        self.ai_model_var = tk.StringVar(value=ai_assistant.DEFAULT_MODEL)
-        self.ai_model_box = ttk.Combobox(
-            top, textvariable=self.ai_model_var, width=30,
-            values=(ai_assistant.DEFAULT_MODEL,))
-        self.ai_model_box.pack(side="left")
-        ttk.Button(top, text="🔄", width=3,
-                   command=self._ai_refresh_models).pack(side="left", padx=(2, 8))
-        mode_text = "自由对话" if self.ai_free_var.get() else "智能终端助手"
-        self.ai_mode_label = ttk.Label(top, text="模式：%s" % mode_text,
-                                       foreground="#1f56b8")
-        self.ai_mode_label.pack(side="left", padx=(12, 0))
-        # 提示词跟随页签：切换界面时刷新模式标签
-        try:
-            self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
-        except Exception:
-            pass
-        self._refresh_ai_mode_label()
-
+        ttk.Label(top, text="模型/API 在对话框内切换").pack(side="left")
         self.ai_watch_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(top, text="AI 自动分析（无对话时自动分析状态）",
-                        variable=self.ai_watch_var).pack(side="left", padx=(12, 0))
-        ttk.Button(top, text="立即分析", command=self._ai_force_analyze).pack(side="right")
-        ttk.Button(top, text="清空记录", command=self._ai_clear).pack(side="right", padx=(0, 6))
+        ttk.Checkbutton(top, text="自动分析", variable=self.ai_watch_var).pack(
+            side="left", padx=(10, 0))
         ttk.Button(top, text="💬 AI 对话框", command=self._open_ai_dialog).pack(
-            side="right", padx=(0, 8))
+            side="right")
+        ttk.Button(top, text="清空", command=self._ai_clear).pack(side="right", padx=(0, 6))
+        ttk.Button(top, text="立即分析", command=self._ai_force_analyze).pack(
+            side="right", padx=(0, 6))
 
-        self.ai_out = tk.Text(frame, height=6, wrap="word", font=MONO,
-                              background="#0f172a", foreground="#e2e8f0")
-        self.ai_out.pack(fill="x", pady=(4, 0))
-        self.ai_out.tag_config("ai_user", foreground="#60a5fa")
-        self.ai_out.tag_config("ai_bot", foreground="#34d399")
-        self.ai_out.tag_config("ai_err", foreground="#fca5a5")
-        self.ai_out.tag_config("ai_dim", foreground="#64748b")
-        self.ai_out.insert("end", "🤖 AI 助手就绪\n")
-        self.ai_out.config(state="disabled")
-
-        bar = ttk.Frame(frame)
-        bar.pack(fill="x", pady=(4, 0))
-        self.ai_input = tk.Text(bar, height=2, wrap="word", font=FONT)
-        self.ai_input.pack(side="left", fill="x", expand=True)
-        self.ai_input.bind("<Return>", lambda e: (self._ai_send(), "break")[1])
-        self.ai_send_btn = ttk.Button(bar, text="发送", command=self._ai_send)
-        self.ai_send_btn.pack(side="left", padx=(6, 0))
-
-        # 启动 AI 自动分析守护（无对话且状态变化时触发）
+        self.ai_status = tk.Label(frame, text="就绪：点「AI 对话框」提问，或「立即分析」看当前状态。",
+                                  anchor="w", justify="left", fg="#94a3b8")
+        self.ai_status.pack(fill="x", pady=(2, 0))
         self._ai_last_snapshot = ""
         self.root.after(2000, self._ai_watch_tick)
-
     def _ai_force_analyze(self):
         """手动强制触发一次 AI 自动分析（用户等不及自动轮询时点）"""
         self._ai_last_snapshot = ""   # 强制认为状态有变化
@@ -3402,7 +3376,8 @@ class TerminalApp(object):
         if self.ai_chat.model != model:
             self.ai_chat = ai_assistant.AIChat(model=model)
         self.ai_busy = True
-        self.ai_send_btn.config(state="disabled")
+        if self.ai_send_btn is not None:
+            self.ai_send_btn.config(state="disabled")
         self._ai_append_out("🔎 AI 自动分析：状态有变化，正在分析…", tag="ai_dim")
 
         def work():
@@ -3417,7 +3392,8 @@ class TerminalApp(object):
 
             def apply():
                 self.ai_busy = False
-                self.ai_send_btn.config(state="normal")
+                if self.ai_send_btn is not None:
+                    self.ai_send_btn.config(state="normal")
                 self._ai_remove_thinking()
                 if ok:
                     self._ai_append_out("🔎 AI 自动分析：\n%s" % reply, tag="ai_bot")
@@ -3509,6 +3485,12 @@ class TerminalApp(object):
 
     def _ai_clear(self):
         """清空 AI 对话记录与历史"""
+        if getattr(self, "ai_out", None) is None:
+            import ai_assistant
+            self.ai_chat = ai_assistant.AIChat(model=self.ai_model_var.get().strip())
+            if getattr(self, "ai_status", None) is not None:
+                self.ai_status.config(text="对话记录已清空。")
+            return
         try:
             self.ai_out.config(state="normal")
             self.ai_out.delete("1.0", "end")
@@ -3550,6 +3532,9 @@ class TerminalApp(object):
         threading.Thread(target=work, daemon=True).start()
 
     def _ai_send(self):
+        if getattr(self, "ai_input", None) is None:
+            self._open_ai_dialog()
+            return
         if self.ai_busy:
             self._ai_append_out("⚠ 上一条 AI 请求还未完成，请稍候再试。", tag="ai_err")
             return
@@ -3567,7 +3552,8 @@ class TerminalApp(object):
             return
 
         self.ai_busy = True
-        self.ai_send_btn.config(state="disabled")
+        if self.ai_send_btn is not None:
+            self.ai_send_btn.config(state="disabled")
         self._ai_append_out("🧑 你：%s" % text, tag="ai_user")
         self._ai_append_out("🤖 AI 正在思考，请稍候…", tag="ai_dim")
         self.ai_input.delete("1.0", "end")
@@ -3587,7 +3573,8 @@ class TerminalApp(object):
 
             def apply():
                 self.ai_busy = False
-                self.ai_send_btn.config(state="normal")
+                if self.ai_send_btn is not None:
+                    self.ai_send_btn.config(state="normal")
                 self._ai_remove_thinking()
                 line = "%s：%s" % ("🤖 AI" if ok else "⚠ AI 调用失败", reply)
                 self._ai_append_out(line, tag=("ai_bot" if ok else "ai_err"))
@@ -3607,6 +3594,13 @@ class TerminalApp(object):
 
     def _ai_append_out(self, text, tag=None):
         try:
+            if getattr(self, "ai_status", None) is not None:
+                self.ai_status.config(text=(text or "").replace("\n", " ")[:220])
+        except tk.TclError:
+            pass
+        if getattr(self, "ai_out", None) is None:
+            return
+        try:
             self.ai_out.config(state="normal")
             if tag:
                 self.ai_out.insert("end", text.rstrip() + "\n", tag)
@@ -3618,6 +3612,8 @@ class TerminalApp(object):
             pass
 
     def _ai_remove_thinking(self):
+        if getattr(self, "ai_out", None) is None:
+            return
         try:
             self.ai_out.config(state="normal")
             txt = self.ai_out.get("1.0", "end")

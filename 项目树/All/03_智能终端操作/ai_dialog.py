@@ -120,7 +120,6 @@ class AIDialog(tk.Toplevel):
             self.base_entry.config(state="disabled")
             self.key_entry.config(state="disabled")
             self.allow_chk.config(state="disabled")
-        self._provider_changed()
 
         outwrap = tk.Frame(self, bg=PANEL, highlightbackground=BORDER,
                            highlightthickness=1)
@@ -159,6 +158,7 @@ class AIDialog(tk.Toplevel):
         self.status = tk.Label(foot, text="就绪", bg=BG, fg=DIM,
                                font=("Microsoft YaHei", 9))
         self.status.pack(side="right")
+        self._provider_changed()
         self._append("系统", "AI 对话框已打开。可直接提问，或点「分析当前界面」。",
                      "dim")
 
