@@ -4,7 +4,7 @@ cd /d "%H%"
 
 REM ============================================================
 REM  考生数据保护 · 启动桌面管理界面（Python / tkinter）
-REM    账户：owner / EDY_POWERQ（所有者）
+REM    账户：owner / owner（所有者）
 REM          dpo1/dpo1 · oper1/oper1 · auditor1/auditor1 · inv01/inv01
 REM  停止：双击「停止服务.bat」
 REM  提示：以 owner 登录后可在界面里切换「隐藏命令行窗口」。
@@ -53,7 +53,7 @@ goto :eof
 echo 使用解释器：%PY%
 echo ============================================
 echo   考生数据保护 · 桌面管理界面
-echo   账户：owner / EDY_POWERQ（所有者）
+echo   账户：owner / owner（所有者）
 echo         dpo1/dpo1  oper1/oper1  auditor1/auditor1  inv01/inv01
 echo   加密：国密优先（SM4/SM3），无国密库时回退 AES-GCM
 echo   完整性：SM3 + SM2 签名（无国密库时回退 SHA-256 + RSA）

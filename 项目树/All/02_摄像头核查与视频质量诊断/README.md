@@ -37,7 +37,7 @@
 
 | 用户名 | 默认口令 | 角色 | 说明 |
 | --- | --- | --- | --- |
-| `owner` | `EDY_POWERQ` | 所有者 owner | 全部权限 + 账户管理 + 审计链 + 隐藏 cmd 开关 |
+| `owner` | `owner` | 所有者 owner | 全部权限 + 账户管理 + 审计链 + 隐藏 cmd 开关 |
 | `teacher1` | `teacher1` | 管理员 admin | 日常核查作业；不能删机位、不能管账户、不能看审计 |
 
 > 口令用 **PBKDF2-HMAC-SHA256（120000 轮、16 字节随机盐）** 存成 `pbkdf2$salt$dk`，

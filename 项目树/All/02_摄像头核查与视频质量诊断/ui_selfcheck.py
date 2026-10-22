@@ -95,7 +95,7 @@ def main():
         raise
 
     app.login_user.set("owner")
-    app.login_pwd.set("EDY_POWERQ")
+    app.login_pwd.set("owner")
     app._do_login()
     line("owner 登录并切换主界面", app.user is not None)
 

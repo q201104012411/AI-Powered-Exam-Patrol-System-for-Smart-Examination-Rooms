@@ -9,7 +9,7 @@
   整改工单闭环（派单-整改-复核，整改必须上传整改后截图）/ 关键指标 / 报告导出
 
 账户（与 01 一致的两账户模型，**与桌面端 gui.py 共用同一份**）：
-  owner    / EDY_POWERQ  所有者：全部 + 终端账户管理 + 审计链 + 隐藏 cmd 开关
+  owner    / owner  所有者：全部 + 终端账户管理 + 审计链 + 隐藏 cmd 开关
   teacher1 / teacher1    管理员：台账/基准图/抽查/巡检/工单/报告（不能删机位、不能管账户）
 口令用 PBKDF2-HMAC-SHA256 加盐（120000 轮）存 02 自己的库里，键名 web.accounts，
 哈希与账户逻辑抽在 web_accounts.py，桌面端 import 同一模块，不依赖 01。
@@ -610,7 +610,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("摄像头核查与视频质量诊断 · 网页端")
     print("数据目录：%s" % config.DATA_ROOT)
-    print("账户：owner / EDY_POWERQ（所有者）　teacher1 / teacher1（管理员）")
+    print("账户：owner / owner（所有者）　teacher1 / teacher1（管理员）")
     print("账户与本机桌面界面（gui.py）是同一份：web.accounts @ %s" % config.DB_PATH)
     print("隐藏命令行窗口标记：%s（%s）"
           % (config.HIDE_CMD_FLAG, "开" if web_accounts.hidden_cmd_on() else "关"))

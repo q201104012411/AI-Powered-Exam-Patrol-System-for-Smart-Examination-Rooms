@@ -66,7 +66,7 @@ def main(argv=None):
     print("\n[1/9] 终端登录与权限最小化")
     inv = accounts.authenticate("inv01", "inv01")
     patrol = accounts.authenticate("patrol1", "patrol1")
-    cmd = accounts.authenticate("owner", "EDY_POWERQ")
+    cmd = accounts.authenticate("owner", "owner")
     check("监考员登录", inv is not None and inv.role == config.ROLE_INVIGILATOR)
     check("巡考员登录", patrol is not None and patrol.role == config.ROLE_PATROL)
     check("监考员不能复核（避免自己判自己）", not inv.can("review"))
@@ -235,7 +235,7 @@ def main(argv=None):
     check("擦除后审计链仍完整（留痕可追溯）", store.verify_chain()[0],
           store.verify_chain()[1])
     check("擦除不销毁终端账户",
-          access.AccountStore(store).authenticate("owner", "EDY_POWERQ") is not None)
+          access.AccountStore(store).authenticate("owner", "owner") is not None)
     for _ in range(3):
         fl.soak_tick(note="selfcheck")
     soak = fl.soak_status()

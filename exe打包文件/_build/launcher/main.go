@@ -39,7 +39,9 @@ const (
 	markerName   = ".payload_ready"
 	appTitle     = "智能考场AI巡考系统"
 	installSalt  = "EDY_POWERQ-2026-install"
-	installHash  = "a797785ced94240c008b5352f7362ae15be1336377ea478a274242b58cb72a0d"
+	// PBKDF2-HMAC-SHA256("123456", installSalt, 120000, 32)
+	// 现场安装密码统一为 123456；改密码后必须重新编译启动器。
+	installHash  = "6d6fba442a28f4fc3b96e652cf00b694d3d1d01d65d46981e0e837883b86886e"
 	entryName    = "总控台.py"
 )
 
@@ -54,6 +56,9 @@ var (
 	procSetConsoleTitleW   = kernel32.NewProc("SetConsoleTitleW")
 	procSetFileAttributesW = kernel32.NewProc("SetFileAttributesW")
 	procMessageBoxW        = user32.NewProc("MessageBoxW")
+	procIsDebuggerPresent  = kernel32.NewProc("IsDebuggerPresent")
+	procCheckRemoteDebuggerPresent = kernel32.NewProc("CheckRemoteDebuggerPresent")
+	procGetCurrentProcess  = kernel32.NewProc("GetCurrentProcess")
 )
 
 func setConsoleUTF8() {
@@ -109,6 +114,32 @@ func verifyInstallPassword(pw string, salt []byte, hashHex string) bool {
 	}
 	got := pbkdf2SHA256([]byte(pw), salt, 120000, len(want))
 	return subtle.ConstantTimeCompare(got, want) == 1
+}
+
+// ---------------- 防调试 / 防动态分析 ----------------
+// 说明：这里只保留最稳定的两项用户态检查，避免被安全软件按“黑客工具”误杀；
+// 真正的边界是安装密码 + AES-GCM 载荷加密 + 启动器哈希绑定 + 源码 pyc 加密。
+func debuggerAttached() bool {
+	if r, _, _ := procIsDebuggerPresent.Call(); r != 0 {
+		return true
+	}
+	var present int32
+	h, _, _ := procGetCurrentProcess.Call()
+	if r, _, _ := procCheckRemoteDebuggerPresent.Call(
+		h, uintptr(unsafe.Pointer(&present)));
+		r != 0 && present != 0 {
+		return true
+	}
+	return false
+}
+
+func securityGate() bool {
+	if debuggerAttached() {
+		msgBox(appTitle+" · 安全校验",
+			"检测到调试器，程序已退出。\r\n\r\n请在干净环境中运行。", 0x10)
+		return false
+	}
+	return true
 }
 
 func canWriteDir(dir string) bool {
@@ -206,7 +237,7 @@ func ensureInstallAuth(exePath string) error {
 	auth := installAuthPath(exePath)
 	if data, err := os.ReadFile(auth); err == nil {
 		lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
-		if len(lines) >= 4 && strings.TrimSpace(lines[0]) == "v3" {
+		if len(lines) >= 4 && strings.TrimSpace(lines[0]) == "v4" {
 			salt, e1 := hex.DecodeString(strings.TrimSpace(lines[1]))
 			hash, e2 := hex.DecodeString(strings.TrimSpace(lines[2]))
 			sig, e3 := hex.DecodeString(strings.TrimSpace(lines[3]))
@@ -237,7 +268,7 @@ func ensureInstallAuth(exePath string) error {
 		}
 		hash := pbkdf2SHA256([]byte(pw), salt, 120000, 32)
 		sig := authSig(salt, hash)
-		body := "v3\n" + hex.EncodeToString(salt) + "\n" + hex.EncodeToString(hash) + "\n" +
+		body := "v4\n" + hex.EncodeToString(salt) + "\n" + hex.EncodeToString(hash) + "\n" +
 			hex.EncodeToString(sig) + "\n"
 		if err := os.WriteFile(auth, []byte(body), 0o600); err != nil {
 			return fmt.Errorf("无法保存安装密码：%w", err)
@@ -249,6 +280,10 @@ func ensureInstallAuth(exePath string) error {
 }
 func main() {
 	setConsoleUTF8()
+	// 第一道：启动即检查调试器/分析工具；失败直接退出，不进入密码框。
+	if !securityGate() {
+		return
+	}
 	fmt.Println("智能考场 AI 巡考系统 · 版权 © 2026 EDY_POWERQ")
 
 	exePath, err := os.Executable()
@@ -323,6 +358,10 @@ func main() {
 	}
 
 	if !isReady(target) {
+		// 第二道：解密/解包前再查一次，防止启动后被附加调试器。
+		if !securityGate() {
+			return
+		}
 		var zr *zip.Reader
 		var zrc io.Closer
 		tmpZip := ""

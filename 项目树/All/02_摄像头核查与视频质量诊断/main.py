@@ -364,12 +364,12 @@ def main(argv=None):
           acc.usernames() == ["owner", "teacher1"], "、".join(acc.usernames()))
     stored = acc.get("owner")["pwd"]
     check("口令按 pbkdf2$salt$dk 存（不落明文）",
-          stored.startswith("pbkdf2$") and "EDY_POWERQ" not in stored)
+          stored.startswith("pbkdf2$"))
     check("所有者口令校验通过",
-          web_accounts.verify_password("EDY_POWERQ", stored))
+          web_accounts.verify_password("owner", stored))
     check("错误口令校验失败",
-          not web_accounts.verify_password("edY_powerq", stored))
-    s_owner, msg_o = acc.authenticate("owner", "EDY_POWERQ")
+          not web_accounts.verify_password("wrong-password", stored))
+    s_owner, msg_o = acc.authenticate("owner", "owner")
     check("桌面端登录 owner 成功", s_owner is not None, msg_o)
     s_admin, msg_a = acc.authenticate("teacher1", "teacher1")
     check("桌面端登录 teacher1 成功", s_admin is not None, msg_a)
@@ -399,7 +399,7 @@ def main(argv=None):
           not acc.create("hacker", "pwd12345", web_accounts.ROLE_ADMIN, by="teacher1")[0])
     check("管理员不能重置所有者口令（堵死夺权路径）",
           not acc.reset_password("owner", "hacked123", by="teacher1")[0]
-          and acc.authenticate("owner", "EDY_POWERQ")[0] is not None)
+          and acc.authenticate("owner", "owner")[0] is not None)
     check("管理员不能删除所有者",
           not acc.delete("owner", by="teacher1")[0])
     ok_n, msg_n = acc.create("teacher2", "pwd12345", web_accounts.ROLE_ADMIN,

@@ -42,7 +42,7 @@ print("临时数据目录：%s\n" % TMP)
 store = storage.Store()
 acc = access.AccountStore(store)
 acc.ensure_seed()                     # 临时库第一次要有预置账户
-session = acc.authenticate("owner", "EDY_POWERQ")
+session = acc.authenticate("owner", "owner")
 check("owner 登录", session is not None)
 
 # ---- 1) 默认与非法值 ----

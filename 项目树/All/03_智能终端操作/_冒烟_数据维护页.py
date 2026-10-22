@@ -45,7 +45,7 @@ def login(app, user, pwd):
 
 print("临时数据目录：%s\n" % TMP)
 
-for user, pwd, role, expect_tab in (("owner", "EDY_POWERQ", config.ROLE_OWNER, True),
+for user, pwd, role, expect_tab in (("owner", "owner", config.ROLE_OWNER, True),
                                     ("admin", "admin", config.ROLE_ADMIN, True),
                                     ("patrol1", "patrol1", config.ROLE_PATROL, False)):
     print("=== %s(%s) ===" % (user, role))
@@ -81,7 +81,7 @@ check("清空执行成功", ok, msg)
 check("数据库文件仍在（WinError 32 的根因已消除）", os.path.exists(str(config.DB_PATH)))
 check("告警已清空", len(store.list_alerts(limit=100)) == 0)
 acc = access.AccountStore(store)
-check("终端账户未被删除", acc.authenticate("owner", "EDY_POWERQ") is not None)
+check("终端账户未被删除", acc.authenticate("owner", "owner") is not None)
 ok_chain, why, _ = store.verify_chain()
 check("审计链完整", ok_chain, why)
 

@@ -102,7 +102,7 @@ echo.
 echo ============================================
 echo  全部通过。
 echo  下一步：双击「启动服务.bat」打开桌面管理界面。
-echo  账户：owner/EDY_POWERQ（所有者）、dpo1/dpo1（数据保护负责人）、
+echo  账户：owner/owner（所有者）、dpo1/dpo1（数据保护负责人）、
 echo        auditor1/auditor1（审计员）、oper1/oper1（业务操作员）、inv01/inv01（监考员）
 echo ============================================
 pause

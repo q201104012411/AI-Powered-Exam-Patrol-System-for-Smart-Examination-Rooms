@@ -5,14 +5,12 @@
 关键变化：
 1. 不再自带明文 id_card 列，改由 store.init_schema() 统一建表与迁移，
    人脸端与网页端因此共享同一个数据源（旧版是"GUI 读 JSON、网页写 SQLite"）；
-2. 不再使用固定默认口令 admin/Admin@123，改为首次启动随机生成，
-   写入 初始密码.txt 并在管理员改密后自动删除；
+2. 默认管理员口令统一为账户名 admin（不再随机生成），
+   初始口令写入 初始密码.txt 并在管理员改密后自动删除；
 3. 新增 login_log / data_change_log 记录，谁在什么时候做了什么可追溯。
 """
 import os
-import secrets
 import sqlite3
-import string
 import sys
 from datetime import datetime
 
@@ -35,15 +33,6 @@ def _now():
 
 def get_db():
     return connect(DB_PATH)
-
-
-def _random_password(length=12):
-    alphabet = string.ascii_letters + string.digits
-    while True:
-        pwd = "".join(secrets.choice(alphabet) for _ in range(length))
-        if (any(c.islower() for c in pwd) and any(c.isupper() for c in pwd)
-                and any(c.isdigit() for c in pwd)):
-            return pwd
 
 
 def init_db():
@@ -74,7 +63,7 @@ def init_db():
         admin_count = conn.execute(
             "SELECT COUNT(*) AS c FROM users WHERE role='admin' AND is_active=1").fetchone()["c"]
         if admin_count == 0:
-            pwd = os.environ.get("ADMIN_INIT_PASSWORD") or _random_password()
+            pwd = os.environ.get("ADMIN_INIT_PASSWORD") or "admin"
             pwd_hash = bcrypt.hashpw(pwd.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
             conn.execute("""
                 INSERT INTO users (username, password_hash, role, display_name,
@@ -109,7 +98,7 @@ def log_login(username, ip, ok, detail=""):
 
 def reset_admin_password():
     """
-    把管理员口令重置为新的随机口令（用于消除历史遗留的默认口令 Admin@123）。
+    把管理员口令重置为账户名 admin（统一口令策略）。
     返回 (ok, pwd_file or msg)
     """
     import bcrypt
@@ -119,7 +108,7 @@ def reset_admin_password():
                            "ORDER BY id LIMIT 1").fetchone()
         if not row:
             return False, "库中没有管理员账户，请先执行 python db.py"
-        pwd = os.environ.get("ADMIN_INIT_PASSWORD") or _random_password()
+        pwd = os.environ.get("ADMIN_INIT_PASSWORD") or "admin"
         conn.execute("UPDATE users SET password_hash=?, must_change_password=1, is_active=1 "
                      "WHERE id=?",
                      (bcrypt.hashpw(pwd.encode("utf-8"), bcrypt.gensalt()).decode("utf-8"),
@@ -154,4 +143,4 @@ if __name__ == "__main__":
         print("请立即登录并修改密码（改密后该文件自动删除）。")
     else:
         print("管理员账户已存在，未做改动。")
-        print("若历史上使用过默认口令 Admin@123，请执行：python db.py --reset-admin")
+        print("若历史上使用过其它默认口令，请执行：python db.py --reset-admin 重置为 admin/admin")

@@ -139,7 +139,7 @@ def main():
         raise
 
     app.u_var.set("owner")
-    app.p_var.set("EDY_POWERQ")
+    app.p_var.set("owner")
     app._do_login()
     line("owner 登录并进入主界面", app.session is not None
          and getattr(app.session, "role", "") == config.ROLE_OWNER)

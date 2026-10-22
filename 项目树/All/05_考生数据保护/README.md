@@ -47,7 +47,7 @@ python gui.py              :: 直接启动桌面管理界面
 > `'owner' is not recognized as an internal or external command`。
 > 因此**不要**用 UTF-8 编辑器另存这些 .bat，也不要在里面加 `chcp`。
 
-账户：`owner/EDY_POWERQ`（所有者）、`dpo1/dpo1`（数据保护负责人）、
+账户：`owner/owner`（所有者）、`dpo1/dpo1`（数据保护负责人）、
 `auditor1/auditor1`（审计员）、`oper1/oper1`（业务操作员）、`inv01/inv01`（监考员）。
 
 ## 它做了什么
@@ -120,6 +120,23 @@ python cli.py keyring --reset --yes --with-demo         :: 整目录备份后重
 
 或直接双击 **「修复密钥环.bat」**（会先让你确认）。重置前会把 `data\` 整目录备份成
 同级的 `data_backup_<时间戳>\`，旧文件一个都不会丢，只是**解不开了**。
+
+## 安装包加密与防解包（exe 发布）
+
+> 完整的命令、密钥派生与改密码步骤见 [使用说明.md](使用说明.md) 的
+> 「八、加密、完整性与密钥 → 安装包加密与防解包」。这里只列要点。
+
+- **加密单文件 exe**：`一键打包.sh` 不再把 payload 明文追加，而是用
+  **AES-256-GCM（1 MB 分块，每块校验）** 加密 `payload.zip`，再追加 40 字节
+  `ZKINS002` 尾部索引；启动器只有在密钥、salt、自身 stub 哈希三者匹配时才解得开。
+- **安装密码**：首次启动输入 **`123456`**（PBKDF2-HMAC-SHA256，120000 轮）；
+  通过后写隐藏的 `.install_auth`（`v4`），旧版 `v3` 认证文件自动失效。
+- **防调试**：`IsDebuggerPresent` / `CheckRemoteDebuggerPresent`，启动时与解包前各查一次；
+  不扫描进程、不调用 `ntdll`，避免被安全软件按“黑客工具”误杀。
+- **源码硬化**：解包后业务 `.py` 编译为 `optimize=2` 的 `.pyc`，用每目录随机
+  `.zk_key` 异或加密，`.py` 替换为内存加载器；安装目录隐藏。
+- **边界**：这是"提高逆向/提取门槛"，不是不可破解的 DRM；安装后本机仍需可读才能运行。
+  正式交付应改用强安装密码，并叠加代码签名/授权服务器/原生编译。
 
 ## 与其他专题联动
 

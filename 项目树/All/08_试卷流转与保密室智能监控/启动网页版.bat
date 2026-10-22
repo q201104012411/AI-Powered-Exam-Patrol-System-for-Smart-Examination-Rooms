@@ -53,7 +53,7 @@ if not defined FLAG if exist "%H%data\hide_cmd.on" set "FLAG=%H%data\hide_cmd.on
 echo ============================================
 echo   试卷流转与保密室智能监控 · 网页端
 echo   地址：http://127.0.0.1:5020/
-echo   账户：owner / EDY_POWERQ（所有者）  teacher1 / teacher1（管理员）
+echo   账户：owner / owner（所有者）  teacher1 / teacher1（管理员）
 echo   解释器：%PY%
 echo ============================================
 start "" /min powershell -NoProfile -Command "Start-Sleep 3; Start-Process 'http://127.0.0.1:5020/'"

@@ -122,7 +122,7 @@ class UiPermissionBase(unittest.TestCase):
 
     ROLE = config.ROLE_OWNER
     USER = "owner"
-    PWD = "EDY_POWERQ"
+    PWD = "owner"
 
     @classmethod
     def setUpClass(cls):

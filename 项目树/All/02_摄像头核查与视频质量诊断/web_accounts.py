@@ -32,7 +32,7 @@ MIN_PWD_LEN = 6
 
 # 首次运行自动预置（与网页端原有默认账户一致）
 DEFAULT_ACCOUNTS = {
-    "owner": {"pwd": "EDY_POWERQ", "role": ROLE_OWNER, "name": "系统所有者"},
+    "owner": {"pwd": "owner", "role": ROLE_OWNER, "name": "系统所有者"},
     "teacher1": {"pwd": "teacher1", "role": ROLE_ADMIN, "name": "考务管理员"},
 }
 

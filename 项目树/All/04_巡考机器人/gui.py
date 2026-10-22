@@ -925,11 +925,19 @@ class RobotApp(object):
             self._link_buttons.append(rb)
         tk.Label(toolbar, text="帧率", bg=PANEL, fg=DIM,
                  font=FONT_SMALL).pack(side="left", padx=(12, 2))
-        self.fps_var = tk.IntVar(value=int(self.cfg.get("fps", 10)))
+        try:
+            _fps0 = int(float(self.cfg.get("fps", 10)))
+        except (TypeError, ValueError):
+            _fps0 = 10
+        self._fps_last = min(20, max(1, _fps0))
+        self.fps_var = tk.StringVar(value=str(self._fps_last))
         fps = ttk.Spinbox(toolbar, from_=1, to=20, width=4,
-                          textvariable=self.fps_var, command=self._fps_changed)
+                          textvariable=self.fps_var, command=self._fps_changed,
+                          validate="key",
+                          validatecommand=(self.root.register(self._validate_fps), "%P"))
         fps.pack(side="left")
         fps.bind("<FocusOut>", lambda e: self._fps_changed())
+        fps.bind("<Return>", lambda e: self._fps_changed())
         self._link_buttons.append(fps)
         self.cam_source_label = tk.Label(toolbar, text="等待连接", bg=PANEL,
                                          fg=MUTE, font=("Microsoft YaHei", 8),
@@ -1688,14 +1696,31 @@ class RobotApp(object):
         cfg["cam"] = cam
         robot_link.save_config(cfg)
 
-    def _fps_changed(self):
+    def _validate_fps(self, value):
+        if value == "":
+            return True
+        return value.isdigit() and 1 <= int(value) <= 20
+
+    def _fps_value(self):
         try:
-            fps = int(self.fps_var.get())
-        except (TypeError, ValueError):
-            fps = 4
+            fps = int(float(str(self.fps_var.get()).strip()))
+        except (TypeError, ValueError, tk.TclError):
+            fps = self._fps_last
         fps = min(20, max(1, fps))
+        self._fps_last = fps
+        try:
+            self.fps_var.set(str(fps))
+        except tk.TclError:
+            pass
+        return fps
+
+    def _fps_changed(self):
+        fps = self._fps_value()
         if self.cam_worker is not None:
-            self.cam_worker.set_fps(fps)
+            try:
+                self.cam_worker.set_fps(fps)
+            except (TypeError, ValueError):
+                pass
         cfg = robot_link.load_config()
         cfg["fps"] = fps
         robot_link.save_config(cfg)
@@ -2379,7 +2404,7 @@ class RobotApp(object):
             cfg.update({"linear": round(float(self.linear_var.get()), 3),
                         "angular": round(float(self.angular_var.get()), 3),
                         "cam": self.cam_var.get(),
-                        "fps": int(self.fps_var.get()),
+                        "fps": self._fps_value(),
                         "port": int(self.port_var.get() or 8080)})
             robot_link.save_config(cfg)
         except Exception:                                    # noqa: BLE001

@@ -318,7 +318,7 @@ ROLE_ACTIONS = {
 
 # 默认账户（首次运行自动预置）
 DEFAULT_ACCOUNTS = {
-    "owner":    {"password": "EDY_POWERQ", "role": ROLE_OWNER},
+    "owner":    {"password": "owner", "role": ROLE_OWNER},
     "teacher1": {"password": "teacher1",   "role": ROLE_ADMIN},
 }
 PWD_MIN_LEN = 6

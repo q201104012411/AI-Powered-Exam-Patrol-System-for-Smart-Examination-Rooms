@@ -341,7 +341,7 @@ class TerminalApp(object):
         ttk.Button(box, text="登  录", command=self._do_login).pack(fill="x")
         self.login_msg = ttk.Label(box, text="", foreground="#c00")
         self.login_msg.pack(pady=(8, 0))
-        ttk.Label(box, text="预置账户（口令请向系统所有者索取）\n"
+        ttk.Label(box, text="预置账户（默认口令 = 账户名）\n"
                             "owner（所有者·最高权限）\n"
                             "admin（管理员·日常全权）\n"
                             "patrol1（巡考员·全部考场）\n"

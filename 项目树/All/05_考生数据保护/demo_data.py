@@ -56,7 +56,7 @@ def generate(store, accounts, lifecycle, gov, rights, now=None):
         sessions[username] = s
         return s
 
-    owner = sess("owner", "EDY_POWERQ")
+    owner = sess("owner", "owner")
     oper = sess("oper1", "oper1")
     dpo = sess("dpo1", "dpo1")
 

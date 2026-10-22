@@ -88,7 +88,7 @@ def main():
 
     # ================= 账户与权限（与网页端同源的基础） =================
     sec("〇、账户与权限（网页端 / 桌面端共用同一份账户）")
-    s, why = accounts.login("owner", "EDY_POWERQ")
+    s, why = accounts.login("owner", "owner")
     chk("owner 可用默认口令登录", s is not None, why)
     s2, why2 = accounts.login("owner", "wrong-pwd")
     chk("错误口令被拒绝", s2 is None, why2)
@@ -543,7 +543,7 @@ def main():
         "try:",
         "    st = storage.Store(); am = web_accounts.AccountManager(st)",
         "    am.ensure_defaults()",
-        "    sess, why = am.login('owner', 'EDY_POWERQ')",
+        "    sess, why = am.login('owner', 'owner')",
         "    assert sess is not None, why",
         "    assert app.login is not None, 'LoginFrame 未构建'",
         "    app.login.destroy()",

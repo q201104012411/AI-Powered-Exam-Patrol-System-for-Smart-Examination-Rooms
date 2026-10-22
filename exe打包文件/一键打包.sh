@@ -58,6 +58,8 @@ RSRC=""
 GO_OS=""
 GO_ARCH=""
 WORK=""
+SECRET=""
+KEYBLOB=""
 
 # 颜色（仅在终端里启用）
 if [ -t 1 ]; then
@@ -366,14 +368,30 @@ def icon_info(path):
 
 def check_payload(path):
     size = os.path.getsize(path)
-    if size < 32:
+    if size < 40:
         raise ValueError("文件太小，不是单文件包")
     with open(path, "rb") as f:
+        # 新版：40 字节尾部（AES-256-GCM 加密 payload，ZKINS002）
+        f.seek(-40, 2)
+        tr = f.read(40)
+        if tr[:8] == b"ZKINS002":
+            off, length = struct.unpack("<QQ", tr[8:24])
+            if off <= 0 or length <= 0:
+                raise ValueError("加密尾部索引数值无效")
+            if off + length + 40 != size:
+                raise ValueError(
+                    "加密尾部索引与文件长度不一致（offset=%d size=%d file=%d）"
+                    % (off, length, size))
+            f.seek(off)
+            if f.read(8) != b"ZKENC003":
+                raise ValueError("加密 payload 缺少 ZKENC003 标识")
+            return off, length, True
+        # 旧版：24 字节尾部（明文 zip，ZKSFX001）
         f.seek(-24, 2)
         trailer = f.read(24)
         magic, off, length = struct.unpack("<8sQQ", trailer)
         if magic != b"ZKSFX001":
-            raise ValueError("尾部索引魔术字不是 ZKSFX001")
+            raise ValueError("尾部索引魔术字不是 ZKSFX001 / ZKINS002")
         if off <= 0 or length <= 0:
             raise ValueError("尾部索引数值无效")
         if off + length + 24 != size:
@@ -383,7 +401,7 @@ def check_payload(path):
         f.seek(off)
         if f.read(4) != b"PK\x03\x04":
             raise ValueError("payload 起点不是 ZIP 本地头")
-    return off, length
+    return off, length, False
 
 
 def main():
@@ -402,8 +420,9 @@ def main():
             print("     错误：exe 没有嵌入图标资源", file=sys.stderr)
             return 1
         if mode == "--full":
-            off, length = check_payload(path)
-            print("     尾部索引      : payload @ %d, %d bytes" % (off, length))
+            off, length, encrypted = check_payload(path)
+            print("     尾部索引      : payload @ %d, %d bytes（%s）"
+                  % (off, length, "AES-256-GCM 加密" if encrypted else "明文 ZIP"))
     except ValueError as exc:
         print("     错误：%s" % exc, file=sys.stderr)
         return 1
@@ -440,6 +459,7 @@ esac
 [ -f "$ROOT/runtime/pythonw.exe" ] || die "缺少 runtime/pythonw.exe（自带 Python 运行时）"
 [ -f "$LAUNCHER_DIR/main.go" ] || die "缺少启动器源码：$LAUNCHER_DIR/main.go"
 [ -f "$BUILD/pack.py" ] || die "缺少打包脚本：$BUILD/pack.py"
+[ -f "$ROOT/加密打包exe文件/encrypt_payload.py" ] || die "缺少加密脚本：$ROOT/加密打包exe文件/encrypt_payload.py"
 ok "项目文件完整"
 
 if ! detect_python; then
@@ -538,11 +558,18 @@ info "rsrc 写入资源段 ..."
 "$RSRC" -ico "$WORK/app.ico" -o "$WORK/src/rsrc.syso" -arch "$GO_ARCH"
 [ -s "$WORK/src/rsrc.syso" ] || die "rsrc 生成 .syso 失败"
 
-info "go build（首次编译约 10-60 秒）..."
+info "生成一次性载荷密钥（不落盘明文）..."
+SECRET="$("${PY[@]}" -c 'import secrets; print(secrets.token_hex(32))')"
+KEYBLOB="$("${PY[@]}" -c 'import sys; s=bytes.fromhex(sys.argv[1]); print(bytes(b ^ 0x5A for b in s).hex())' "$SECRET")"
+
+info "go build（-trimpath -s -w，并注入异或密钥；首次编译约 10-60 秒）..."
 (
     cd "$WORK/src"
-    CGO_ENABLED=0 GO111MODULE=on \
-        go build -trimpath -buildvcs=false -ldflags="-s -w" \
+    # 固定 Go 1.21.13：新版 Go 生成的启动器会被部分安全软件按启发式误杀；
+    # 1.21.13 在当前构建机上可稳定通过 Windows Defender。首次使用会自动下载工具链。
+    GOTOOLCHAIN=go1.21.13 CGO_ENABLED=0 GO111MODULE=on \
+        go build -trimpath -buildvcs=false \
+        -ldflags="-s -w -buildid= -X main.keyBlob=$KEYBLOB" \
         -o "$WORK/launcher.exe" .
 )
 [ -s "$WORK/launcher.exe" ] || die "启动器编译失败"
@@ -575,28 +602,46 @@ info "启动器：$WORK/launcher.exe"
 info "payload：$PAYLOAD"
 info "输出　：$OUT"
 
-"${PY[@]}" - "$WORK/launcher.exe" "$PAYLOAD" "$OUT" <<'PY'
+info "AES-256-GCM 分块加密 payload（每块独立 GCM 校验）..."
+"${PY[@]}" "$ROOT/加密打包exe文件/encrypt_payload.py" \
+    --payload "$PAYLOAD" \
+    --stub "$WORK/launcher.exe" \
+    --out "$WORK/payload.enc" \
+    --secret "$SECRET" \
+    --meta "$WORK/payload.meta.json"
+[ -s "$WORK/payload.enc" ] || die "payload 加密失败"
+cp -f "$WORK/payload.meta.json" "$BUILD/payload.meta.json"
+
+"${PY[@]}" - "$WORK/launcher.exe" "$WORK/payload.enc" "$OUT" "$WORK/payload.meta.json" <<'PY'
+import json
 import os
-import shutil
 import struct
 import sys
 
-launcher, payload, out = sys.argv[1], sys.argv[2], sys.argv[3]
+launcher, enc, out, meta_path = sys.argv[1:5]
+with open(meta_path, "r", encoding="utf-8") as f:
+    meta = json.load(f)
+salt = bytes.fromhex(meta["salt"])
 tmp = out + ".building"
+offset = os.path.getsize(launcher)
+enc_size = os.path.getsize(enc)
 
 try:
     with open(tmp, "wb") as dst, open(launcher, "rb") as src:
-        shutil.copyfileobj(src, dst, 1024 * 1024)
-
-    off = os.path.getsize(tmp)
-    plen = os.path.getsize(payload)
-
-    with open(tmp, "ab") as dst, open(payload, "rb") as src:
-        shutil.copyfileobj(src, dst, 1024 * 1024)
-        dst.write(struct.pack("<8sQQ", b"ZKSFX001", off, plen))
-
+        while True:
+            b = src.read(1 << 20)
+            if not b:
+                break
+            dst.write(b)
+    with open(tmp, "ab") as dst, open(enc, "rb") as src:
+        while True:
+            b = src.read(1 << 20)
+            if not b:
+                break
+            dst.write(b)
+        dst.write(struct.pack("<8sQQ16s", b"ZKINS002", offset, enc_size, salt))
     os.replace(tmp, out)
-except PermissionError as exc:
+except PermissionError:
     try:
         os.remove(tmp)
     except OSError:
@@ -613,8 +658,9 @@ except Exception as exc:
     sys.exit(1)
 
 print("     启动器：%d bytes" % os.path.getsize(launcher))
-print("     payload：%d bytes" % plen)
-print("     索引　：offset=%d size=%d" % (off, plen))
+print("     密文　：%d bytes" % enc_size)
+print("     索引　：ZKINS002 offset=%d size=%d" % (offset, enc_size))
+print("     加密　：AES-256-GCM / 1 MB 分块 / 每块 GCM 校验")
 PY
 
 [ -s "$OUT_POSIX" ] || die "未生成输出文件：$OUT"

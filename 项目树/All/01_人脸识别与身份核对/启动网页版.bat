@@ -45,7 +45,7 @@ if not exist "%PYW%" set "PYW=%PY%"
 
 echo ============================================
 echo   网页操作面板  http://127.0.0.1:5000/
-echo   账号：owner / EDY_POWERQ   或   teacher1 / teacher1
+echo   账号：owner / owner   或   teacher1 / teacher1
 echo   解释器：%PY%
 echo ============================================
 start "" /min powershell -NoProfile -Command "Start-Sleep 3; Start-Process 'http://127.0.0.1:5000/'"

@@ -61,7 +61,7 @@ def main(argv=None):
     rights = rights_mod.RightsService(store, life, accounts)
     reporter = report_mod.Reporter(store, life, gov, rights)
 
-    owner = accounts.authenticate("owner", "EDY_POWERQ", place="考务办",
+    owner = accounts.authenticate("owner", "owner", place="考务办",
                                   device="DEV-01")
     oper = accounts.authenticate("oper1", "oper1", place="考务办", device="DEV-01")
     inv = accounts.authenticate("inv01", "inv01", place="A-01 考场", device="DEV-02")
@@ -257,7 +257,7 @@ def main(argv=None):
             denied_ops += 1
     check("越权操作全部被拦截（6/6）", denied_ops == 6, "拦截 %d 条" % denied_ops)
     check("口令加盐存储（非明文）",
-          "EDY_POWERQ" not in str(accounts.list_accounts().get("owner", {}).get("pwd", "")))
+          str(accounts.list_accounts().get("owner", {}).get("pwd", "")).startswith("pbkdf2$"))
     check("错误口令被拒", accounts.authenticate("owner", "wrong") is None)
     check("不能新建同级或更高账户",
           not accounts.create("owner2", "Passw0rd!", config.ROLE_OWNER,
@@ -266,7 +266,7 @@ def main(argv=None):
           not accounts.create("x1", "Passw0rd!", config.ROLE_VIEWER,
                               by_role=oper.role)[0])
     # 持续校验：高风险会话对高风险动作要求二次确认
-    risky = accounts.authenticate("owner", "EDY_POWERQ", place="", device="",
+    risky = accounts.authenticate("owner", "owner", place="", device="",
                                   hour=3)
     blocked = False
     try:

@@ -50,7 +50,7 @@ class Base(unittest.TestCase):
         self.rev = review_mod.Reviewer(self.store, hub=self.hub)
         self.patrol = self.accounts.authenticate("patrol1", "patrol1")
         self.inv = self.accounts.authenticate("inv01", "inv01")
-        self.cmd = self.accounts.authenticate("owner", "EDY_POWERQ")
+        self.cmd = self.accounts.authenticate("owner", "owner")
         self.checker = self.accounts.authenticate("check1", "check1")
 
 
@@ -156,7 +156,7 @@ class TestAccess(Base):
         self.assertIn("owner", names)
         self.assertNotIn("command", names)
         self.assertEqual(names["owner"]["role"], config.ROLE_OWNER)
-        self.assertIsNotNone(acc2.authenticate("owner", "EDY_POWERQ"))
+        self.assertIsNotNone(acc2.authenticate("owner", "owner"))
         self.assertIsNone(acc2.authenticate("command", "command"))
 
     def test_admin_role_daily_full_but_no_manage(self):

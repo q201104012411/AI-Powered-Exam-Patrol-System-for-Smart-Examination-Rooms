@@ -123,7 +123,7 @@ class LoginFrame(ttk.Frame):
 
         ttk.Button(box, text="登 录", command=self._login).grid(
             row=5, column=0, columnspan=2, sticky="ew", pady=6)
-        ttk.Label(box, text="首次运行默认账户：owner / EDY_POWERQ（所有者）\n"
+        ttk.Label(box, text="首次运行默认账户：owner / owner（所有者）\n"
                             "teacher1 / teacher1（管理员）——登录后请尽快改口令",
                   foreground=(ui_theme.DIM if ui_theme else "#888"),
                   justify="center").grid(

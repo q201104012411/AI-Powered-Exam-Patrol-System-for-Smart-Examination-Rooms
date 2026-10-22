@@ -4,7 +4,7 @@ r"""
 
 设计取舍：
   · 总控台是单文件 exe 的入口，必须先有一道统一的登录门禁；
-  · 账户默认值与 03 智能终端保持一致（owner/EDY_POWERQ、admin/admin、
+  · 账户默认值与 03 智能终端保持一致（owner/owner、admin/admin、
     patrol1/patrol1、inv01/inv01、check1/check1），现场不需要再记一套新口令；
   · 口令只存 PBKDF2-HMAC-SHA256 加盐哈希，不落明文；
   · 每个账户带"可进入模块"清单，owner 为 *（全部）。
@@ -33,7 +33,7 @@ ROLE_LEVEL = {"owner": 3, "admin": 2, "patrol": 1,
 
 # 默认账户：用户名 / 口令 / 角色 / 姓名 / 可进入模块（"*"=全部）
 DEFAULT_ACCOUNTS = [
-    ("owner", "EDY_POWERQ", "owner", "系统所有者", "*"),
+    ("owner", "owner", "owner", "系统所有者", "*"),
     ("admin", "admin", "admin", "考务管理员",
      ["01", "02", "03", "05", "06", "07", "08", "09", "10", "11"]),
     ("patrol1", "patrol1", "patrol", "巡考员01",

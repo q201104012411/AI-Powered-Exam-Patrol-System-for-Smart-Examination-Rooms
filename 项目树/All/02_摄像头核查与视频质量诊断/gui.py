@@ -321,7 +321,7 @@ class App(object):
 
         ttk.Label(box, text="账户与网页版（http://127.0.0.1:5010/）是同一份",
                   foreground=GRAY_MUTED, font=FONT_SMALL).pack(pady=(16, 0))
-        ttk.Label(box, text="默认账户：owner（所有者）、teacher1（管理员）　口令由系统管理员掌握，不在界面显示",
+        ttk.Label(box, text="默认账户：owner（所有者）、teacher1（管理员）　默认口令 = 账户名",
                   foreground=GRAY_MUTED, font=FONT_SMALL).pack()
         self.root.bind("<Return>", lambda _e: self._do_login())
         if ui_theme is not None:

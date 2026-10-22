@@ -22,7 +22,7 @@ DEFAULT_ACCOUNTS = [
     # 用户名,    口令,        角色,                 姓名,      可见考场（空=全部）
     ("patrol1", "patrol1", config.ROLE_PATROL,      "巡考员01", []),
     ("inv01",   "inv01",   config.ROLE_INVIGILATOR, "监考员A01", ["A-01"]),
-    ("owner",   "EDY_POWERQ", config.ROLE_OWNER,     "系统所有者", []),
+    ("owner",   "owner", config.ROLE_OWNER,     "系统所有者", []),
     # 管理员：日常全权（巡检/处置/复核/核验），但没有终端账户管理与危险操作
     ("admin",   "admin",   config.ROLE_ADMIN,       "考务管理员", []),
     ("check1",  "check1",  config.ROLE_CHECKER,     "核验员01", []),
@@ -95,8 +95,8 @@ class AccountStore(object):
         self.store = store
 
     # 旧账户名 -> (新账户名, 新口令, 新角色)。老库里已有的账户自动迁移。
-    RENAMES = {"command": ("owner", "EDY_POWERQ", config.ROLE_OWNER),
-               "Owner": ("owner", "EDY_POWERQ", config.ROLE_OWNER)}
+    RENAMES = {"command": ("owner", "owner", config.ROLE_OWNER),
+               "Owner": ("owner", "owner", config.ROLE_OWNER)}
 
     def ensure_seed(self):
         data = self.store.get_kv(self.KEY)

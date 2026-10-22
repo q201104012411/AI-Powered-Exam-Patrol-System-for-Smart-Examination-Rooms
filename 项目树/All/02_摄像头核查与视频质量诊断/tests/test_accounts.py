@@ -59,7 +59,7 @@ class TestLogin(AccountsBase):
         self.assertEqual(self.acc.get("teacher1")["role"], web_accounts.ROLE_ADMIN)
 
     def test_login_ok(self):
-        s, msg = self.acc.authenticate("owner", "EDY_POWERQ")
+        s, msg = self.acc.authenticate("owner", "owner")
         self.assertIsNotNone(s)
         self.assertEqual(s.username, "owner")
         self.assertEqual(s.role, web_accounts.ROLE_OWNER)
@@ -79,7 +79,7 @@ class TestLogin(AccountsBase):
         self.assertIsNone(self.acc.authenticate("", "")[0])
 
     def test_login_writes_audit_both_ways(self):
-        self.acc.authenticate("owner", "EDY_POWERQ")
+        self.acc.authenticate("owner", "owner")
         self.acc.authenticate("owner", "bad")
         actions = [r["action"] for r in self.store.audit_rows(limit=50)]
         self.assertIn("登录成功", actions)
@@ -93,7 +93,7 @@ class TestLogin(AccountsBase):
         salt, dk = stored.split("$")[1], stored.split("$")[2]
         self.assertEqual(len(salt), 32)        # 16 字节十六进制
         self.assertEqual(len(dk), 64)          # sha256 十六进制
-        self.assertTrue(web_accounts.verify_password("EDY_POWERQ", stored))
+        self.assertTrue(web_accounts.verify_password("owner", stored))
         self.assertFalse(web_accounts.verify_password("edY_powerq", stored))
 
     def test_verify_rejects_garbage(self):
@@ -105,8 +105,8 @@ class TestLogin(AccountsBase):
         """老库里已存的口令（用网页端原算法生成）必须还能验过：salt/格式完全一致"""
         salt = "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
         stored = ("pbkdf2$%s$" % salt) + __import__("hashlib").pbkdf2_hmac(
-            "sha256", "EDY_POWERQ".encode("utf-8"), bytes.fromhex(salt), 120000).hex()
-        self.assertTrue(web_accounts.verify_password("EDY_POWERQ", stored))
+            "sha256", "owner".encode("utf-8"), bytes.fromhex(salt), 120000).hex()
+        self.assertTrue(web_accounts.verify_password("owner", stored))
 
 
 # ==================== 权限矩阵 ====================
@@ -140,7 +140,7 @@ class TestPermissionMatrix(AccountsBase):
         self.assertIn("仅所有者", t)
 
     def test_session_mirrors_matrix(self):
-        owner = self.session("owner", "EDY_POWERQ")
+        owner = self.session("owner", "owner")
         admin = self.session("teacher1", "teacher1")
         self.assertTrue(owner.can("audit_view"))
         self.assertFalse(admin.can("audit_view"))
@@ -182,7 +182,7 @@ class TestPrivilegeEscalation(AccountsBase):
         ok, msg = self.acc.reset_password("owner", "hacked123", by="teacher1")
         self.assertFalse(ok)
         self.assertIn("权限不足", msg)
-        self.assertIsNotNone(self.acc.authenticate("owner", "EDY_POWERQ")[0])
+        self.assertIsNotNone(self.acc.authenticate("owner", "owner")[0])
 
     def test_admin_cannot_delete_owner(self):
         ok, msg = self.acc.delete("owner", by="teacher1")
@@ -283,7 +283,7 @@ class TestAccountCRUD(AccountsBase):
         self.assertTrue(raw["owner"]["pwd"].startswith("pbkdf2$"))
         # 新开一个 Store（相当于换个进程/换网页端）读到的还是同一份
         other = web_accounts.Accounts(storage.Store(db_path=self.db))
-        self.assertIsNotNone(other.authenticate("owner", "EDY_POWERQ")[0])
+        self.assertIsNotNone(other.authenticate("owner", "owner")[0])
 
 
 # ==================== 隐藏 cmd 标记 ====================
@@ -350,13 +350,13 @@ class TestSharedAccounts(AccountsBase):
         salt = "aabbccddeeff00112233445566778899"
         import hashlib
         old = {"owner": {"pwd": "pbkdf2$%s$%s" % (
-            salt, hashlib.pbkdf2_hmac("sha256", "EDY_POWERQ".encode(),
+            salt, hashlib.pbkdf2_hmac("sha256", "owner".encode(),
                                       bytes.fromhex(salt), 120000).hex()),
             "role": "owner", "name": "系统所有者"}}
         self.store.set_kv("web.accounts", old)
         acc = web_accounts.Accounts(self.store)
         self.assertEqual(acc.usernames(), ["owner"])
-        self.assertIsNotNone(acc.authenticate("owner", "EDY_POWERQ")[0])
+        self.assertIsNotNone(acc.authenticate("owner", "owner")[0])
         self.assertEqual(self.store.get_kv("web.accounts")["owner"]["pwd"], old["owner"]["pwd"])
 
     def test_fix_broken_records_without_crash(self):

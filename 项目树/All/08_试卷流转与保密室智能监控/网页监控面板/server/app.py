@@ -827,7 +827,7 @@ def main():
     print(" 试卷流转与保密室智能监控 · 网页面板")
     print(" 地址：http://%s:%d/" % (args.host, args.port))
     print(" 数据目录：%s" % config.DATA_ROOT)
-    print(" 默认账户：owner / EDY_POWERQ（所有者）、teacher1 / teacher1（管理员）")
+    print(" 默认账户：owner / owner（所有者）、teacher1 / teacher1（管理员）")
     print("=" * 66)
     app.run(host=args.host, port=args.port, debug=args.debug,
             threaded=True, use_reloader=False)

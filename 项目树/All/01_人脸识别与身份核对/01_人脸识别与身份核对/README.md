@@ -34,12 +34,12 @@ start_gui(打开图形化界面).bat
 网页操作面板：
 
 ```bat
-python 网页操作面板\server\db.py            :: 首次会生成随机初始密码
+python 网页操作面板\server\db.py            :: 首次会创建 admin/admin
 python 网页操作面板\server\启动后端.bat      :: 浏览器访问 http://127.0.0.1:5000
 ```
 
-> 初始密码为**随机生成**，见 `网页操作面板/server/初始密码.txt`；管理员改密后该文件自动删除。
-> 若历史库用过默认口令 `Admin@123`，执行 `python 网页操作面板\server\db.py --reset-admin` 重置。
+> 默认管理员口令为**账户名** `admin`，初始口令同时写入 `网页操作面板/server/初始密码.txt`，管理员改密后该文件自动删除。
+> 若历史库用过其它默认口令，执行 `python 网页操作面板\server\db.py --reset-admin` 重置为 `admin/admin`。
 
 ---
 
@@ -103,7 +103,7 @@ python 网页操作面板\server\启动后端.bat      :: 浏览器访问 http:/
 | 网页端密钥 | JWT 默认密钥写死在源码里 | 环境变量优先，否则首次随机生成并持久化 |
 | 网页端 CORS | `origins="*"` | 白名单（`ALLOWED_ORIGINS`） |
 | 保存考生 | 先 `DELETE` 全表再逐条 `INSERT` | 事务化 UPSERT，任一条非法整批回滚 |
-| 默认口令 | `admin/Admin@123` 写在前端与文档里 | 随机初始口令；改密后删除密码文件；**首次登录不再强制改密**，改为顶部横幅提示 |
+| 默认口令 | `admin/Admin@123` 写在前端与文档里 | 统一为 `admin/admin`（口令 = 账户名）；改密后删除密码文件；**首次登录不再强制改密**，改为顶部横幅提示 |
 | 账户禁用 | 旧 token 仍可用 8 小时 | 每次请求回查数据库，禁用即时生效；角色以库为准 |
 
 ---
@@ -408,7 +408,7 @@ python push_oplog.py --alert FACE_MISMATCH --detail "现场核验不符" --room 
 ├── captures\                  现场抓拍留档
 ├── logs\                      界面操作日志
 ├── .jwt_secret                本机 JWT 密钥（自动生成）
-└── init_admin_password.txt    随机初始口令（管理员改密后自动删除）
+└── init_admin_password.txt    初始口令（默认 admin/admin，管理员改密后自动删除）
 ```
 
 数据根目录解析优先级：**环境变量 `EXAM_HOME`** → **本目录的 `exam_home.txt`**（一行路径）
@@ -466,7 +466,7 @@ python enroll.py check-photos --faces     :: 参考照体检（损坏 / 无人�
 
 | 账户 | 默认口令 | 角色 | 权限 |
 | --- | --- | --- | --- |
-| `owner` | `EDY_POWERQ` | 所有者 | 查看操作记录、**清空日志** |
+| `owner` | `owner` | 所有者 | 查看操作记录、**清空日志** |
 | `teacher1` | `teacher1` | 管理员 | 查看操作记录，**不能清空日志** |
 
 - **GUI 启动必须先登录**，登录成功前不进入核验界面；窗口标题显示当前用户与角色

@@ -63,6 +63,6 @@ if errorlevel 1 (
 
 echo.
 echo ============================================
-echo  修复完成：双击「启动服务.bat」即可用 owner / EDY_POWERQ 登录
+echo  修复完成：双击「启动服务.bat」即可用 owner / owner 登录
 echo ============================================
 pause

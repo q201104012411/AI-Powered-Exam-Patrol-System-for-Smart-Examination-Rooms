@@ -8,7 +8,7 @@
     teacher 教师   —— 仅可核验
 
 默认账户（首次初始化时创建）：
-    owner    / EDY_POWERQ    系统所有者
+    owner    / owner    系统所有者
     teacher1 / teacher1      考务管理员（默认口令较弱，登录时会提示尽快修改）
 
 密码用 bcrypt 存储，与网页端 auth.py 一致。
@@ -26,7 +26,7 @@ ROLE_TEXT = {ROLE_OWNER: "所有者", ROLE_ADMIN: "管理员", ROLE_TEACHER: "�
 
 # 默认账户：用户名 -> (密码, 角色, 显示名, 是否强制改密)
 DEFAULT_ACCOUNTS = [
-    ("owner", "EDY_POWERQ", ROLE_OWNER, "系统所有者", 0),
+    ("owner", "owner", ROLE_OWNER, "系统所有者", 0),
     ("teacher1", "teacher1", ROLE_ADMIN, "考务管理员", 1),
 ]
 

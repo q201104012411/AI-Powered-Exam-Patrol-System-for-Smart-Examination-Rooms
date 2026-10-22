@@ -8,7 +8,7 @@ r"""
   选中模块看说明，双击（或回车 / 「进入模块」）用自带 runtime 直接启动。
 
 账户：
-  默认值与 03 智能终端一致（owner/EDY_POWERQ、admin/admin、patrol1/patrol1、
+  默认值与 03 智能终端一致（owner/owner、admin/admin、patrol1/patrol1、
   inv01/inv01、check1/check1），存 总控台账户.json，PBKDF2 加盐哈希。
   owner 可改口令、增删账户、调整"可进入模块"范围。
 
@@ -727,7 +727,7 @@ class App(object):
      模块内部登录由总控台签发的 SSO 令牌自动完成。
 
 二、默认账户（首次登录后请到「账户管理」修改）
-  owner    / EDY_POWERQ   所有者：全部模块
+  owner    / owner   所有者：全部模块
   admin    / admin        管理员：业务与保障模块（不含 00 集成联动）
   patrol1  / patrol1      巡考员：01/02/03/10/11/12
   inv01    / inv01        监考员：03/10

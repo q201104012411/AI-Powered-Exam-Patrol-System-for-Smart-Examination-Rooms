@@ -82,8 +82,12 @@ class CameraWorker(threading.Thread):
             return self._cam
 
     def set_fps(self, fps):
+        try:
+            value = float(fps)
+        except (TypeError, ValueError):
+            return
         with self._lock:
-            self._fps = min(20.0, max(0.5, float(fps)))
+            self._fps = min(20.0, max(0.5, value))
         self._wake.set()
 
     def stop(self):

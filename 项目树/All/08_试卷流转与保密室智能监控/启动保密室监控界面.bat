@@ -96,7 +96,7 @@ setlocal DisableDelayedExpansion
 echo ============================================
 echo   试卷流转与保密室智能监控 · 桌面界面
 echo   解释器：%PY%
-echo   账户：owner / EDY_POWERQ（所有者）  teacher1 / teacher1（管理员）
+echo   账户：owner / owner（所有者）  teacher1 / teacher1（管理员）
 echo ============================================
 "%PY%" "%H%gui.py"
 set "RC=%ERRORLEVEL%"

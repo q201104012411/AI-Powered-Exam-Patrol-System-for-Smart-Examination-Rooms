@@ -8,7 +8,7 @@
 3. 保存考生数据改为事务化 UPSERT，且逐条校验——
    旧版是"先 DELETE 全表再逐条 INSERT"，中途出错会丢库；
 4. 新增单独同意登记接口与数据变更留痕；
-5. 启动时不再打印默认口令（改为随机初始口令 + 本地文件提示）。
+5. 启动时不打印明文口令（初始口令为账户名 admin，另写本地文件提示）。
 
 本版新增：
 6. 登录后**不再强制改密**：/api/login 与 /api/me 照旧返回 must_change_password，
@@ -898,7 +898,7 @@ if __name__ == "__main__":
     print("=" * 58)
     print("数据库：%s" % config.DB_PATH)
     if info["created_admin"]:
-        print("已初始化管理员账户 admin（随机初始密码）")
+        print("已初始化管理员账户 admin（口令 admin，即账户名）")
         print("初始密码文件：%s" % info["pwd_file"])
         print("首次登录必须改密；改密后该文件会被自动删除。")
     else:

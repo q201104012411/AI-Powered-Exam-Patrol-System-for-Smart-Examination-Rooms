@@ -93,7 +93,7 @@ def main():
     r = C.post("/api/login", json={"username": "owner", "password": "bad"})
     chk("错误口令 -> 401", r.status_code == 401, r.status_code)
 
-    r = C.post("/api/login", json={"username": "owner", "password": "EDY_POWERQ"})
+    r = C.post("/api/login", json={"username": "owner", "password": "owner"})
     j = r.get_json()
     chk("owner 登录成功", r.status_code == 200 and j.get("ok"), j.get("error"))
     TOK = j.get("token", "")

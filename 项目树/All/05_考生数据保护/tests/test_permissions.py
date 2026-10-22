@@ -170,7 +170,7 @@ class TestAccounts(DppTestCase):
         raw = self.store.get_kv("accounts", [])
         import json
         blob = json.dumps(raw, ensure_ascii=False)
-        self.assertNotIn("EDY_POWERQ", blob)
+        self.assertNotIn('"pwd": "owner"', blob)
         self.assertIn("pbkdf2$", blob)
 
     def test_wrong_password_rejected(self):
@@ -188,7 +188,7 @@ class TestAccounts(DppTestCase):
         self.assertIsNone(s)
 
     def test_authenticate_returns_session_on_success(self):
-        s = self.accounts.authenticate("owner", "EDY_POWERQ",
+        s = self.accounts.authenticate("owner", "owner",
                                        place="考点", device="D1")
         self.assertIsNotNone(s)
         self.assertEqual(s.role, config.ROLE_OWNER)

@@ -31,7 +31,7 @@ class RunModeTest(unittest.TestCase):
             db_path=os.path.join(_TMP, "mode_%s.db" % models.new_id("T")))
         self.acc = access.AccountStore(self.store)
         self.acc.ensure_seed()
-        self.session = self.acc.authenticate("owner", "EDY_POWERQ")
+        self.session = self.acc.authenticate("owner", "owner")
         self.hub = alerts.AlertHub(self.store)
         self.reviewer = review.Reviewer(self.store)
 

@@ -97,7 +97,7 @@ ACTION_TEXT = {
 # 预置账户（首次运行自动写入 kv 的 accounts）
 DEFAULT_ACCOUNTS = [
     # 用户名,       口令,          角色,              姓名,            可见考场（空=全部）
-    ("owner",      "EDY_POWERQ",   ROLE_OWNER,        "系统所有者",     []),
+    ("owner",      "owner",   ROLE_OWNER,        "系统所有者",     []),
     ("dpo1",       "dpo1",         ROLE_DPO,          "数据保护负责人", []),
     ("auditor1",   "auditor1",     ROLE_AUDITOR,      "独立审计员",     []),
     ("oper1",      "oper1",        ROLE_OPERATOR,     "考务操作员",     []),

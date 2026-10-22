@@ -320,8 +320,8 @@ class App(object):
         self.e_pwd.pack(ipady=5)
 
         self._btn(card, "登 录", self._do_login).pack(fill="x", pady=(18, 0))
-        tk.Label(card, text="通用口令均为账号名：owner/EDY_POWERQ ｜ security/security\n"
-                            "dpo1/dpo1 ｜ auditor1/auditor1 ｜ oper1/oper1 ｜ inv01/inv01",
+        tk.Label(card, text="通用口令均为账号名：owner/owner ｜ dpo1/dpo1\n"
+                            "auditor1/auditor1 ｜ oper1/oper1 ｜ inv01/inv01",
                  bg=C_PANEL, fg=C_DIM, font=("Microsoft YaHei UI", 9),
                  justify="center").pack(pady=(12, 0))
         self.root.bind("<Return>", lambda _e: self._do_login())
