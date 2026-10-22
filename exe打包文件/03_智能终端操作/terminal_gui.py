@@ -3281,6 +3281,14 @@ class TerminalApp(object):
         except Exception:
             pass
 
+    def _open_ai_dialog(self):
+        try:
+            import ai_dialog
+            self.ai_dialog_win = ai_dialog.AIDialog(
+                self.root, self.session, self._ai_snapshot, self._current_interface,
+                on_permission_changed=self._refresh_console_ui)
+        except Exception as e:
+            messagebox.showerror("AI 对话框", "打开失败：\n%s" % e)
     def _build_ai_panel(self, parent):
         import ai_assistant
 
@@ -3325,6 +3333,8 @@ class TerminalApp(object):
                         variable=self.ai_watch_var).pack(side="left", padx=(12, 0))
         ttk.Button(top, text="立即分析", command=self._ai_force_analyze).pack(side="right")
         ttk.Button(top, text="清空记录", command=self._ai_clear).pack(side="right", padx=(0, 6))
+        ttk.Button(top, text="💬 AI 对话框", command=self._open_ai_dialog).pack(
+            side="right", padx=(0, 8))
 
         self.ai_out = tk.Text(frame, height=6, wrap="word", font=MONO,
                               background="#0f172a", foreground="#e2e8f0")

@@ -233,11 +233,113 @@ def ollama_chat(model, messages, timeout=CHAT_TIMEOUT, num_predict=384):
     return _cli_generate(model, messages, timeout, num_predict) + ("cli",)
 
 
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "data", "ai_provider.json")
+PROVIDER_OLLAMA = "ollama"
+PROVIDER_OPENAI = "openai"
+
+
+def load_provider_settings():
+    """读取 AI 后端设置；默认本地 ollama。API key 只落在本机 data 目录。"""
+    data = {"provider": PROVIDER_OLLAMA, "model": DEFAULT_MODEL,
+            "base_url": "http://127.0.0.1:11434", "api_key": ""}
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        if isinstance(raw, dict):
+            data.update({k: raw.get(k, v) for k, v in data.items()})
+    except Exception:                                        # noqa: BLE001
+        pass
+    if data.get("provider") not in (PROVIDER_OLLAMA, PROVIDER_OPENAI):
+        data["provider"] = PROVIDER_OLLAMA
+    data["model"] = (data.get("model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    data["base_url"] = (data.get("base_url") or "").strip()
+    return data
+
+
+def save_provider_settings(data):
+    try:
+        os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
+        tmp = SETTINGS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, SETTINGS_FILE)
+        try:
+            os.chmod(SETTINGS_FILE, 0o600)
+        except OSError:
+            pass
+        return True, ""
+    except Exception as exc:                                 # noqa: BLE001
+        return False, str(exc)
+
+
+def _openai_url(base_url, suffix):
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        base = "http://127.0.0.1:8000"
+    if base.endswith("/v1"):
+        return base + suffix
+    return base + "/v1" + suffix
+
+
+def openai_models(base_url="", api_key="", timeout=8):
+    req = urllib.request.Request(_openai_url(base_url, "/models"),
+                                 headers={"Accept": "application/json"})
+    if api_key:
+        req.add_header("Authorization", "Bearer " + api_key)
+    with _API_OPENER.open(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", "replace")
+    data = json.loads(raw)
+    out = []
+    for item in data.get("data", []):
+        name = item.get("id") or item.get("name")
+        if name:
+            out.append(str(name))
+    return sorted(set(out))
+
+
+def _openai_chat(model, messages, base_url="", api_key="", timeout=CHAT_TIMEOUT,
+                 num_predict=384):
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "temperature": 0.3,
+        "max_tokens": num_predict,
+    }
+    req = urllib.request.Request(
+        _openai_url(base_url, "/chat/completions"),
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST")
+    if api_key:
+        req.add_header("Authorization", "Bearer " + api_key)
+    try:
+        with _API_OPENER.open(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+        data = json.loads(raw)
+        choices = data.get("choices") or []
+        if not choices:
+            return False, "", "API 返回空 choices", "api"
+        msg = choices[0].get("message") or {}
+        text = (msg.get("content") or "").strip()
+        if not text:
+            return False, "", "API 返回空内容", "api"
+        return True, text, "", "api"
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:200]
+        return False, "", "API HTTP %s：%s" % (exc.code, detail), "api"
+    except Exception as exc:                                 # noqa: BLE001
+        return False, "", "API 调用失败：%s" % exc, "api"
+
 class AIChat(object):
     MAX_HISTORY = 6
 
-    def __init__(self, model=None):
+    def __init__(self, model=None, provider=PROVIDER_OLLAMA, base_url="", api_key=""):
         self.model = (model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+        self.provider = provider if provider in (PROVIDER_OLLAMA, PROVIDER_OPENAI) else PROVIDER_OLLAMA
+        self.base_url = base_url or "http://127.0.0.1:11434"
+        self.api_key = api_key or ""
         self.history = []
 
     def ask(self, text, operator="", tier="full", source="terminal",
@@ -250,8 +352,14 @@ class AIChat(object):
                     + self.history
                     + [{"role": "user", "content": text}])
         started = time.time()
-        ok, reply, err, transport = ollama_chat(self.model, messages, timeout=timeout,
-                                                num_predict=(512 if free_mode else 384))
+        if self.provider == PROVIDER_OPENAI:
+            ok, reply, err, transport = _openai_chat(
+                self.model, messages, base_url=self.base_url, api_key=self.api_key,
+                timeout=timeout, num_predict=(512 if free_mode else 384))
+        else:
+            ok, reply, err, transport = ollama_chat(
+                self.model, messages, timeout=timeout,
+                num_predict=(512 if free_mode else 384))
         duration_ms = int((time.time() - started) * 1000)
         if ok:
             self.history.append({"role": "user", "content": text})
@@ -271,7 +379,8 @@ class AIChat(object):
 
 
 def analyze_activity(snapshot, model=None, operator="", tier="full",
-                     source="terminal", timeout=CHAT_TIMEOUT, interface=None):
+                     source="terminal", timeout=CHAT_TIMEOUT, interface=None,
+                     provider=PROVIDER_OLLAMA, base_url="", api_key=""):
     """不对话时的自动分析：提示词同样跟随当前界面，避免答非所问。"""
     model = (model or DEFAULT_MODEL).strip() or DEFAULT_MODEL
     scene = INTERFACE_PROMPTS.get((interface or "").strip(), "")
@@ -283,8 +392,13 @@ def analyze_activity(snapshot, model=None, operator="", tier="full",
         {"role": "user", "content": (snapshot or "（无快照）")},
     ]
     started = time.time()
-    ok, reply, err, transport = ollama_chat(model, messages, timeout=timeout,
-                                            num_predict=256)
+    if provider == PROVIDER_OPENAI:
+        ok, reply, err, transport = _openai_chat(
+            model, messages, base_url=base_url, api_key=api_key,
+            timeout=timeout, num_predict=256)
+    else:
+        ok, reply, err, transport = ollama_chat(model, messages, timeout=timeout,
+                                                num_predict=256)
     if ok:
         pass
     try:
