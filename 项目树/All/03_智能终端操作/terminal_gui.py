@@ -475,8 +475,8 @@ class TerminalApp(object):
         nb.add(self.tab_cockpit, text="  🛰 驾驶舱  ")
         # 命令台：具备 maintain 的角色可见（下发命令属管控操作）
         self.can_maintain = self.session.can("maintain")
-        if self.can_maintain:
-            nb.add(self.tab_cmd, text="  📡 命令台  ")
+        # 命令台始终显示：无权限时也打开页面并说明原因，避免“标签消失/打不开”的误解。
+        nb.add(self.tab_cmd, text="  📡 命令台  ")
         nb.add(self.tab_alerts, text="  告警处置  ")
         nb.add(self.tab_review, text="  复核留痕  ")
         nb.add(self.tab_verify, text="  手持核验  ")
@@ -494,6 +494,8 @@ class TerminalApp(object):
         self._build_ops_tab()
         if self.can_maintain:
             self._build_cmd_tab()
+        else:
+            self._build_cmd_denied()
         if self.can_maintain:
             self._build_data_tab()
         # 驾驶舱：数据来自本终端自己的库，任何角色都可看（只读态势）
@@ -2517,9 +2519,13 @@ class TerminalApp(object):
         tier = console.console_tier(self.session.role)
         ai_chat_ok = console.can_ai_chat(self.session.role)
         if tier == console.CONSOLE_TIER_NONE and not ai_chat_ok:
-            messagebox.showerror("权限不足",
-                                 "命令控制台未开启，或当前角色（%s）不在允许范围内。"
-                                 % config.ROLE_TEXT.get(self.session.role, self.session.role))
+            messagebox.showerror(
+                "命令台/控制台未启用",
+                "当前角色：%s。\n\n"
+                "命令台需要 maintain 权限（所有者/管理员）；\n"
+                "命令控制台还需要所有者开启总开关：\n"
+                "「运行状态与管控 → 权限控制台 → 命令控制台总开关」。"
+                % config.ROLE_TEXT.get(self.session.role, self.session.role))
             return
         modes = console.console_modes(self.session.role)
         available, why = self.cmd_bridge.available()
@@ -2803,6 +2809,25 @@ class TerminalApp(object):
             pass
 
     # ================= 命令台（发布命令给 01/02） =================
+    def _build_cmd_denied(self):
+        """命令台无权限时的说明页（不再把标签整个隐藏）。"""
+        f = ttk.Frame(self.tab_cmd, padding=18)
+        f.pack(fill="both", expand=True)
+        role = config.ROLE_TEXT.get(self.session.role, self.session.role)
+        ttk.Label(f, text="📡 命令台 · 当前角色无下发权限",
+                  font=FONT_B, foreground=UI_WARN).pack(anchor="w")
+        ttk.Label(
+            f, justify="left", wraplength=820,
+            text=("当前登录角色：%s。\n\n"
+                  "「命令台」用于向 01/02 设备下发白名单命令（ping/status/logs_tail/"
+                  "rebuild_index/selftest），需要 `maintain` 权限。\n"
+                  "请用「所有者」或「管理员」账号登录；巡考员/监考员/核验员按最小权限"
+                  "设计不开放此页。\n\n"
+                  "如果你是所有者却仍然看到此页，请检查总控台登录角色是否被切换成了"
+                  "巡考员账号。") % role).pack(anchor="w", pady=(12, 8))
+        ttk.Button(f, text="返回驾驶舱",
+                   command=lambda: self.nb.select(self.tab_cockpit)).pack(anchor="w")
+
     def _build_cmd_tab(self):
         """
         智能终端"发布命令"台：向 01/02 等设备下发命令并查看回执。
